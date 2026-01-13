@@ -1,0 +1,46 @@
+{
+  "folders": [
+    { "path": ".", "name": "App_Apps" },
+    { "path": "../Base_Core" },
+    { "path": "../Base_Qt" },
+    { "path": "../Devices" }
+  ],
+  "launch": {
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Debug script",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "phase_control.Demo.script",
+        "console": "integratedTerminal",
+        "justMyCode": true
+      },
+      {
+        "name": "Debug app.py",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "${workspaceFolder:Phase_Control}/app.py",
+        "cwd": "${workspaceFolder:Phase_Control}",
+        "console": "integratedTerminal",
+        "justMyCode": true
+      }
+    ]
+  },
+  "settings": {
+    "python.analysis.indexing": true,
+    "python.analysis.autoImportCompletions": true,
+    "python.analysis.extraPaths": [
+      "${workspaceFolder:Base_Core}",
+      "${workspaceFolder:Base_Qt}",
+      "${workspaceFolder:Devices}"
+    ],
+    "python.analysis.useLibraryCodeForTypes": true,
+    "python.analysis.packageIndexDepths": [
+      { "name": "PySide6", "depth": 6, "includeAllSymbols": true },
+      { "name": "shiboken6", "depth": 3, "includeAllSymbols": true },
+      { "name": "base_core", "depth": 5, "includeAllSymbols": true },
+      { "name": "base_qt", "depth": 8, "includeAllSymbols": true },
+    ]
+  }
+}
