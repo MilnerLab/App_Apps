@@ -32,7 +32,7 @@ $extensionsFile    = Join-Path $root "_extensions.txt"
 
 # Windows-only: which Python to use via the py launcher (if present)
 # If you need 32-bit on Windows, set to "-3.13-32" (or your exact installed version)
-$windowsPySpec = "-3.13"   # e.g. "-3.13" or "-3.13-32"
+$windowsPySpec = "-3.10"   # e.g. "-3.13" or "-3.13-32"
 
 # -----------------------------
 # Helpers
