@@ -4,6 +4,7 @@ import time
 
 import numpy as np
 import PySpin
+import cv2
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
@@ -206,6 +207,92 @@ class MainWindow(QMainWindow):
             self._thread.wait(2000)
 
         super().closeEvent(event)
+
+
+def adaptive_threshold_and_contours(
+    frame: np.ndarray,
+    block_size: int = 31,
+    C: int = 5,
+    method: int = cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+    thresh_type: int = cv2.THRESH_BINARY,
+    retrieval_mode: int = cv2.RETR_EXTERNAL,
+    approx_method: int = cv2.CHAIN_APPROX_SIMPLE,
+):
+    """
+    Takes a frame (np.ndarray), applies adaptiveThreshold, then finds contours.
+
+    Parameters
+    ----------
+    frame : np.ndarray
+        Input image. Can be grayscale (H,W) or color (H,W,3).
+    block_size : int
+        Neighborhood size for adaptive thresholding. Must be odd and >= 3.
+    C : int
+        Constant subtracted from the mean/gaussian weighted mean.
+    method : int
+        cv2.ADAPTIVE_THRESH_MEAN_C or cv2.ADAPTIVE_THRESH_GAUSSIAN_C.
+    thresh_type : int
+        cv2.THRESH_BINARY or cv2.THRESH_BINARY_INV.
+    retrieval_mode : int
+        cv2.RETR_EXTERNAL, cv2.RETR_TREE, etc.
+    approx_method : int
+        cv2.CHAIN_APPROX_SIMPLE, cv2.CHAIN_APPROX_NONE, etc.
+
+    Returns
+    -------
+    binary : np.ndarray
+        Thresholded binary image (uint8, values 0/255).
+    contours : list
+        Contours as returned by cv2.findContours.
+    hierarchy : np.ndarray | None
+        Contour hierarchy (depends on retrieval_mode).
+    """
+    if frame is None or not isinstance(frame, np.ndarray):
+        raise TypeError("frame must be a numpy array.")
+
+    # Convert to grayscale if needed
+    if frame.ndim == 3:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    elif frame.ndim == 2:
+        gray = frame
+    else:
+        raise ValueError("frame must be HxW (grayscale) or HxWx3 (BGR).")
+
+    # Ensure uint8 for adaptiveThreshold
+    if gray.dtype != np.uint8:
+        # Scale/clip safely if it's float or higher bit-depth
+        g = gray.astype(np.float32)
+        g = np.nan_to_num(g)
+        g_min, g_max = float(np.min(g)), float(np.max(g))
+        if g_max > g_min:
+            g = (g - g_min) * (255.0 / (g_max - g_min))
+        gray_u8 = np.clip(g, 0, 255).astype(np.uint8)
+    else:
+        gray_u8 = gray
+
+    # block_size must be odd and >= 3
+    if block_size < 3:
+        block_size = 3
+    if block_size % 2 == 0:
+        block_size += 1
+
+    binary = cv2.adaptiveThreshold(
+        gray_u8,
+        maxValue=255,
+        adaptiveMethod=method,
+        thresholdType=thresh_type,
+        blockSize=block_size,
+        C=C,
+    )
+
+    # OpenCV version difference: findContours returns 2 or 3 values
+    res = cv2.findContours(binary, retrieval_mode, approx_method)
+    if len(res) == 2:
+        contours, hierarchy = res
+    else:
+        _, contours, hierarchy = res
+
+    return binary, contours, hierarchy
 
 
 def main():
