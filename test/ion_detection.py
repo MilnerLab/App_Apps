@@ -14,18 +14,18 @@ class Hit:
 
 @dataclass
 class ContourConfig:
-    adaptive: bool = True
-    threshold_value: int = 128              # used if adaptive == False
-    adaptive_blocksize: int = 31            # must be odd >= 3
-    adaptive_shift: float = 5.0             # C in OpenCV (C is subtracted). C++ uses -shift.
-    contour_min_size: int = 10              # minimum number of points in contour
-    contour_min_area: int = 10              # inclusive lower area cut
-    contour_max_area: int = 1_000_000       # inclusive upper area cut
+    adaptive: bool = False
+    threshold_value: int = 1            # used if adaptive == False
+    adaptive_blocksize: int = 3            # must be odd >= 3
+    adaptive_shift: float = 3.0             # C in OpenCV (C is subtracted). C++ uses -shift.
+    contour_min_size: int = 1              # minimum number of points in contour
+    contour_min_area: int = 0              # inclusive lower area cut
+    contour_max_area: int = 3      # inclusive upper area cut
 
 
 def threshold_and_extract_hits(
     frame: np.ndarray,
-    config: ContourConfig,
+    config: ContourConfig = ContourConfig(),
     composit: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, List[Hit]]:
     """
@@ -112,7 +112,7 @@ def threshold_and_extract_hits(
         )
 
     # --- Find contours ---
-    res = cv2.findContours(frame_threshold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    res = cv2.findContours(frame_threshold,  cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if len(res) == 2:
         contours, _hier = res
     else:
