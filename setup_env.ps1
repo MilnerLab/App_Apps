@@ -88,9 +88,29 @@ function Ensure-Pip([string] $PythonExe) {
 }
 
 function Resolve-CodeCli {
-    foreach ($cmd in @("code", "code-insiders", "codium", "code-oss")) {
-        if (Get-Command $cmd -ErrorAction SilentlyContinue) { return $cmd }
+    if ($script:OnWindows) {
+        $candidates = @(
+            "code.cmd",
+            "code-insiders.cmd",
+            "codium.cmd",
+            "code-oss.cmd",
+            "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd",
+            "$env:ProgramFiles\Microsoft VS Code\bin\code.cmd",
+            "$env:ProgramFiles(x86)\Microsoft VS Code\bin\code.cmd"
+        )
+
+        foreach ($candidate in $candidates) {
+            $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
+            if ($cmd) { return $cmd.Source }
+            if (Test-Path $candidate) { return $candidate }
+        }
     }
+
+    foreach ($cmd in @("code", "code-insiders", "codium", "code-oss")) {
+        $found = Get-Command $cmd -ErrorAction SilentlyContinue
+        if ($found) { return $found.Source }
+    }
+
     return $null
 }
 
@@ -134,13 +154,16 @@ if (Test-Path $extensionsFile) {
     if (-not $codeCmd) {
         Write-Warning "VS Code CLI not found (code/codium). Skipping extension install."
     } else {
-        Get-Content $extensionsFile | ForEach-Object {
-            $ext = $_.Trim()
-            if ($ext -and -not $ext.StartsWith("#")) {
+        Write-Host "Using VS Code CLI: $codeCmd"
+
+        Get-Content -Encoding UTF8 $extensionsFile |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -and -not $_.StartsWith("#") } |
+            ForEach-Object {
+                $ext = $_
                 Write-Host "Installing VS Code extension '$ext'..."
-                Invoke-Native $codeCmd @("--install-extension", $ext)
+                Invoke-Native $codeCmd @("--install-extension", $ext, "--force")
             }
-        }
     }
 } else {
     Write-Host "No _extensions.txt found. Skipping extension install."
