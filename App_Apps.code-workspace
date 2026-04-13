@@ -15,12 +15,14 @@
       "program": "${file}",
 	    "cwd": "${workspaceFolder:App_Apps}",
 	    "env": { "PYTHONPATH": "${workspaceFolder:App_Apps}" },
+      "python": "${workspaceFolder:App_Apps}/.venv/bin/python",
       "console": "integratedTerminal",
       "justMyCode": true
     } 
     ]
   },
   "settings": {
+    "python.defaultInterpreterPath": "${workspaceFolder:App_Apps}/.venv/bin/python",
     "python.analysis.indexing": true,
     "python.analysis.autoImportCompletions": true,
     "python.analysis.extraPaths": [

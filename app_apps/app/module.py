@@ -32,10 +32,10 @@ class AppModule(BaseModule):
 
         # --- Shell VM + MenuBar -------------------------------------------
         c.register_factory(MainWindowVM, lambda c: MainWindowVM(c.get(IUiDispatcher), ctx.event_bus))
-        c.register_factory(MenuBarVM, lambda c: MenuBarVM())
+        c.register_factory(MenuBarVM, lambda c: MenuBarVM(c.get(IUiDispatcher), ctx.event_bus, c.get(IViewRegistry)))
         
         # If you want exactly one menubar instance, you can register it as singleton.
-        c.register_singleton(MenuBarView, lambda c: MenuBarView(c.get(MenuBarVM), c.get(IViewRegistry)))
+        c.register_singleton(MenuBarView, lambda c: MenuBarView(c.get(MenuBarVM)))
 
         # Register MENUBAR view spec (MainWindowViewBase will pick this up automatically)
         reg = c.get(IViewRegistry)
