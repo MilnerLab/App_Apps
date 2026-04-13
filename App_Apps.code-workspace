@@ -9,22 +9,15 @@
     "version": "0.2.0",
     "configurations": [
       {
-        "name": "Debug script",
-        "type": "debugpy",
-        "request": "launch",
-        "module": "phase_control.Demo.script",
-        "console": "integratedTerminal",
-        "justMyCode": true
-      },
-      {
-        "name": "Debug app.py",
-        "type": "debugpy",
-        "request": "launch",
-        "program": "${workspaceFolder:Phase_Control}/app.py",
-        "cwd": "${workspaceFolder:Phase_Control}",
-        "console": "integratedTerminal",
-        "justMyCode": true
-      }
+      "name": "Reusable debug",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+	    "cwd": "${workspaceFolder:App_Apps}",
+	    "env": { "PYTHONPATH": "${workspaceFolder:App_Apps}" },
+      "console": "integratedTerminal",
+      "justMyCode": true
+    } 
     ]
   },
   "settings": {
