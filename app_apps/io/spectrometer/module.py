@@ -3,19 +3,16 @@ from __future__ import annotations
 
 import numpy as np
 
-from app_apps.app.ui.main_window_view import MainWindowView
-from app_apps.app.ui.main_window_vm import MainWindowVM
-from app_apps.app.ui.menu_bar_VM import MenuBarVM
-from app_apps.app.ui.menu_bar_view import MenuBarView
+from app_apps.io.spectrometer.domain import ISpectrometerTaskRunner
+from app_apps.io.spectrometer.shared_spectrum_buffer import SharedSpectrumBuffer
 from base_core.framework.app import AppContext
+from base_core.framework.app.context import ThreadPoolExecutor
+from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
-from base_core.framework.subprocess.shared_memory.shared_ring_buffer import SharedRingBuffer
-from base_qt.app.interfaces import IUiDispatcher
-from base_qt.views.registry.enums import ViewKind
-from base_qt.views.registry.interfaces import IViewRegistry
-from base_qt.views.registry.models import ViewSpec
-from base_qt.views.registry.view_registry import ViewRegistry
+from base_core.framework.subprocess.json_endpoint import JsonlSubprocessEndpoint
+from spm_002.config import PYTHON32_PATH
+
 
 
 class SpectrometerModule(BaseModule):
@@ -23,38 +20,43 @@ class SpectrometerModule(BaseModule):
     name = "spectrometer"
     requires = ()
     
-    buffer = SharedRingBuffer.create(
-        name="spectrometer_ring_buffer",
+    buffer = SharedSpectrumBuffer.create(
+        name="spectrometer_buffer",
         slot_count=8,
-        shape=(2, 3648),
+        pixel_count=3648,
         dtype=np.float64,
     )
+    
+    '''
+metadata_json = buffer.spec.to_json()
+# subprocess
+spec = SharedRingBufferSpec.from_json(metadata_json)
+buffer = SharedSpectrumBuffer.attach(spec)
+
+# first write
+buffer.write_spectrum(
+    slot=slot,
+    wavelengths=wavelengths,
+    intensities=intensities,
+    frame_id=frame_id,
+    timestamp_ns=timestamp_ns,
+)
+
+# later writes
+buffer.write_spectrum(
+    slot=slot,
+    intensities=intensities,
+    frame_id=frame_id,
+    timestamp_ns=timestamp_ns,
+)'''
 
     def register(self, c: Container, ctx: AppContext) -> None:
-        # --- Registry (singleton) ------------------------------------------
-        c.register_singleton(IViewRegistry, lambda c: ViewRegistry())
-
-        # --- Shell VM + MenuBar -------------------------------------------
-        c.register_factory(MainWindowVM, lambda c: MainWindowVM(c.get(IUiDispatcher), ctx.event_bus))
-        c.register_factory(MenuBarVM, lambda c: MenuBarVM(c.get(IUiDispatcher), ctx.event_bus, c.get(IViewRegistry)))
         
-        # If you want exactly one menubar instance, you can register it as singleton.
-        c.register_singleton(MenuBarView, lambda c: MenuBarView(c.get(MenuBarVM)))
-
-        # Register MENUBAR view spec (MainWindowViewBase will pick this up automatically)
-        reg = c.get(IViewRegistry)
-        reg.register(
-            ViewSpec(
-                id=MenuBarView.id(),
-                title="MenuBar",
-                kind=ViewKind.MENUBAR,
-                factory=lambda: c.get(MenuBarView),
-                order=0,
-            )
-        )
-
-        # --- Main window ---------------------------------------------------
-        c.register_factory(MainWindowView, lambda c: MainWindowView(
-            vm=c.get(MainWindowVM),
-            registry=c.get(IViewRegistry),
-        ))
+        c.register_instance(SharedSpectrumBuffer, self.buffer)
+        
+        io_spectrometer_exec = ThreadPoolExecutor(max_workers=1, thread_name_prefix="spectrometer")
+        c.register_singleton(ISpectrometerTaskRunner, lambda c: TaskRunner(io_spectrometer_exec))
+        
+        c.register_singleton(JsonlSubprocessEndpoint, lambda c: JsonlSubprocessEndpoint(argv=[PYTHON32_PATH, "-u", "-m", "spm_002.spectrometer_server"],))
+        
+      
