@@ -3,8 +3,6 @@ from __future__ import annotations
 import logging
 import sys
 from concurrent.futures import ThreadPoolExecutor
-import sys
-print("PYTHON:", sys.executable)
 
 from PySide6.QtWidgets import QApplication
 
