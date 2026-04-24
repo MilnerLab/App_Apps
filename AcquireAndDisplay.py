@@ -29,9 +29,9 @@
 
 
 import os
-import PySpin
 import matplotlib.pyplot as plt
 import sys
+import PySpin
 import keyboard
 import time
 

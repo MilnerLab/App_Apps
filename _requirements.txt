@@ -1,3 +1,6 @@
 -e ../Base_Core
 -e ../Devices
 -e ../Base_Qt
+cv2
+serial
+C:\pyspinfiles\spinnaker_python-4.2.0.88-cp310-cp310-win_amd64.whl
