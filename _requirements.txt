@@ -2,4 +2,4 @@
 -e ../Devices
 -e ../Base_Qt
 opencv-python
-serial
+pyserial
