@@ -1,5 +1,6 @@
 import serial
 #From https://github.com/hrosiak/esp301
+#We also looked at https://pypi.org/project/NewportESP/, which is much more complete, but doesn't look finished so this seemed simpler.
 class esp:
 	def __init__(self, dev="/dev/ttyUSB0", b=19200,axis=1,reset=True, initpos = 0.0,useaxis=[]):
 		self.dev = serial.Serial(dev,b)
