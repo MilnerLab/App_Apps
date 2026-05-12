@@ -50,8 +50,8 @@ class esp:
 		return self.getpos(axis)
 
 #Running it...
-controller = esp("COM3",19200,1)
-controller.setpos(15.0,1)
+controller = esp("COM3",b=19200,axis=1,reset=False,initpos=0) #ESP100 with MFA-CC goes to 0 when resetting, before going to initpos
+controller.setpos(8,1)
 
 #This works with the ESP100 and UTS150CC!
 #In Labview, we always started with
