@@ -23,6 +23,9 @@ class SpectrometerModule(BaseModule):
     name = "spectrometer"
     requires = ()
 
+    BUFFER_ID = "spectrometer"
+    CONSUMER_IDS = ["ui"]
+
     def register(self, c: Container, ctx: AppContext) -> None:
         buffer = SharedSpectrumBuffer.create(
             name="spectrometer_buffer",
@@ -49,9 +52,21 @@ class SpectrometerModule(BaseModule):
             buffer=c.get(SharedSpectrumBuffer),
             coordinator=c.get(SharedBufferCoordinator),
             source="spectrometer",
+            buffer_id=self.BUFFER_ID,
         ))
 
     def on_startup(self, c: Container, ctx: AppContext) -> None:
+        buffer = c.get(SharedSpectrumBuffer)
+
+        # Buffer cleanup registered first → runs last (lifecycle is reverse order).
+        # This ensures the subprocess is stopped before shared memory is released.
+        def _cleanup_buffer() -> None:
+            buffer.close()
+            if buffer.is_owner:
+                buffer.unlink()
+
+        ctx.lifecycle.add(_cleanup_buffer)
+
         svc = c.get(SpectrometerService)
         svc.start()
         ctx.lifecycle.add(svc.stop)
