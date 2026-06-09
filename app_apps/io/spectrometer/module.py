@@ -14,7 +14,7 @@ from base_core.framework.subprocess.shared_memory.base_protocol import base_regi
 from base_core.framework.subprocess.shared_memory.shared_buffer_coordinator import (
     SharedBufferCoordinator,
 )
-from spm_002.config import PYTHON32_PATH
+from spm_002.config import PYTHON32_PATH, SpectrometerConfig
 from spm_002.messages import SetSpectrometerConfig
 from spm_002.shared_spectrum_buffer import SharedSpectrumBuffer
 
@@ -51,8 +51,6 @@ class SpectrometerModule(BaseModule):
             bus=ctx.event_bus,
             buffer=c.get(SharedSpectrumBuffer),
             coordinator=c.get(SharedBufferCoordinator),
-            source="spectrometer",
-            buffer_id=self.BUFFER_ID,
         ))
 
     def on_startup(self, c: Container, ctx: AppContext) -> None:
@@ -70,3 +68,7 @@ class SpectrometerModule(BaseModule):
         svc = c.get(SpectrometerService)
         svc.start()
         ctx.lifecycle.add(svc.stop)
+        svc.worker("spectrometer").request_async(
+            SetSpectrometerConfig(config=SpectrometerConfig()),
+            key="spectrometer.init_config",
+        )

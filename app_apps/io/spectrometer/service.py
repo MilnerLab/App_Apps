@@ -1,31 +1,70 @@
 from __future__ import annotations
 
-from app_apps.io.spectrometer.events import SpectrumAvailable
+from base_core.framework.concurrency.task_runner import TaskRunner
+from base_core.framework.events.event_bus import EventBus
+from base_core.framework.subprocess.subprocess_service import SubprocessService
+from base_core.framework.subprocess.json_endpoint import JsonlSubprocessEndpoint
 from base_core.framework.subprocess.shared_memory.base_protocol import ItemAvailable
-from base_core.framework.subprocess.shared_memory_device_service import SharedMemoryDeviceService
+from base_core.framework.subprocess.shared_memory.shared_buffer_coordinator import (
+    SharedBufferCoordinator,
+)
+from base_core.framework.subprocess.worker_handle import OutputBufferHandle
+from spm_002.shared_spectrum_buffer import SharedSpectrumBuffer
+
+from app_apps.io.spectrometer.events import SpectrumAvailable
 
 
-class SpectrometerService(SharedMemoryDeviceService):
+WORKER_NAME = "spectrometer"
+
+
+class SpectrometerService(SubprocessService):
     """
-    Specialises SharedMemoryDeviceService for the SPM-002 spectrometer.
+    Main-process handle to the SPM-002 spectrometer subprocess.
 
-    Subscribes to ItemAvailable events for the "ui" consumer and re-publishes
-    them as SpectrumAvailable domain events (slot reference only, no copy).
+    Extends SubprocessService with the shared-memory slot lifecycle
+    (OutputBufferHandle) and translates ItemAvailable("ui") → SpectrumAvailable
+    for in-process consumers.
 
     Consumers:
       - Subscribe to SpectrumAvailable on the EventBus.
-      - Read wavelengths/intensities via buffer.read_spectrum_view(msg.slot).
+      - Read wavelengths/intensities via buffer.intensities_view(msg.slot).
       - Call svc.ack_slot(msg.slot, msg.item_id, "ui") when done.
     """
 
+    def __init__(
+        self,
+        io: TaskRunner,
+        endpoint: JsonlSubprocessEndpoint,
+        bus: EventBus,
+        buffer: SharedSpectrumBuffer,
+        coordinator: SharedBufferCoordinator,
+    ) -> None:
+        super().__init__(io=io, endpoint=endpoint, bus=bus)
+        self._output = OutputBufferHandle(
+            handle=self.worker(WORKER_NAME),
+            buffer=buffer,
+            coordinator=coordinator,
+            bus=bus,
+        )
+        self._sub = None
+
     def start(self) -> None:
         super().start()
-        self._cleanup.add(
-            self._bus.subscribe(ItemAvailable, self._on_item_available)
-        )
+        self._sub = self._bus.subscribe(ItemAvailable, self._on_item_available)
+        self._output.start()
+
+    def stop(self) -> None:
+        self._output.stop()
+        if self._sub is not None:
+            self._sub()
+            self._sub = None
+        super().stop()
+
+    def ack_slot(self, slot: int, item_id: int, consumer_id: str) -> None:
+        self._output.ack_slot(slot=slot, item_id=item_id, consumer_id=consumer_id)
 
     def _on_item_available(self, msg: ItemAvailable) -> None:
-        if msg.consumer_id != "ui" or msg.buffer_id != self._buffer_id:
+        if msg.consumer_id != "ui" or msg.buffer_id != WORKER_NAME:
             return
         self._bus.publish(SpectrumAvailable(
             slot=msg.slot,
