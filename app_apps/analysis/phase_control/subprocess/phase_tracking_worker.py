@@ -5,14 +5,14 @@ from typing import Optional
 from base_core.framework.subprocess.messages import Message
 from base_core.framework.subprocess.shared_memory.models import SharedRingBufferSpec
 from base_core.framework.subprocess.worker import ConsumerWorker
-from app_apps.analysis.phase_control.domain.config import AnalysisConfig
+from app_apps.analysis.phase_control.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.analysis.phase_control.domain.phase_corrector import PhaseCorrector
 from app_apps.analysis.phase_control.domain.phase_tracker import PhaseTracker
-from app_apps.analysis.phase_control.subprocess.subprocess_messages import (
+from app_apps.analysis.phase_control.subprocess.messages import (
     ConfigSynced,
     CorrectionAvailable,
     Reset,
-    SetAnalysisConfig,
+    SetStabilizationConfig,
     SetPaused,
 )
 from spm_002.shared_spectrum_buffer import SharedSpectrumBuffer
@@ -24,7 +24,7 @@ class PhaseTrackingWorker(ConsumerWorker[SharedSpectrumBuffer]):
     def __init__(self) -> None:
         super().__init__(buffer_id="spectrometer")
         self._paused = False
-        self._config = AnalysisConfig()
+        self._config = StabilizationConfig()
         self._tracker: Optional[PhaseTracker] = None
         self._corrector: Optional[PhaseCorrector] = None
 
@@ -43,7 +43,7 @@ class PhaseTrackingWorker(ConsumerWorker[SharedSpectrumBuffer]):
             self._tracker = PhaseTracker(self._config)
             self._corrector = PhaseCorrector()
             self.reply_ok(request_id)
-        elif isinstance(msg, SetAnalysisConfig):
+        elif isinstance(msg, SetStabilizationConfig):
             self._config = msg.config
             self._tracker = PhaseTracker(msg.config)
             self._corrector = PhaseCorrector()

@@ -5,17 +5,17 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from app_apps.analysis.phase_control.domain.config import AnalysisConfig
+from app_apps.analysis.phase_control.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.analysis.phase_control.service import PhaseControlService
-from app_apps.analysis.phase_control.subprocess.subprocess_messages import (
+from app_apps.analysis.phase_control.subprocess.messages import (
     ConfigSynced,
     CorrectionAvailable,
     Reset,
-    SetAnalysisConfig,
+    SetStabilizationConfig,
     SetEnvelopeConfig,
     SetPaused,
 )
-_ALL_MESSAGES = (ConfigSynced, CorrectionAvailable, Reset, SetAnalysisConfig, SetEnvelopeConfig, SetPaused)
+_ALL_MESSAGES = (ConfigSynced, CorrectionAvailable, Reset, SetStabilizationConfig, SetEnvelopeConfig, SetPaused)
 from app_apps.io.control_readout.service import ControlReadoutService
 from base_core.framework.app.context import AppContext
 from base_core.framework.concurrency.task_runner import TaskRunner
@@ -43,7 +43,7 @@ class PhaseControlModule(BaseModule):
         coord.register_consumer("phase_tracking")
         coord.register_consumer("envelope")
 
-        c.register_singleton(AnalysisConfig, lambda _: AnalysisConfig())
+        c.register_singleton(StabilizationConfig, lambda _: StabilizationConfig())
 
         c.register_singleton(PhaseControlService, lambda c: PhaseControlService(
             io=TaskRunner(
@@ -56,7 +56,7 @@ class PhaseControlModule(BaseModule):
             bus=ctx.event_bus,
             spec_buffer=c.get(SharedSpectrumBuffer),
             spec_coordinator=c.get(SharedBufferCoordinator),
-            config=c.get(AnalysisConfig),
+            config=c.get(StabilizationConfig),
         ))
 
     def on_startup(self, c: Container, ctx: AppContext) -> None:

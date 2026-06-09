@@ -6,8 +6,8 @@ from base_core.framework.subprocess.messages import Message
 from base_core.framework.subprocess.shared_memory.models import SharedRingBufferSpec
 from base_core.framework.subprocess.worker import ConsumerWorker
 from app_apps.analysis.phase_control.domain.envelope_config import EnvelopeConfig
-from app_apps.analysis.phase_control.domain.envelope_signal_generator import EnvelopeSignalGenerator
-from app_apps.analysis.phase_control.subprocess.subprocess_messages import (
+from app_apps.analysis.phase_control.domain.envelope_optimizer import EnvelopeOptimizer
+from app_apps.analysis.phase_control.subprocess.messages import (
     CorrectionAvailable,
     Reset,
     SetEnvelopeConfig,
@@ -23,10 +23,10 @@ class EnvelopeWorker(ConsumerWorker[SharedSpectrumBuffer]):
         super().__init__(buffer_id="spectrometer")
         self._paused = True  # inactive by default; phase_tracking starts active
         self._config = EnvelopeConfig()
-        self._generator: Optional[EnvelopeSignalGenerator] = None
+        self._optimizer: Optional[EnvelopeOptimizer] = None
 
     def start(self) -> None:
-        self._generator = EnvelopeSignalGenerator(self._config)
+        self._optimizer = EnvelopeOptimizer(self._config)
 
     def attach_buffer(self, spec: SharedRingBufferSpec) -> SharedSpectrumBuffer:
         return SharedSpectrumBuffer.attach(spec)
@@ -36,11 +36,11 @@ class EnvelopeWorker(ConsumerWorker[SharedSpectrumBuffer]):
             self._paused = msg.paused
             self.reply_ok(request_id)
         elif isinstance(msg, Reset):
-            self._generator.reset()
+            self._optimizer.reset()
             self.reply_ok(request_id)
         elif isinstance(msg, SetEnvelopeConfig):
             self._config = msg.config
-            self._generator = EnvelopeSignalGenerator(msg.config)
+            self._optimizer = EnvelopeOptimizer(msg.config)
             self.reply_ok(request_id)
         else:
             super().handle(msg, request_id)
@@ -51,13 +51,11 @@ class EnvelopeWorker(ConsumerWorker[SharedSpectrumBuffer]):
             return
 
         _, wavelengths, intensities = self.buffer.read_spectrum_copy(slot)
-        result = self._generator.update(wavelengths, intensities)
+        result = self._optimizer.update(wavelengths, intensities)
 
         if result is not None:
             self.emit(CorrectionAvailable(
-                correction_deg=float(result.angle.Deg),
-                phase_deg=0.0,
-                sign=result.sign,
+                correction=result
             ))
 
         self.ack(slot, item_id)

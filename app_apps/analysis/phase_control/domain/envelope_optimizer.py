@@ -8,9 +8,9 @@ from app_apps.analysis.phase_control.domain.phase_corrector import CorrectionRes
 from base_core.math.models import Angle
 
 
-class EnvelopeSignalGenerator:
+class EnvelopeOptimizer:
     """
-    Simple fixed-step hill-climb on a spectrum envelope metric.
+    Fixed-step hill-climb on a spectrum envelope metric.
 
     Keeps direction (+1/-1) and flips it whenever the metric stops improving.
     Returns a CorrectionResult so it shares the same output type as PhaseCorrector.

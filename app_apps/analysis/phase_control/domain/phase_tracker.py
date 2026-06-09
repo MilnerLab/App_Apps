@@ -10,7 +10,7 @@ import numpy as np
 from base_core.math.functions import cfg_projection_nu_equal_amplitudes_safe
 from base_core.math.models import Angle
 from base_core.quantities.enums import Prefix
-from app_apps.analysis.phase_control.domain.config import AnalysisConfig, FitParameter1
+from app_apps.analysis.phase_control.domain.phase_stabilization_config import StabilizationConfig, SpectralFitParams
 
 
 class PhaseTracker:
@@ -22,16 +22,16 @@ class PhaseTracker:
 
     Workflow (per spectrum):
       - during initial phase, gather several full fits to build a good
-        starting configuration (FitParameter1.mean)
+        starting configuration (SpectralFitParams.mean)
       - once configured, only fit the phase parameter on subsequent spectra
       - if the residuals are low enough, accept the new phase as current
     """
 
     current_phase: Angle | None = None
 
-    def __init__(self, start_config: AnalysisConfig) -> None:
-        self._config: AnalysisConfig = start_config
-        self._fits: Deque[FitParameter1] = deque(maxlen=self._config.avg_spectra)
+    def __init__(self, start_config: StabilizationConfig) -> None:
+        self._config: StabilizationConfig = start_config
+        self._fits: Deque[SpectralFitParams] = deque(maxlen=self._config.avg_spectra)
 
     def update(self, wavelengths_nm: np.ndarray, intensities: np.ndarray) -> None:
         wl, inten = self._prepare(wavelengths_nm, intensities)
@@ -41,13 +41,13 @@ class PhaseTracker:
             return
 
         if self.current_phase is None:
-            self._config.copy_from(FitParameter1.mean(self._fits))
+            self._config.copy_from(SpectralFitParams.mean(self._fits))
 
         if len(self._fits) < self._config.avg_spectra:
             self._fits.append(self._fit_phase(wl, inten))
             self.current_phase = Angle(0)
         else:
-            new_config = FitParameter1.mean(self._fits)
+            new_config = SpectralFitParams.mean(self._fits)
             self._fits.clear()
             if new_config.residual < self._config.residuals_threshold:
                 self.current_phase = new_config.phase
@@ -70,7 +70,7 @@ class PhaseTracker:
 
     def _initialize_fit_parameters(
         self, wavelengths_nm: np.ndarray, intensities: np.ndarray
-    ) -> FitParameter1:
+    ) -> SpectralFitParams:
         first_arg = self._get_first_arg_name()
         model = lmfit.Model(cfg_projection_nu_equal_amplitudes_safe, independent_vars=[first_arg])
         fit_kwargs: dict[str, Any] = self._config.to_fit_kwargs(cfg_projection_nu_equal_amplitudes_safe)
@@ -84,11 +84,11 @@ class PhaseTracker:
             **{first_arg: wavelengths_nm},
             max_nfev=int(1_000_000),
         )
-        return FitParameter1.from_fit_result(self._config, result)
+        return SpectralFitParams.from_fit_result(self._config, result)
 
     def _fit_phase(
         self, wavelengths_nm: np.ndarray, intensities: np.ndarray
-    ) -> FitParameter1:
+    ) -> SpectralFitParams:
         first_arg = self._get_first_arg_name()
         model = lmfit.Model(cfg_projection_nu_equal_amplitudes_safe, independent_vars=[first_arg])
         params = model.make_params(**self._config.to_fit_kwargs(cfg_projection_nu_equal_amplitudes_safe))
@@ -99,7 +99,7 @@ class PhaseTracker:
             params=params,
             **{first_arg: wavelengths_nm},
         )
-        return FitParameter1.from_fit_result(self._config, result)
+        return SpectralFitParams.from_fit_result(self._config, result)
 
     @staticmethod
     def _get_first_arg_name() -> str:

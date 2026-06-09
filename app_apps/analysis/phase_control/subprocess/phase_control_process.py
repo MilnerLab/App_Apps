@@ -10,18 +10,18 @@ from base_core.framework.subprocess.subprocess_app import SubprocessApp
 from base_core.framework.subprocess.shared_memory.shared_memory_base_messages import base_registry
 from app_apps.analysis.phase_control.subprocess.phase_tracking_worker import PhaseTrackingWorker
 from app_apps.analysis.phase_control.subprocess.envelope_worker import EnvelopeWorker
-from app_apps.analysis.phase_control.subprocess.subprocess_messages import (
+from app_apps.analysis.phase_control.subprocess.messages import (
     ConfigSynced,
     CorrectionAvailable,
     Reset,
-    SetAnalysisConfig,
+    SetStabilizationConfig,
     SetEnvelopeConfig,
     SetPaused,
 )
 
 if __name__ == "__main__":
     app = SubprocessApp(
-        base_registry().extend(ConfigSynced, CorrectionAvailable, Reset, SetAnalysisConfig, SetEnvelopeConfig, SetPaused),
+        base_registry().extend(ConfigSynced, CorrectionAvailable, Reset, SetStabilizationConfig, SetEnvelopeConfig, SetPaused),
         source="phase_control",
     )
     app.add_worker(PhaseTrackingWorker())

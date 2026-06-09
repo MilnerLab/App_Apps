@@ -8,21 +8,21 @@ from base_core.framework.subprocess.shared_memory.shared_buffer_coordinator impo
     SharedBufferCoordinator,
 )
 from base_core.framework.subprocess.worker_handle import WorkerHandle
-from app_apps.analysis.phase_control.domain.analysis_mode import AnalysisMode
-from app_apps.analysis.phase_control.domain.config import AnalysisConfig
+from app_apps.analysis.phase_control.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.analysis.phase_control.domain.envelope_config import EnvelopeConfig
-from app_apps.analysis.phase_control.subprocess.subprocess_messages import (
+from app_apps.analysis.phase_control.domain.mode import ControlMode
+from app_apps.analysis.phase_control.subprocess.messages import (
     ConfigSynced,
     Reset,
-    SetAnalysisConfig,
+    SetStabilizationConfig,
     SetEnvelopeConfig,
     SetPaused,
 )
 from spm_002.shared_spectrum_buffer import SharedSpectrumBuffer
 
 _MODE_WORKER = {
-    AnalysisMode.PHASE_TRACKING: "phase_tracking",
-    AnalysisMode.ENVELOPE: "envelope",
+    ControlMode.PHASE_TRACKING: "phase_tracking",
+    ControlMode.ENVELOPE: "envelope",
 }
 
 
@@ -34,11 +34,11 @@ class PhaseControlService(SubprocessService):
         bus: EventBus,
         spec_buffer: SharedSpectrumBuffer,
         spec_coordinator: SharedBufferCoordinator,
-        config: AnalysisConfig,
+        config: StabilizationConfig,
     ) -> None:
         super().__init__(io=io, endpoint=endpoint, bus=bus)
         self._config = config
-        self._active = AnalysisMode.PHASE_TRACKING
+        self._active = ControlMode.PHASE_TRACKING
         for worker_name in ("phase_tracking", "envelope"):
             handle = (
                 WorkerHandle(service=self, name=worker_name, bus=bus)
@@ -67,8 +67,8 @@ class PhaseControlService(SubprocessService):
     # Runtime control
     # ------------------------------------------------------------------
 
-    def set_active(self, mode: AnalysisMode) -> None:
-        """Switch the active analysis mode. The inactive worker acks slots without processing."""
+    def set_active(self, mode: ControlMode) -> None:
+        """Switch the active control mode. The inactive worker acks slots without processing."""
         if mode == self._active:
             return
         self.worker(_MODE_WORKER[self._active]).send(SetPaused(paused=True))
@@ -85,7 +85,7 @@ class PhaseControlService(SubprocessService):
 
     def set_config(self) -> None:
         """Push the current container config to the phase tracking worker."""
-        self.worker("phase_tracking").send(SetAnalysisConfig(config=self._config))
+        self.worker("phase_tracking").send(SetStabilizationConfig(config=self._config))
 
     def set_envelope_config(self, config: EnvelopeConfig) -> None:
         self.worker("envelope").send(SetEnvelopeConfig(config=config))
