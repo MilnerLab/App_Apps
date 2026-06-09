@@ -32,4 +32,3 @@ class ControlReadoutModule(BaseModule):
         svc = c.get(ControlReadoutService)
         svc.start()
         ctx.lifecycle.add(svc.stop)
-        svc.worker("rotator").start()
