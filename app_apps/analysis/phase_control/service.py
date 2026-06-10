@@ -43,7 +43,7 @@ class PhaseControlService(SubprocessService):
     ) -> None:
         super().__init__(io=io, endpoint=endpoint, bus=bus)
         self._config = config
-        self._active = ControlMode.PHASE_TRACKING
+        self._current_mode = ControlMode.PHASE_TRACKING
         for worker_name in ("phase_tracking", "envelope"):
             handle = (
                 WorkerHandle(service=self, name=worker_name, bus=bus)
@@ -77,22 +77,20 @@ class PhaseControlService(SubprocessService):
     # Runtime control
     # ------------------------------------------------------------------
 
-    def set_active(self, mode: ControlMode) -> None:
+    def set_mode(self, mode: ControlMode) -> None:
         """Switch the active control mode. The inactive worker acks slots without processing."""
-        if mode == self._active:
+        if mode == self._current_mode:
             return
-        self.worker(_MODE_WORKER[self._active]).send(SetPaused(paused=True))
-        self.worker(_MODE_WORKER[mode]).send(SetPaused(paused=False))
-        self._active = mode
+        self.worker(_MODE_WORKER[self._current_mode]).send(SetPaused(paused=True))
+        self._current_mode = mode
 
-    def set_paused(self, paused: bool) -> None:
+    def set_worker_paused(self, paused: bool) -> None:
         """Pause/resume the active worker. Pausing keeps the worker running so the ring buffer drains."""
-        self.worker(_MODE_WORKER[self._active]).send(SetPaused(paused=paused))
-        self._publish_status(not paused, "paused" if paused else "")
+        self.worker(_MODE_WORKER[self._current_mode]).send(SetPaused(paused=paused))
 
-    def reset(self) -> None:
+    def reset_worker(self) -> None:
         """Reset the active worker's algorithm state without restarting the subprocess."""
-        self.worker(_MODE_WORKER[self._active]).send(Reset())
+        self.worker(_MODE_WORKER[self._current_mode]).send(Reset())
 
     def set_config(self) -> None:
         """Push the current container config to the phase tracking worker."""

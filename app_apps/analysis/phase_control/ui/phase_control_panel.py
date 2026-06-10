@@ -17,10 +17,14 @@ class PhaseControlPanel(Panel):
     """
     Phase control panel.
 
-    Layout:
-        [Mode ▼]  [Start/Stop]  [Pause/Resume]  [Reset]
-        ─────────────────────────────────────────────────
-        rolling correction-angle plot (pyqtgraph)
+    State machine for the two control buttons:
+
+        STOPPED  →  [Start ✓]  [Pause  ✗]
+        RUNNING  →  [Start ✗]  [Pause  ✓]
+        PAUSED   →  [Start ✓]  [Reset  ✓]   (Pause button relabelled)
+
+    Start (from PAUSED) resumes without restarting the subprocess.
+    Reset stops the service and returns to STOPPED.
     """
 
     def __init__(self, vm: PhaseControlVM) -> None:
@@ -49,31 +53,19 @@ class PhaseControlPanel(Panel):
 
         row.addStretch(1)
 
-        running = self.vm.is_running
-
-        self._start_btn = QPushButton("Stop" if running else "Start")
-        self._start_btn.setCheckable(True)
-        self._start_btn.setChecked(running)
+        self._start_btn = QPushButton("Start")
         self._start_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self._start_btn.clicked.connect(self._on_start_stop)
+        self._start_btn.clicked.connect(self._on_start)
         row.addWidget(self._start_btn)
 
         self._pause_btn = QPushButton("Pause")
-        self._pause_btn.setCheckable(True)
-        self._pause_btn.setEnabled(running)
         self._pause_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self._pause_btn.clicked.connect(self.vm.toggle_pause)
+        self._pause_btn.clicked.connect(self._on_pause_reset)
         row.addWidget(self._pause_btn)
-
-        self._reset_btn = QPushButton("Reset")
-        self._reset_btn.setEnabled(running)
-        self._reset_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self._reset_btn.clicked.connect(self.vm.reset)
-        row.addWidget(self._reset_btn)
 
         self.body_layout.addWidget(bar)
 
-        # ── plot ────────────────────────────────────────────────────────
+        # ── correction plot ─────────────────────────────────────────────
         self._plot = pg.PlotWidget()
         self._plot.setBackground(None)
         self._plot.setLabel("left", "Correction", units="°")
@@ -82,14 +74,62 @@ class PhaseControlPanel(Panel):
         self._curve = self._plot.plot(pen=pg.mkPen("#4ea6ff", width=1.5))
         self.body_layout.addWidget(self._plot, stretch=1)
 
+        # ── spectrum plot ────────────────────────────────────────────────
+        self._spec_plot = pg.PlotWidget()
+        self._spec_plot.setBackground(None)
+        self._spec_plot.setLabel("left", "Intensity", units="counts")
+        self._spec_plot.setLabel("bottom", "Wavelength", units="nm")
+        self._spec_plot.showGrid(x=True, y=True, alpha=0.15)
+        self._spec_curve = self._spec_plot.plot(pen=pg.mkPen("#ff9f4a", width=1.5))
+        self.body_layout.addWidget(self._spec_plot, stretch=1)
+
         # ── signal connections ──────────────────────────────────────────
         self._connect(self.vm.correction_updated, self._on_correction)
         self._connect(self.vm.running_changed,    self._on_running_changed)
         self._connect(self.vm.paused_changed,     self._on_paused_changed)
+        self._connect(self.vm.spectrum_updated,   self._on_spectrum)
+
+        # Apply initial state
+        if self.vm.is_running:
+            self._enter_running()
+        else:
+            self._enter_stopped()
 
     # ------------------------------------------------------------------
-    # Slot handlers
+    # State transitions
     # ------------------------------------------------------------------
+
+    def _enter_stopped(self) -> None:
+        self._start_btn.setEnabled(True)
+        self._pause_btn.setEnabled(False)
+        self._pause_btn.setText("Pause")
+
+    def _enter_running(self) -> None:
+        self._start_btn.setEnabled(False)
+        self._pause_btn.setEnabled(True)
+        self._pause_btn.setText("Pause")
+
+    def _enter_paused(self) -> None:
+        self._start_btn.setEnabled(True)
+        self._pause_btn.setEnabled(True)
+        self._pause_btn.setText("Reset")
+
+    # ------------------------------------------------------------------
+    # Signal handlers
+    # ------------------------------------------------------------------
+
+    def _on_running_changed(self, running: bool) -> None:
+        if running:
+            self._enter_running()
+        else:
+            self._enter_stopped()
+
+    def _on_paused_changed(self, paused: bool) -> None:
+        if paused:
+            self._enter_paused()
+        elif self.vm.is_running:
+            self._enter_running()
+        # else: service stopped — _on_running_changed(False) handles it
 
     def _on_correction(self, correction_deg: float) -> None:
         if self._t0 is None:
@@ -102,25 +142,22 @@ class PhaseControlPanel(Panel):
             self._ys = self._ys[-_MAX_HISTORY:]
         self._curve.setData(self._xs, self._ys)
 
-    def _on_running_changed(self, running: bool) -> None:
-        self._start_btn.setChecked(running)
-        self._start_btn.setText("Stop" if running else "Start")
-        self._pause_btn.setEnabled(running)
-        self._reset_btn.setEnabled(running)
-        if not running:
-            self._pause_btn.setChecked(False)
-            self._pause_btn.setText("Pause")
+    def _on_spectrum(self, wavelengths: object, intensities: object) -> None:
+        self._spec_curve.setData(wavelengths, intensities)
 
-    def _on_paused_changed(self, paused: bool) -> None:
-        self._pause_btn.setChecked(paused)
-        self._pause_btn.setText("Resume" if paused else "Pause")
-
-    def _on_mode_changed(self, _index: int) -> None:
+    def _on_mode_changed(self, _: int) -> None:
         mode: ControlMode = self._mode_combo.currentData()
         self.vm.set_mode(mode)
 
-    def _on_start_stop(self) -> None:
-        if self._start_btn.isChecked():
-            self.vm.start()
+    # ------------------------------------------------------------------
+    # Button click handlers
+    # ------------------------------------------------------------------
+
+    def _on_start(self) -> None:
+        self.vm.start_worker()
+
+    def _on_pause_reset(self) -> None:
+        if self._pause_btn.text() == "Pause":
+            self.vm.pause()
         else:
-            self.vm.stop()
+            self.vm.reset()
