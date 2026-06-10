@@ -3,4 +3,5 @@
 -e ../Base_Qt
 cv2
 serial
+pyqtgraph
 C:\pyspinfiles\spinnaker_python-4.2.0.88-cp310-cp310-win_amd64.whl

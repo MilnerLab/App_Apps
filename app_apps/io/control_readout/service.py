@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable, Optional
+
 from base_core.framework.subprocess.subprocess_service import SubprocessService
 
 
@@ -14,9 +16,12 @@ class ControlReadoutService(SubprocessService):
         svc.worker("rotator")  ->  WorkerHandle
     """
 
-    def start(self) -> None:
+    def start(self, *, on_worker_error: Optional[Callable[[BaseException], None]] = None) -> None:
         super().start()
-        self.worker("rotator").start_async(key="control_readout.rotator.start")
+        self.worker("rotator").start_async(
+            key="control_readout.rotator.start",
+            on_error=on_worker_error,
+        )
 
     def stop(self) -> None:
         self.worker("rotator").stop()

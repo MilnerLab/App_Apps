@@ -17,6 +17,7 @@ from app_apps.analysis.phase_control.subprocess.messages import (
 )
 _ALL_MESSAGES = (ConfigSynced, CorrectionAvailable, Reset, SetStabilizationConfig, SetEnvelopeConfig, SetPaused)
 from app_apps.io.control_readout.service import ControlReadoutService
+from base_core.framework.app.app_message import AppMessage, MessageLevel
 from base_core.framework.app.context import AppContext
 from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.di import Container
@@ -26,6 +27,7 @@ from base_core.framework.subprocess.shared_memory.shared_buffer_coordinator impo
     SharedBufferCoordinator,
 )
 from base_core.framework.subprocess.shared_memory.shared_memory_base_messages import base_registry
+from base_core.framework.subprocess.worker_protocol import WorkerError
 from elliptec.messages import Rotate
 from spm_002.shared_spectrum_buffer import SharedSpectrumBuffer
 
@@ -61,7 +63,24 @@ class PhaseControlModule(BaseModule):
 
     def on_startup(self, c: Container, ctx: AppContext) -> None:
         svc = c.get(PhaseControlService)
-        svc.start()
+
+        _PHASE_WORKERS = {"phase_tracking", "envelope"}
+
+        def _on_worker_error(msg: WorkerError) -> None:
+            if msg.worker_name not in _PHASE_WORKERS:
+                return
+            ctx.event_bus.publish(AppMessage(
+                f"Phase control worker '{msg.worker_name}' crashed: {msg.error}",
+                MessageLevel.ERROR,
+            ))
+
+        def _on_start_error(exc: BaseException) -> None:
+            ctx.event_bus.publish(AppMessage(
+                f"Phase control failed to start: {exc}", MessageLevel.ERROR
+            ))
+
+        ctx.lifecycle.add(ctx.event_bus.subscribe(WorkerError, _on_worker_error))
+        svc.start(on_worker_error=_on_start_error)
 
         rotator = c.get(ControlReadoutService).worker("rotator")
 

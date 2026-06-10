@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable, Optional
+
 from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.events.event_bus import EventBus
 from base_core.framework.subprocess.json_endpoint import JsonlSubprocessEndpoint
@@ -46,13 +48,13 @@ class PhaseControlService(SubprocessService):
             )
             self._register_handle(worker_name, handle)
 
-    def start(self) -> None:
+    def start(self, *, on_worker_error: Optional[Callable[[BaseException], None]] = None) -> None:
         super().start()
         self._unsub_config = self._bus.subscribe(
             ConfigSynced, self._on_config_synced, source="phase_control"
         )
-        self.worker("phase_tracking").start_async(key="phase_tracking.start")
-        self.worker("envelope").start_async(key="envelope.start")
+        self.worker("phase_tracking").start_async(key="phase_tracking.start", on_error=on_worker_error)
+        self.worker("envelope").start_async(key="envelope.start", on_error=on_worker_error)
 
     def stop(self) -> None:
         self._unsub_config()

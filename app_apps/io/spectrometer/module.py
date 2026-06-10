@@ -5,15 +5,17 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 from app_apps.io.spectrometer.service import SpectrometerService
+from base_core.framework.app.app_message import AppMessage, MessageLevel
 from base_core.framework.app.context import AppContext
 from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
 from base_core.framework.subprocess.json_endpoint import JsonlSubprocessEndpoint
-from base_core.framework.subprocess.shared_memory.base_protocol import base_registry
+from base_core.framework.subprocess.shared_memory.shared_memory_base_messages import base_registry
 from base_core.framework.subprocess.shared_memory.shared_buffer_coordinator import (
     SharedBufferCoordinator,
 )
+from base_core.framework.subprocess.worker_protocol import WorkerError
 from spm_002.config import PYTHON32_PATH, SpectrometerConfig
 from spm_002.messages import SetSpectrometerConfig
 from spm_002.shared_spectrum_buffer import SharedSpectrumBuffer
@@ -66,7 +68,21 @@ class SpectrometerModule(BaseModule):
         ctx.lifecycle.add(_cleanup_buffer)
 
         svc = c.get(SpectrometerService)
-        svc.start()
+
+        def _on_worker_error(msg: WorkerError) -> None:
+            if msg.worker_name != "spectrometer":
+                return
+            ctx.event_bus.publish(AppMessage(
+                f"Spectrometer crashed: {msg.error}", MessageLevel.ERROR
+            ))
+
+        def _on_start_error(exc: BaseException) -> None:
+            ctx.event_bus.publish(AppMessage(
+                f"Spectrometer failed to start: {exc}", MessageLevel.ERROR
+            ))
+
+        ctx.lifecycle.add(ctx.event_bus.subscribe(WorkerError, _on_worker_error))
+        svc.start(on_worker_error=_on_start_error)
         ctx.lifecycle.add(svc.stop)
         svc.worker("spectrometer").request_async(
             SetSpectrometerConfig(config=SpectrometerConfig()),

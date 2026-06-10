@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable, Optional
+
 from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.events.event_bus import EventBus
 from base_core.framework.subprocess.subprocess_service import SubprocessService
@@ -46,10 +48,13 @@ class SpectrometerService(SubprocessService):
         self._register_handle(WORKER_NAME, self._handle)
         self._sub = None
 
-    def start(self) -> None:
+    def start(self, *, on_worker_error: Optional[Callable[[BaseException], None]] = None) -> None:
         super().start()
         self._sub = self._bus.subscribe(ItemAvailable, self._on_item_available)
-        self.worker(WORKER_NAME).start_async(key="spectrometer.worker.start")
+        self.worker(WORKER_NAME).start_async(
+            key="spectrometer.worker.start",
+            on_error=on_worker_error,
+        )
 
     def stop(self) -> None:
         self.worker(WORKER_NAME).stop()

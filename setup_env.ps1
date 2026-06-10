@@ -146,30 +146,6 @@ if (Test-Path $requirementsFile) {
 }
 
 # -----------------------------
-# Install VS Code extensions (optional)
-# -----------------------------
-Write-Host "=== Installing VS Code extensions (optional) ==="
-if (Test-Path $extensionsFile) {
-    $codeCmd = Resolve-CodeCli
-    if (-not $codeCmd) {
-        Write-Warning "VS Code CLI not found (code/codium). Skipping extension install."
-    } else {
-        Write-Host "Using VS Code CLI: $codeCmd"
-
-        Get-Content -Encoding UTF8 $extensionsFile |
-            ForEach-Object { $_.Trim() } |
-            Where-Object { $_ -and -not $_.StartsWith("#") } |
-            ForEach-Object {
-                $ext = $_
-                Write-Host "Installing VS Code extension '$ext'..."
-                Invoke-Native $codeCmd @("--install-extension", $ext, "--force")
-            }
-    }
-} else {
-    Write-Host "No _extensions.txt found. Skipping extension install."
-}
-
-# -----------------------------
 # Activate (only affects the current PowerShell session)
 # -----------------------------
 $activateScript = Get-ActivateScriptPath $venvPath
