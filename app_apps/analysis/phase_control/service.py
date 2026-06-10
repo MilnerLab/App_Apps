@@ -41,19 +41,15 @@ class PhaseControlService(SubprocessService):
         self._current_mode = ControlMode.PHASE_TRACKING
         for mode in ControlMode:
             handle = (
-                WorkerHandle(service=self, name=mode.value, bus=bus)
-                .with_input("spectrometer", spec_output.coordinator, spec_buffer)
+                WorkerHandle(service=self, name=mode.value, bus=self._internal_bus)
+                .with_input("spectrometer", spec_output, spec_buffer)
             )
             self._register_handle(mode.value, handle)
 
     def start(self) -> None:
         super().start()
-        self._unsub_config = self._bus.subscribe(
-            ConfigSynced, self._on_config_synced, source="phase_control"
-        )
-        self._unsub_rotate = self._bus.subscribe(
-            CorrectionAvailable, self._on_request_rotate, source="phase_control"
-        )
+        self._unsub_config = self._internal_bus.subscribe(ConfigSynced, self._on_config_synced)
+        self._unsub_rotate = self._internal_bus.subscribe(CorrectionAvailable, self._on_correction_available)
         def _publish_err(exc: BaseException) -> None:
             self._bus.publish(AppMessage(f"Phase control failed to start: {exc}", MessageLevel.ERROR))
 
@@ -72,8 +68,9 @@ class PhaseControlService(SubprocessService):
     def _on_config_synced(self, event: ConfigSynced) -> None:
         self._config.copy_from(event.config)
 
-    def _on_request_rotate(self, event: CorrectionAvailable) -> None:
-        self._bus.publish(RotateRequested(angle=event.angle, sign=event.sign))
+    def _on_correction_available(self, event: CorrectionAvailable) -> None:
+        self._bus.publish(RotateRequested(angle_rad=float(event.angle.Rad)))
+        self._bus.publish(event)
 
     # ------------------------------------------------------------------
     # Runtime control

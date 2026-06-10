@@ -5,7 +5,7 @@ from typing import ClassVar
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QWidget
 
-from app_apps.io.spectrometer.events import SpectrumAvailable
+from app_apps.io.spectrometer.events import SpectrumAvailable, SpectrumAck
 from base_core.framework.events import EventBus
 from base_core.framework.subprocess.shared_memory.buffer_output import BufferOutput
 from base_qt.app.dispatcher import QtDispatcher
@@ -38,7 +38,6 @@ class PhaseControlVM(BufferConsumerMixin, PanelVM):
         PanelVM.__init__(self, bus, dispatcher)
         self._setup_consumer(spec_output)
         self._svc         = phase_control_svc
-        self._spec_output = spec_output
         self._spec_buffer = spec_buffer
         self._paused  = False
         self._running = phase_control_svc.is_running
@@ -59,7 +58,7 @@ class PhaseControlVM(BufferConsumerMixin, PanelVM):
 
     @ui_thread
     def _on_correction_available(self, event: CorrectionAvailable) -> None:
-        self.correction_updated.emit(float(event.correction.angle.Deg))
+        self.correction_updated.emit(float(event.angle.Deg))
 
     @ui_thread
     def _on_spectrum(self, event: SpectrumAvailable) -> None:
@@ -71,7 +70,7 @@ class PhaseControlVM(BufferConsumerMixin, PanelVM):
         except Exception as exc:
             self._msg(f"Spectrum read error: {exc}", MessageLevel.WARNING)
         finally:
-            self._spec_output.ack_slot(event.slot, event.item_id, self.CONSUMER_ID)
+            self._bus.publish(SpectrumAck(slot=event.slot, item_id=event.item_id, consumer_id=self.CONSUMER_ID))
 
     # ------------------------------------------------------------------
     # Controls

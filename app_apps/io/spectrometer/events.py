@@ -12,10 +12,17 @@ class SpectrumAvailable:
     VMs filter on their own CONSUMER_ID to avoid duplicate reads when multiple
     consumers are registered.
 
-    The consumer calls buffer.read_spectrum_view(slot) for zero-copy access and
-    svc.ack_slot(slot, item_id, consumer_id) when done.
+    After processing, publish SpectrumAck with the same slot/item_id/consumer_id.
     """
     slot: int
     item_id: int
     timestamp_ns: int
     consumer_id: str = ""
+
+
+@dataclass(frozen=True)
+class SpectrumAck:
+    """Published by a consumer after it finishes reading a spectrum slot."""
+    slot: int
+    item_id: int
+    consumer_id: str

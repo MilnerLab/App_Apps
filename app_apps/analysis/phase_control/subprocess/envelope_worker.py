@@ -9,7 +9,6 @@ from app_apps.analysis.phase_control.domain.envelope_config import EnvelopeConfi
 from app_apps.analysis.phase_control.domain.envelope_optimizer import EnvelopeOptimizer
 from app_apps.analysis.phase_control.subprocess.messages import (
     CorrectionAvailable,
-    CorrectionAvailable,
     Reset,
     SetEnvelopeConfig,
     SetPaused,

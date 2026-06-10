@@ -11,7 +11,6 @@ from app_apps.analysis.phase_control.domain.phase_tracker import PhaseTracker
 from app_apps.analysis.phase_control.subprocess.messages import (
     ConfigSynced,
     CorrectionAvailable,
-    CorrectionAvailable,
     Reset,
     SetStabilizationConfig,
     SetPaused,
