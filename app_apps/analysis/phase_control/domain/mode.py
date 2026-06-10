@@ -5,7 +5,7 @@ from enum import Enum
 from base_core.framework.serialization.serde import Primitive, PrimitiveSerde
 
 
-class ControlMode(str, Enum, PrimitiveSerde):
+class ControlMode(str, Enum):
     PHASE_TRACKING = "phase_tracking"
     ENVELOPE = "envelope"
 
@@ -15,3 +15,6 @@ class ControlMode(str, Enum, PrimitiveSerde):
     @classmethod
     def from_primitive(cls, v: Primitive) -> "ControlMode":
         return cls(v)
+
+
+PrimitiveSerde.register(ControlMode)

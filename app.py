@@ -25,6 +25,7 @@ def build_context() -> AppContext:
     lifecycle = CleanupCollection()
     bus = EventBus()
     return AppContext(
+        config={},
         status=AppStatus.OFFLINE,
         log=log,
         event_bus=bus,

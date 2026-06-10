@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, Optional
-
+from base_core.framework.app.app_message import AppMessage, MessageLevel
 from base_core.framework.subprocess.subprocess_service import SubprocessService
 
 
@@ -16,11 +15,13 @@ class ControlReadoutService(SubprocessService):
         svc.worker("rotator")  ->  WorkerHandle
     """
 
-    def start(self, *, on_worker_error: Optional[Callable[[BaseException], None]] = None) -> None:
+    def start(self) -> None:
         super().start()
         self.worker("rotator").start_async(
             key="control_readout.rotator.start",
-            on_error=on_worker_error,
+            on_error=lambda exc: self._bus.publish(
+                AppMessage(f"Rotator failed to start: {exc}", MessageLevel.ERROR)
+            ),
         )
 
     def stop(self) -> None:

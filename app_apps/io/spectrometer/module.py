@@ -7,6 +7,7 @@ import numpy as np
 from app_apps.io.spectrometer.service import SpectrometerService
 from base_core.framework.app.app_message import AppMessage, MessageLevel
 from base_core.framework.app.context import AppContext
+from base_core.framework.app.enums import AppStatus
 from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
@@ -67,6 +68,9 @@ class SpectrometerModule(BaseModule):
 
         ctx.lifecycle.add(_cleanup_buffer)
 
+        if ctx.status == AppStatus.OFFLINE:
+            return
+
         svc = c.get(SpectrometerService)
 
         def _on_worker_error(msg: WorkerError) -> None:
@@ -76,13 +80,8 @@ class SpectrometerModule(BaseModule):
                 f"Spectrometer crashed: {msg.error}", MessageLevel.ERROR
             ))
 
-        def _on_start_error(exc: BaseException) -> None:
-            ctx.event_bus.publish(AppMessage(
-                f"Spectrometer failed to start: {exc}", MessageLevel.ERROR
-            ))
-
         ctx.lifecycle.add(ctx.event_bus.subscribe(WorkerError, _on_worker_error))
-        svc.start(on_worker_error=_on_start_error)
+        svc.start()
         ctx.lifecycle.add(svc.stop)
         svc.worker("spectrometer").request_async(
             SetSpectrometerConfig(config=SpectrometerConfig()),

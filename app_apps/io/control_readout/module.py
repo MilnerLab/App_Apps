@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from app_apps.io.control_readout.service import ControlReadoutService
 from base_core.framework.app.app_message import AppMessage, MessageLevel
 from base_core.framework.app.context import AppContext
+from base_core.framework.app.enums import AppStatus
 from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
@@ -32,6 +33,9 @@ class ControlReadoutModule(BaseModule):
         ))
 
     def on_startup(self, c: Container, ctx: AppContext) -> None:
+        if ctx.status == AppStatus.OFFLINE:
+            return
+
         svc = c.get(ControlReadoutService)
 
         def _on_worker_error(msg: WorkerError) -> None:
@@ -41,11 +45,6 @@ class ControlReadoutModule(BaseModule):
                 f"Rotator crashed: {msg.error}", MessageLevel.ERROR
             ))
 
-        def _on_start_error(exc: BaseException) -> None:
-            ctx.event_bus.publish(AppMessage(
-                f"Rotator failed to start: {exc}", MessageLevel.ERROR
-            ))
-
         ctx.lifecycle.add(ctx.event_bus.subscribe(WorkerError, _on_worker_error))
-        svc.start(on_worker_error=_on_start_error)
+        svc.start()
         ctx.lifecycle.add(svc.stop)

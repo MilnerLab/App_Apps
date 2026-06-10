@@ -71,8 +71,8 @@ class AppShell(LabMainWindow):
         )
 
         self.register_panel("Spectrum",      spectrum_panel, Qt.DockWidgetArea.LeftDockWidgetArea)
-        self.register_panel("Phase Control", phase_panel,    Qt.DockWidgetArea.RightDockWidgetArea)
-        self.register_panel("Rotator",       rotator_panel,  Qt.DockWidgetArea.RightDockWidgetArea)
+        self.register_panel("Phase Control", phase_panel,    Qt.DockWidgetArea.RightDockWidgetArea, floating=True)
+        self.register_panel("Rotator",       rotator_panel,  Qt.DockWidgetArea.RightDockWidgetArea, floating=True)
 
     # ------------------------------------------------------------------
     # Device menus

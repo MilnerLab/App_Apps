@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, Optional
-
+from base_core.framework.app.app_message import AppMessage, MessageLevel
 from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.events.event_bus import EventBus
 from base_core.framework.subprocess.subprocess_service import SubprocessService
@@ -41,19 +40,20 @@ class SpectrometerService(SubprocessService):
         coordinator: SharedBufferCoordinator,
     ) -> None:
         super().__init__(io=io, endpoint=endpoint, bus=bus)
-        self._handle = (
-            WorkerHandle(service=self, name=WORKER_NAME, bus=bus)
-            .with_output(buffer, coordinator)
+        self._register_handle(
+            WORKER_NAME,
+            WorkerHandle(service=self, name=WORKER_NAME, bus=bus).with_output(buffer, coordinator),
         )
-        self._register_handle(WORKER_NAME, self._handle)
         self._sub = None
 
-    def start(self, *, on_worker_error: Optional[Callable[[BaseException], None]] = None) -> None:
+    def start(self) -> None:
         super().start()
         self._sub = self._bus.subscribe(ItemAvailable, self._on_item_available)
         self.worker(WORKER_NAME).start_async(
             key="spectrometer.worker.start",
-            on_error=on_worker_error,
+            on_error=lambda exc: self._bus.publish(
+                AppMessage(f"Spectrometer failed to start: {exc}", MessageLevel.ERROR)
+            ),
         )
 
     def stop(self) -> None:
@@ -64,7 +64,7 @@ class SpectrometerService(SubprocessService):
         super().stop()
 
     def ack_slot(self, slot: int, item_id: int, consumer_id: str) -> None:
-        self._handle.ack_slot(slot=slot, item_id=item_id, consumer_id=consumer_id)
+        self.worker(WORKER_NAME).ack_slot(slot=slot, item_id=item_id, consumer_id=consumer_id)
 
     def _on_item_available(self, msg: ItemAvailable) -> None:
         if msg.consumer_id != "ui" or msg.buffer_id != WORKER_NAME:

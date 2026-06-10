@@ -20,7 +20,11 @@ class SpectrumPanel(Panel):
 
     @property
     def vm(self) -> SpectrumVM:
-        return super().vm  # type: ignore[return-value]
+        return self.__dict__["vm"]  # type: ignore[return-value]
+
+    @vm.setter
+    def vm(self, value: SpectrumVM) -> None:
+        self.__dict__["vm"] = value
 
     def setup(self) -> None:
         # Plot widget

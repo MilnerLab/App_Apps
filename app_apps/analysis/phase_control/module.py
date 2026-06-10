@@ -16,9 +16,12 @@ from app_apps.analysis.phase_control.subprocess.messages import (
     SetPaused,
 )
 _ALL_MESSAGES = (ConfigSynced, CorrectionAvailable, Reset, SetStabilizationConfig, SetEnvelopeConfig, SetPaused)
+from app_apps.io.control_readout.module import ControlReadoutModule
 from app_apps.io.control_readout.service import ControlReadoutService
+from app_apps.io.spectrometer.module import SpectrometerModule
 from base_core.framework.app.app_message import AppMessage, MessageLevel
 from base_core.framework.app.context import AppContext
+from base_core.framework.app.enums import AppStatus
 from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
@@ -38,7 +41,7 @@ _PROCESS_SCRIPT = str(
 
 class PhaseControlModule(BaseModule):
     name = "phase_control"
-    requires = ("spectrometer", "control_readout")
+    requires = (SpectrometerModule, ControlReadoutModule)
 
     def register(self, c: Container, ctx: AppContext) -> None:
         coord = c.get(SharedBufferCoordinator)
@@ -62,6 +65,9 @@ class PhaseControlModule(BaseModule):
         ))
 
     def on_startup(self, c: Container, ctx: AppContext) -> None:
+        if ctx.status == AppStatus.OFFLINE:
+            return
+
         svc = c.get(PhaseControlService)
 
         _PHASE_WORKERS = {"phase_tracking", "envelope"}
@@ -74,13 +80,8 @@ class PhaseControlModule(BaseModule):
                 MessageLevel.ERROR,
             ))
 
-        def _on_start_error(exc: BaseException) -> None:
-            ctx.event_bus.publish(AppMessage(
-                f"Phase control failed to start: {exc}", MessageLevel.ERROR
-            ))
-
         ctx.lifecycle.add(ctx.event_bus.subscribe(WorkerError, _on_worker_error))
-        svc.start(on_worker_error=_on_start_error)
+        svc.start()
 
         rotator = c.get(ControlReadoutService).worker("rotator")
 

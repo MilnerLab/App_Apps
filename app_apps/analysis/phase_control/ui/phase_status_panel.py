@@ -30,7 +30,11 @@ class PhaseStatusPanel(Panel):
 
     @property
     def vm(self) -> PhaseStatusVM:
-        return super().vm  # type: ignore[return-value]
+        return self.__dict__["vm"]  # type: ignore[return-value]
+
+    @vm.setter
+    def vm(self, value: PhaseStatusVM) -> None:
+        self.__dict__["vm"] = value
 
     def setup(self) -> None:
         # Phase readout
