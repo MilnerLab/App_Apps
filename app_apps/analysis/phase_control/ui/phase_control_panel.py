@@ -53,6 +53,11 @@ class PhaseControlPanel(Panel):
 
         row.addStretch(1)
 
+        self._config_btn = QPushButton("Config...")
+        self._config_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._config_btn.clicked.connect(self._on_config)
+        row.addWidget(self._config_btn)
+
         self._start_btn = QPushButton("Start")
         self._start_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._start_btn.clicked.connect(self._on_start)
@@ -152,6 +157,9 @@ class PhaseControlPanel(Panel):
     # ------------------------------------------------------------------
     # Button click handlers
     # ------------------------------------------------------------------
+
+    def _on_config(self) -> None:
+        self.vm.open_config(self)
 
     def _on_start(self) -> None:
         self.vm.start_worker()

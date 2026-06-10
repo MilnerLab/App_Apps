@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from PySide6.QtCore import Signal
+from PySide6.QtWidgets import QWidget
 
 from app_apps.io.spectrometer.events import SpectrumAvailable
 from app_apps.io.spectrometer.service import SpectrometerService
@@ -91,3 +92,9 @@ class PhaseControlVM(BufferConsumerMixin, PanelVM):
 
     def set_mode(self, mode: ControlMode) -> None:
         self._svc.set_mode(mode)
+
+    def open_config(self, parent: QWidget) -> None:
+        from app_apps.analysis.phase_control.ui.phase_config_dialog import PhaseConfigDialog
+        if not hasattr(self, "_config_dialog"):
+            self._config_dialog = PhaseConfigDialog(self._svc, parent=parent)
+        self._config_dialog.open()
