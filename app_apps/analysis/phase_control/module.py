@@ -22,6 +22,7 @@ from app_apps.io.spectrometer.module import SpectrometerModule
 from base_core.framework.app.app_message import AppMessage, MessageLevel
 from base_core.framework.app.context import AppContext
 from base_core.framework.app.enums import AppStatus
+from base_core.framework.app.service_status import ServiceStatus
 from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
@@ -75,10 +76,9 @@ class PhaseControlModule(BaseModule):
         def _on_worker_error(msg: WorkerError) -> None:
             if msg.worker_name not in _PHASE_WORKERS:
                 return
-            ctx.event_bus.publish(AppMessage(
-                f"Phase control worker '{msg.worker_name}' crashed: {msg.error}",
-                MessageLevel.ERROR,
-            ))
+            detail = f"crashed ({msg.worker_name}): {msg.error}"
+            ctx.event_bus.publish(AppMessage(f"Phase control {detail}", MessageLevel.ERROR))
+            ctx.event_bus.publish(ServiceStatus(PhaseControlService.service_name, False, detail))
 
         ctx.lifecycle.add(ctx.event_bus.subscribe(WorkerError, _on_worker_error))
         svc.start()

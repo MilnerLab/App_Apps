@@ -8,6 +8,7 @@ from app_apps.io.spectrometer.service import SpectrometerService
 from base_core.framework.app.app_message import AppMessage, MessageLevel
 from base_core.framework.app.context import AppContext
 from base_core.framework.app.enums import AppStatus
+from base_core.framework.app.service_status import ServiceStatus
 from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
@@ -26,9 +27,6 @@ class SpectrometerModule(BaseModule):
     name = "spectrometer"
     requires = ()
 
-    BUFFER_ID = "spectrometer"
-    CONSUMER_IDS = ["ui"]
-
     def register(self, c: Container, ctx: AppContext) -> None:
         buffer = SharedSpectrumBuffer.create(
             name="spectrometer_buffer",
@@ -38,7 +36,7 @@ class SpectrometerModule(BaseModule):
         )
         coordinator = SharedBufferCoordinator(
             slot_count=buffer.spec.slot_count,
-            consumer_bits={"ui": 1 << 0},
+            consumer_bits={},
         )
 
         c.register_instance(SharedSpectrumBuffer, buffer)
@@ -76,9 +74,9 @@ class SpectrometerModule(BaseModule):
         def _on_worker_error(msg: WorkerError) -> None:
             if msg.worker_name != "spectrometer":
                 return
-            ctx.event_bus.publish(AppMessage(
-                f"Spectrometer crashed: {msg.error}", MessageLevel.ERROR
-            ))
+            detail = f"crashed: {msg.error}"
+            ctx.event_bus.publish(AppMessage(f"Spectrometer {detail}", MessageLevel.ERROR))
+            ctx.event_bus.publish(ServiceStatus(SpectrometerService.service_name, False, detail))
 
         ctx.lifecycle.add(ctx.event_bus.subscribe(WorkerError, _on_worker_error))
         svc.start()

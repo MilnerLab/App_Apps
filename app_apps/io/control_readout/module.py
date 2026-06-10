@@ -7,6 +7,7 @@ from app_apps.io.control_readout.service import ControlReadoutService
 from base_core.framework.app.app_message import AppMessage, MessageLevel
 from base_core.framework.app.context import AppContext
 from base_core.framework.app.enums import AppStatus
+from base_core.framework.app.service_status import ServiceStatus
 from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
@@ -41,9 +42,9 @@ class ControlReadoutModule(BaseModule):
         def _on_worker_error(msg: WorkerError) -> None:
             if msg.worker_name != "rotator":
                 return
-            ctx.event_bus.publish(AppMessage(
-                f"Rotator crashed: {msg.error}", MessageLevel.ERROR
-            ))
+            detail = f"crashed: {msg.error}"
+            ctx.event_bus.publish(AppMessage(f"Rotator {detail}", MessageLevel.ERROR))
+            ctx.event_bus.publish(ServiceStatus(ControlReadoutService.service_name, False, detail))
 
         ctx.lifecycle.add(ctx.event_bus.subscribe(WorkerError, _on_worker_error))
         svc.start()

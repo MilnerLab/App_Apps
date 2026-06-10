@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from base_core.framework.app.app_message import AppMessage, MessageLevel
 from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.events.event_bus import EventBus
@@ -28,6 +30,8 @@ _MODE_WORKER = {
 
 
 class PhaseControlService(SubprocessService):
+    service_name: ClassVar[str] = "phase_control"
+
     def __init__(
         self,
         io: TaskRunner,
@@ -57,8 +61,10 @@ class PhaseControlService(SubprocessService):
 
         self.worker("phase_tracking").start_async(key="phase_tracking.start", on_error=_publish_err)
         self.worker("envelope").start_async(key="envelope.start", on_error=_publish_err)
+        self._publish_status(True)
 
     def stop(self) -> None:
+        self._publish_status(False)
         self._unsub_config()
         self.worker("phase_tracking").stop()
         self.worker("envelope").stop()
@@ -82,6 +88,7 @@ class PhaseControlService(SubprocessService):
     def set_paused(self, paused: bool) -> None:
         """Pause/resume the active worker. Pausing keeps the worker running so the ring buffer drains."""
         self.worker(_MODE_WORKER[self._active]).send(SetPaused(paused=paused))
+        self._publish_status(not paused, "paused" if paused else "")
 
     def reset(self) -> None:
         """Reset the active worker's algorithm state without restarting the subprocess."""
