@@ -13,6 +13,7 @@ from base_core.framework.subprocess.shared_memory.shared_memory_base_messages im
 from base_core.framework.subprocess.shared_memory.shared_buffer_coordinator import (
     SharedBufferCoordinator,
 )
+from base_core.framework.subprocess.shared_memory.buffer_output import BufferOutput
 from base_core.framework.subprocess.worker_handle import WorkerHandle
 from spm_002.shared_spectrum_buffer import SharedSpectrumBuffer
 
@@ -26,10 +27,8 @@ class SpectrometerService(SubprocessService):
     """
     Main-process handle to the SPM-002 spectrometer subprocess.
 
-    Consumers register and unregister themselves dynamically via
-    add_consumer / remove_consumer (typically called by BufferConsumerMixin
-    when a panel opens or closes).  The coordinator is updated accordingly;
-    in-flight slots are force-acked on unregister so the buffer never blocks.
+    UI consumers register via the BufferOutput returned by .output.  The
+    coordinator is an internal detail; it is not exposed in the DI container.
     """
 
     service_name: ClassVar[str] = "spectrometer"
@@ -49,12 +48,22 @@ class SpectrometerService(SubprocessService):
             WORKER_NAME,
             WorkerHandle(service=self, name=WORKER_NAME, bus=bus).with_output(buffer, coordinator),
         )
-        self._sub = None
-        self._consumers: set[str] = set()
+        self._item_available_sub = None
+        self._ui_consumers: set[str] = set()
+        self._output = BufferOutput(
+            coordinator=coordinator,
+            send_grant=self.worker(WORKER_NAME).send_grant,
+            on_register=self._ui_consumers.add,
+            on_unregister=self._ui_consumers.discard,
+        )
+
+    @property
+    def output(self) -> BufferOutput:
+        return self._output
 
     def start(self) -> None:
         super().start()
-        self._sub = self._bus.subscribe(ItemAvailable, self._on_item_available)
+        self._item_available_sub = self._bus.subscribe(ItemAvailable, self._on_item_available)
         self.worker(WORKER_NAME).start_async(
             key="spectrometer.worker.start",
             on_error=lambda exc: self._bus.publish(
@@ -66,35 +75,10 @@ class SpectrometerService(SubprocessService):
     def stop(self) -> None:
         self._publish_status(False)
         self.worker(WORKER_NAME).stop()
-        if self._sub is not None:
-            self._sub()
-            self._sub = None
+        if self._item_available_sub is not None:
+            self._item_available_sub()
+            self._item_available_sub = None
         super().stop()
-
-    # ------------------------------------------------------------------
-    # Consumer lifecycle
-    # ------------------------------------------------------------------
-
-    def add_consumer(self, consumer_id: str) -> None:
-        """Register a new buffer consumer (called by VMs on open)."""
-        grants = self._coordinator.register_consumer(consumer_id)
-        self._consumers.add(consumer_id)
-        for grant in grants:
-            self.worker(WORKER_NAME).send_grant(grant)
-
-    def remove_consumer(self, consumer_id: str) -> None:
-        """Unregister a consumer, force-acking any in-flight slots (called by VMs on close)."""
-        self._consumers.discard(consumer_id)
-        grants = self._coordinator.unregister_consumer(consumer_id)
-        for grant in grants:
-            self.worker(WORKER_NAME).send_grant(grant)
-
-    # ------------------------------------------------------------------
-    # Slot ack (forwarded from consumers)
-    # ------------------------------------------------------------------
-
-    def ack_slot(self, slot: int, item_id: int, consumer_id: str) -> None:
-        self.worker(WORKER_NAME).ack_slot(slot=slot, item_id=item_id, consumer_id=consumer_id)
 
     # ------------------------------------------------------------------
     # Internal routing
@@ -103,7 +87,7 @@ class SpectrometerService(SubprocessService):
     def _on_item_available(self, msg: ItemAvailable) -> None:
         if msg.buffer_id != WORKER_NAME:
             return
-        if msg.consumer_id not in self._consumers:
+        if msg.consumer_id not in self._ui_consumers:
             return
         self._bus.publish(SpectrumAvailable(
             slot=msg.slot,

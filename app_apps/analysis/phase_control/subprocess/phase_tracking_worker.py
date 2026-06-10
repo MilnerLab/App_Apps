@@ -11,15 +11,17 @@ from app_apps.analysis.phase_control.domain.phase_tracker import PhaseTracker
 from app_apps.analysis.phase_control.subprocess.messages import (
     ConfigSynced,
     CorrectionAvailable,
+    CorrectionAvailable,
     Reset,
     SetStabilizationConfig,
     SetPaused,
 )
+from app_apps.analysis.phase_control.domain.mode import ControlMode
 from spm_002.shared_spectrum_buffer import SharedSpectrumBuffer
 
 
 class PhaseTrackingWorker(ConsumerWorker[SharedSpectrumBuffer]):
-    name = "phase_tracking"
+    name = ControlMode.PHASE_TRACKING.value
 
     def __init__(self) -> None:
         super().__init__(buffer_id="spectrometer")
@@ -63,10 +65,7 @@ class PhaseTrackingWorker(ConsumerWorker[SharedSpectrumBuffer]):
             self.emit(ConfigSynced(config=self._config))
             result = self._corrector.update(self._tracker.current_phase)
             if result is not None:
-                self.emit(CorrectionAvailable(
-                    correction_deg=float(result.angle.Deg),
-                    phase_deg=float(self._tracker.current_phase.Deg),
-                    sign=result.sign,
-                ))
+                self.emit(CorrectionAvailable(angle=result.angle, sign=result.sign))
+
 
         self.ack(slot, item_id)

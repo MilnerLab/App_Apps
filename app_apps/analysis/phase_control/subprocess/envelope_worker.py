@@ -9,15 +9,17 @@ from app_apps.analysis.phase_control.domain.envelope_config import EnvelopeConfi
 from app_apps.analysis.phase_control.domain.envelope_optimizer import EnvelopeOptimizer
 from app_apps.analysis.phase_control.subprocess.messages import (
     CorrectionAvailable,
+    CorrectionAvailable,
     Reset,
     SetEnvelopeConfig,
     SetPaused,
 )
+from app_apps.analysis.phase_control.domain.mode import ControlMode
 from spm_002.shared_spectrum_buffer import SharedSpectrumBuffer
 
 
 class EnvelopeWorker(ConsumerWorker[SharedSpectrumBuffer]):
-    name = "envelope"
+    name = ControlMode.ENVELOPE.value
 
     def __init__(self) -> None:
         super().__init__(buffer_id="spectrometer")
@@ -54,8 +56,6 @@ class EnvelopeWorker(ConsumerWorker[SharedSpectrumBuffer]):
         result = self._optimizer.update(wavelengths, intensities)
 
         if result is not None:
-            self.emit(CorrectionAvailable(
-                correction=result
-            ))
+            self.emit(CorrectionAvailable(angle=result.angle, sign=result.sign))
 
         self.ack(slot, item_id)

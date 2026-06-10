@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from app_apps.io.spectrometer.service import SpectrometerService
+from app_apps.io.spectrometer.service import SpectrometerService, WORKER_NAME as SPECTROMETER_WORKER
 from base_core.framework.app.app_message import AppMessage, MessageLevel
 from base_core.framework.app.context import AppContext
 from base_core.framework.app.enums import AppStatus
@@ -40,7 +40,6 @@ class SpectrometerModule(BaseModule):
         )
 
         c.register_instance(SharedSpectrumBuffer, buffer)
-        c.register_instance(SharedBufferCoordinator, coordinator)
         c.register_singleton(SpectrometerService, lambda c: SpectrometerService(
             io=TaskRunner(
                 ThreadPoolExecutor(max_workers=2, thread_name_prefix="spectrometer-io")
@@ -51,7 +50,7 @@ class SpectrometerModule(BaseModule):
             ),
             bus=ctx.event_bus,
             buffer=c.get(SharedSpectrumBuffer),
-            coordinator=c.get(SharedBufferCoordinator),
+            coordinator=coordinator,
         ))
 
     def on_startup(self, c: Container, ctx: AppContext) -> None:
@@ -72,7 +71,7 @@ class SpectrometerModule(BaseModule):
         svc = c.get(SpectrometerService)
 
         def _on_worker_error(msg: WorkerError) -> None:
-            if msg.worker_name != "spectrometer":
+            if msg.worker_name != SPECTROMETER_WORKER:
                 return
             detail = f"crashed: {msg.error}"
             ctx.event_bus.publish(AppMessage(f"Spectrometer {detail}", MessageLevel.ERROR))
@@ -81,7 +80,7 @@ class SpectrometerModule(BaseModule):
         ctx.lifecycle.add(ctx.event_bus.subscribe(WorkerError, _on_worker_error))
         svc.start()
         ctx.lifecycle.add(svc.stop)
-        svc.worker("spectrometer").request_async(
+        svc.worker(SPECTROMETER_WORKER).request_async(
             SetSpectrometerConfig(config=SpectrometerConfig()),
             key="spectrometer.init_config",
         )

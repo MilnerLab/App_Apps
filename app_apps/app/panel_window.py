@@ -45,7 +45,7 @@ class AppPanelWindow(PanelWindow):
                 PhaseControlVM(
                     bus, dispatcher,
                     c.get(PhaseControlService),
-                    c.get(SpectrometerService),
+                    c.get(SpectrometerService).output,
                     c.get(SharedSpectrumBuffer),
                 )
             )

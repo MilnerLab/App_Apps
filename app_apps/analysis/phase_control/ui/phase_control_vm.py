@@ -6,9 +6,8 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QWidget
 
 from app_apps.io.spectrometer.events import SpectrumAvailable
-from app_apps.io.spectrometer.service import SpectrometerService
-from base_core.framework.app.service_status import ServiceStatus
 from base_core.framework.events import EventBus
+from base_core.framework.subprocess.shared_memory.buffer_output import BufferOutput
 from base_qt.app.dispatcher import QtDispatcher
 from base_qt.ui.app_message import MessageLevel
 from base_qt.ui.buffer_consumer_mixin import BufferConsumerMixin
@@ -33,17 +32,18 @@ class PhaseControlVM(BufferConsumerMixin, PanelVM):
         bus: EventBus,
         dispatcher: QtDispatcher,
         phase_control_svc: PhaseControlService,
-        spectrometer_svc: SpectrometerService,
+        spec_output: BufferOutput,
         spec_buffer: SharedSpectrumBuffer,
     ) -> None:
         PanelVM.__init__(self, bus, dispatcher)
-        self._setup_consumer(spectrometer_svc)
+        self._setup_consumer(spec_output)
         self._svc         = phase_control_svc
-        self._spec_svc    = spectrometer_svc
+        self._spec_output = spec_output
         self._spec_buffer = spec_buffer
         self._paused  = False
         self._running = phase_control_svc.is_running
         self._sub(SpectrumAvailable, self._on_spectrum)
+        self._sub(CorrectionAvailable, self._on_correction_available)
 
     @property
     def is_running(self) -> bool:
@@ -58,6 +58,10 @@ class PhaseControlVM(BufferConsumerMixin, PanelVM):
     # ------------------------------------------------------------------
 
     @ui_thread
+    def _on_correction_available(self, event: CorrectionAvailable) -> None:
+        self.correction_updated.emit(float(event.correction.angle.Deg))
+
+    @ui_thread
     def _on_spectrum(self, event: SpectrumAvailable) -> None:
         if event.consumer_id != self.CONSUMER_ID:
             return
@@ -67,7 +71,7 @@ class PhaseControlVM(BufferConsumerMixin, PanelVM):
         except Exception as exc:
             self._msg(f"Spectrum read error: {exc}", MessageLevel.WARNING)
         finally:
-            self._spec_svc.ack_slot(event.slot, event.item_id, self.CONSUMER_ID)
+            self._spec_output.ack_slot(event.slot, event.item_id, self.CONSUMER_ID)
 
     # ------------------------------------------------------------------
     # Controls

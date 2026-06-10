@@ -37,8 +37,8 @@ class RotatorVM(PanelVM):
         self._msg("Rotator homed", MessageLevel.INFO)
 
     def rotate(self, delta_deg: float) -> None:
-        self._svc.worker("rotator").send(Rotate(angle_rad=math.radians(delta_deg)))
+        self._svc.worker(ControlReadoutService.WORKER_ROTATOR).send(Rotate(angle_rad=math.radians(delta_deg)))
 
     def home(self) -> None:
-        self._svc.worker("rotator").send(HomeRotator())
+        self._svc.worker(ControlReadoutService.WORKER_ROTATOR).send(HomeRotator())
         self._msg("Homing rotator…", MessageLevel.INFO)

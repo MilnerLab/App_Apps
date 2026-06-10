@@ -40,7 +40,7 @@ class ControlReadoutModule(BaseModule):
         svc = c.get(ControlReadoutService)
 
         def _on_worker_error(msg: WorkerError) -> None:
-            if msg.worker_name != "rotator":
+            if msg.worker_name != ControlReadoutService.WORKER_ROTATOR:
                 return
             detail = f"crashed: {msg.error}"
             ctx.event_bus.publish(AppMessage(f"Rotator {detail}", MessageLevel.ERROR))

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from numpy import sign
+
 from app_apps.analysis.phase_control.domain.phase_corrector import CorrectionResult
 from base_core.framework.subprocess.messages import Message, Kind
 from app_apps.analysis.phase_control.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.analysis.phase_control.domain.envelope_config import EnvelopeConfig
+from base_core.math.models import Angle
 
 
 @dataclass(frozen=True)
@@ -52,3 +55,12 @@ class SetPaused(Message):
 class Reset(Message):
     NAME = "Reset"
     KIND = Kind.COMMAND
+
+
+@dataclass(frozen=True)
+class CorrectionAvailable(Message):
+    NAME = "CorrectionAvailable"
+    KIND = Kind.EVENT
+
+    angle: Angle 
+    sign: int
