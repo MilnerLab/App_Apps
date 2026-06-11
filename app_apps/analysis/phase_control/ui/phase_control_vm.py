@@ -5,6 +5,7 @@ from typing import ClassVar
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QWidget
 
+from app_apps.analysis.phase_control.subprocess.domain.mode import ControlMode
 from app_apps.io.spectrometer.events import SpectrumAvailable, SpectrumAck
 from base_core.framework.events import EventBus
 from base_core.framework.subprocess.shared_memory.buffer_output import BufferOutput
@@ -14,7 +15,6 @@ from base_qt.ui.buffer_consumer_mixin import BufferConsumerMixin
 from base_qt.ui.panel_vm import PanelVM, ui_thread
 from spm_002.shared_spectrum_buffer import SharedSpectrumBuffer
 
-from app_apps.analysis.phase_control.domain.mode import ControlMode
 from app_apps.analysis.phase_control.subprocess.messages import CorrectionAvailable
 from app_apps.analysis.phase_control.service import PhaseControlService
 
@@ -62,8 +62,6 @@ class PhaseControlVM(BufferConsumerMixin, PanelVM):
 
     @ui_thread
     def _on_spectrum(self, event: SpectrumAvailable) -> None:
-        if event.consumer_id != self.CONSUMER_ID:
-            return
         try:
             _, wavelengths, intensities = self._spec_buffer.read_spectrum_copy(event.slot)
             self.spectrum_updated.emit(wavelengths, intensities)

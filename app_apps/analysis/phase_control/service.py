@@ -8,6 +8,7 @@ from base_core.framework.events.event_bus import EventBus
 from base_core.framework.subprocess.json_endpoint import JsonlSubprocessEndpoint
 from base_core.framework.subprocess.subprocess_service import SubprocessService
 from base_core.framework.subprocess.shared_memory.buffer_output import BufferOutput
+from base_core.framework.subprocess.shared_memory.shared_memory_base_messages import ItemAvailable
 from base_core.framework.subprocess.worker_handle import WorkerHandle
 from app_apps.analysis.phase_control.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.analysis.phase_control.domain.envelope_config import EnvelopeConfig
@@ -21,6 +22,7 @@ from app_apps.analysis.phase_control.subprocess.messages import (
     SetPaused,
 )
 from app_apps.io.control_readout.events import RotateRequested
+from app_apps.io.spectrometer.events import SpectrumAvailable
 from spm_002.shared_spectrum_buffer import SharedSpectrumBuffer
 
 
@@ -38,6 +40,7 @@ class PhaseControlService(SubprocessService):
     ) -> None:
         super().__init__(io=io, endpoint=endpoint, bus=bus)
         self._config = config
+        self._spec_output = spec_output
         self._current_mode = ControlMode.PHASE_TRACKING
         for mode in ControlMode:
             handle = (
@@ -50,6 +53,7 @@ class PhaseControlService(SubprocessService):
         super().start()
         self._unsub_config = self._internal_bus.subscribe(ConfigSynced, self._on_config_synced)
         self._unsub_rotate = self._internal_bus.subscribe(CorrectionAvailable, self._on_correction_available)
+        self._unsub_spectrum = self._spec_output.subscribe_available(self._bus, self._on_spectrum_available)
         def _publish_err(exc: BaseException) -> None:
             self._bus.publish(AppMessage(f"Phase control failed to start: {exc}", MessageLevel.ERROR))
 
@@ -61,6 +65,7 @@ class PhaseControlService(SubprocessService):
         self._publish_status(False)
         self._unsub_config()
         self._unsub_rotate()
+        self._unsub_spectrum()
         for mode in ControlMode:
             self.worker(mode.value).stop()
         super().stop()
@@ -68,9 +73,19 @@ class PhaseControlService(SubprocessService):
     def _on_config_synced(self, event: ConfigSynced) -> None:
         self._config.copy_from(event.config)
 
-    def _on_correction_available(self, event: CorrectionAvailable) -> None:
-        self._bus.publish(RotateRequested(angle_rad=float(event.angle.Rad)))
-        self._bus.publish(event)
+    def _on_correction_available(self, message: CorrectionAvailable) -> None:
+        self._bus.publish(RotateRequested(angle_rad=float(message.angle.Rad)))
+        self._bus.publish(message)
+
+    def _on_spectrum_available(self, event: SpectrumAvailable) -> None:
+        for mode in ControlMode:
+            self.worker(mode.value).send(ItemAvailable(
+                consumer_id=mode.value,
+                slot=event.slot,
+                item_id=event.item_id,
+                timestamp_ns=event.timestamp_ns,
+                buffer_id=self._spec_output.buffer_id,
+            ))
 
     # ------------------------------------------------------------------
     # Runtime control

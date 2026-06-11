@@ -35,8 +35,6 @@ class SpectrumVM(BufferConsumerMixin, PanelVM):
 
     @ui_thread
     def _on_spectrum(self, event: SpectrumAvailable) -> None:
-        if event.consumer_id != self.CONSUMER_ID:
-            return
         try:
             _header, wavelengths, intensities = self._buffer.read_spectrum_copy(event.slot)
             self.spectrum_updated.emit(wavelengths, intensities)

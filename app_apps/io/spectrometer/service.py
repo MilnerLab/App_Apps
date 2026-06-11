@@ -7,10 +7,8 @@ from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.events.event_bus import EventBus
 from base_core.framework.subprocess.subprocess_service import SubprocessService
 from base_core.framework.subprocess.json_endpoint import JsonlSubprocessEndpoint
-from base_core.framework.subprocess.shared_memory.shared_buffer_coordinator import (
-    SharedBufferCoordinator,
-)
 from base_core.framework.subprocess.shared_memory.buffer_output import BufferOutput
+from base_core.framework.subprocess.shared_memory.shared_buffer_coordinator import SharedBufferCoordinator
 from base_core.framework.subprocess.worker_handle import WorkerHandle
 from spm_002.shared_spectrum_buffer import SharedSpectrumBuffer
 
@@ -51,8 +49,9 @@ class SpectrometerService(SubprocessService):
             bus=bus,
             available_cls=SpectrumAvailable,
             ack_cls=SpectrumAck,
+            buffer_id=WORKER_NAME,
         )
-        handle.with_output(buffer, coordinator, item_notifier=self._output._notify_item_available)
+        handle.with_output(buffer, self._output)
         self._register_handle(WORKER_NAME, handle)
 
     @property
