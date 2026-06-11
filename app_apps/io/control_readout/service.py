@@ -6,7 +6,7 @@ from base_core.framework.app.app_message import AppMessage, MessageLevel
 from base_core.framework.subprocess.subprocess_service import SubprocessService
 
 from app_apps.io.control_readout.events import RotateRequested
-from elliptec.messages import Rotate
+from control_readout.elliptec.messages import Rotate
 
 
 class ControlReadoutService(SubprocessService):

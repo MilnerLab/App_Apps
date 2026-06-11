@@ -14,7 +14,7 @@ from base_core.framework.modules import BaseModule
 from base_core.framework.subprocess.json_endpoint import JsonlSubprocessEndpoint
 from base_core.framework.subprocess.shared_memory.shared_memory_base_messages import base_registry
 from base_core.framework.subprocess.worker_protocol import WorkerError
-from elliptec.messages import HomeRotator, Rotate, RotatorHomed, RotatorMoved
+from control_readout.elliptec.messages import HomeRotator, Rotate, RotatorHomed, RotatorMoved
 
 
 class ControlReadoutModule(BaseModule):

@@ -5,9 +5,9 @@ import time
 import pyqtgraph as pg
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QPushButton, QSizePolicy, QWidget
 
+from app_apps.analysis.phase_control.subprocess.domain.mode import ControlMode
 from base_qt.ui.panel import Panel
 
-from app_apps.analysis.phase_control.domain.mode import ControlMode
 from app_apps.analysis.phase_control.ui.phase_control_vm import PhaseControlVM
 
 _MAX_HISTORY = 1000

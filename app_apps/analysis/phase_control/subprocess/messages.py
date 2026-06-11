@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app_apps.analysis.phase_control.subprocess.domain.envelope_config import EnvelopeConfig
+from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 from base_core.framework.subprocess.messages import Message, Kind
 from base_core.math.models import Angle
-from app_apps.analysis.phase_control.domain.phase_stabilization_config import StabilizationConfig
-from app_apps.analysis.phase_control.domain.envelope_config import EnvelopeConfig
 
 
 @dataclass(frozen=True)

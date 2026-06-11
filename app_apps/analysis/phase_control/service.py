@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from app_apps.analysis.phase_control.subprocess.domain.envelope_config import EnvelopeConfig
+from app_apps.analysis.phase_control.subprocess.domain.mode import ControlMode
+from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 from base_core.framework.app.app_message import AppMessage, MessageLevel
 from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.events.event_bus import EventBus
@@ -10,9 +13,6 @@ from base_core.framework.subprocess.subprocess_service import SubprocessService
 from base_core.framework.subprocess.shared_memory.buffer_output import BufferOutput
 from base_core.framework.subprocess.shared_memory.shared_memory_base_messages import ItemAvailable
 from base_core.framework.subprocess.worker_handle import WorkerHandle
-from app_apps.analysis.phase_control.domain.phase_stabilization_config import StabilizationConfig
-from app_apps.analysis.phase_control.domain.envelope_config import EnvelopeConfig
-from app_apps.analysis.phase_control.domain.mode import ControlMode
 from app_apps.analysis.phase_control.subprocess.messages import (
     ConfigSynced,
     CorrectionAvailable,

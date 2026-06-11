@@ -4,8 +4,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from app_apps.analysis.phase_control.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.analysis.phase_control.service import PhaseControlService
+from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.analysis.phase_control.subprocess.messages import (
     ConfigSynced,
     CorrectionAvailable,

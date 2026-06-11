@@ -10,7 +10,7 @@ from base_qt.ui.panel_vm import PanelVM, ui_thread
 from base_qt.ui.app_message import MessageLevel
 
 from app_apps.io.control_readout.service import ControlReadoutService
-from elliptec.messages import HomeRotator, Rotate, RotatorHomed, RotatorMoved
+from control_readout.elliptec.messages import HomeRotator, Rotate, RotatorHomed, RotatorMoved
 
 
 class RotatorVM(PanelVM):
