@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app_apps.io.control_readout.buffer import PressureMemorySpec
+from app_apps.io.control_readout.esp_worker_handler import EspHandle
 from app_apps.io.control_readout.rotator_worker_handler import RotatorHandle
 from app_apps.io.control_readout.service import ControlReadoutService
 from base_core.framework.app.context import AppContext
@@ -25,17 +26,21 @@ class ControlReadoutModule(BaseModule):
         handle = RotatorHandle(service=service, bus=ctx.event_bus)
         service.add_handle(handle)
 
+        # ESP301 stages share the control_readout subprocess (additive).
+        esp_handle = EspHandle(service=service, bus=ctx.event_bus)
+        service.add_handle(esp_handle)
+
         c.register_instance(ControlReadoutService, service)
         c.register_instance(RotatorHandle, handle)
+        c.register_instance(EspHandle, esp_handle)
 
     def on_startup(self, c: Container, ctx: AppContext) -> None:
         service = c.get(ControlReadoutService)
-        handle = c.get(RotatorHandle)
         service.start()
-        handle.start()
+        c.get(RotatorHandle).start()
+        c.get(EspHandle).start()
 
     def on_shutdown(self, c: Container, ctx: AppContext) -> None:
-        handle = c.get(RotatorHandle)
-        service = c.get(ControlReadoutService)
-        handle.stop()
-        service.stop()
+        c.get(EspHandle).stop()
+        c.get(RotatorHandle).stop()
+        c.get(ControlReadoutService).stop()

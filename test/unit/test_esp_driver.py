@@ -6,7 +6,9 @@ from collections import deque
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from app_apps.io.esp_common.esp_driver import EspDriver, EspError, Trajectory
+# Driver relocated into the Devices package (control_readout.esp_301) following the
+# device pattern; tested here via the editable install (requires the 3.12 venv).
+from control_readout.esp_301.esp_driver import EspDriver, EspError, Trajectory
 
 
 class FakeSerial:
