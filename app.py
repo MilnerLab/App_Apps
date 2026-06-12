@@ -6,6 +6,7 @@ import sys
 from PySide6.QtWidgets import QApplication
 
 from app_apps.app.module import AppModule
+from app_apps.app.service_config import ServiceConfig
 from app_apps.app.shell import AppShell
 from app_apps.io.spectrometer.module import SpectrometerModule
 from app_apps.io.control_readout.module import ControlReadoutModule
@@ -36,6 +37,11 @@ def build_context() -> AppContext:
 def build_container(ctx: AppContext) -> Container:
     c = Container()
     c.register_instance(AppContext, ctx)
+    c.register_instance(ServiceConfig, ServiceConfig(
+        spectrometer=True,
+        rotator=False,
+        phase_control=True,
+    ))
     return c
 
 

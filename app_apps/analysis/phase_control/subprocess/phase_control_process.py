@@ -1,29 +1,30 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-# Add App_Apps root to sys.path so app_apps.* is importable in the subprocess.
-sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
-
-from base_core.framework.subprocess.subprocess_app import SubprocessApp
-from base_core.framework.subprocess.shared_memory.shared_memory_base_messages import base_registry
-from app_apps.analysis.phase_control.subprocess.phase_tracking_worker import PhaseTrackingWorker
+from base_core.ipc.subprocess_main import BaseSubprocessMain
+from app_apps.analysis.phase_control.subprocess.domain.envelope_config import EnvelopeConfig
+from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.analysis.phase_control.subprocess.envelope_worker import EnvelopeWorker
-from app_apps.analysis.phase_control.subprocess.messages import (
-    ConfigSynced,
-    CorrectionAvailable,
-    Reset,
-    SetStabilizationConfig,
-    SetEnvelopeConfig,
-    SetPaused,
-)
+from app_apps.analysis.phase_control.subprocess.phase_tracking_worker import PhaseTrackingWorker
+from app_apps.io.spectrometer.buffer import SpectrumBuffer
+
+
+class PhaseControlProcess(BaseSubprocessMain):
+    def setup(self) -> None:
+        self.register_buffer_class(SpectrumBuffer)
+        get_buffer = lambda: self.get_buffer(SpectrumBuffer)  # noqa: E731
+        self.register_worker(PhaseTrackingWorker(
+            bus=self.bus,
+            connector=self.connector,
+            config=StabilizationConfig(),
+            get_buffer=get_buffer,
+        ))
+        self.register_worker(EnvelopeWorker(
+            bus=self.bus,
+            connector=self.connector,
+            config=EnvelopeConfig(),
+            get_buffer=get_buffer,
+        ))
+
 
 if __name__ == "__main__":
-    app = SubprocessApp(
-        base_registry().extend(ConfigSynced, CorrectionAvailable, Reset, SetStabilizationConfig, SetEnvelopeConfig, SetPaused),
-        source="phase_control",
-    )
-    app.add_worker(PhaseTrackingWorker())
-    app.add_worker(EnvelopeWorker())
-    app.run()
+    PhaseControlProcess.main()

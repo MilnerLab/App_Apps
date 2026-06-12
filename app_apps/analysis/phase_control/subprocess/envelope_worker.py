@@ -1,60 +1,83 @@
 from __future__ import annotations
 
-from typing import Optional
+import logging
+from typing import Callable, TYPE_CHECKING
 
-from base_core.framework.subprocess.messages import Message
-from base_core.framework.subprocess.shared_memory.models import SharedRingBufferSpec
-from base_core.framework.subprocess.worker import ConsumerWorker
-from app_apps.analysis.phase_control.domain.envelope_config import EnvelopeConfig
-from app_apps.analysis.phase_control.domain.envelope_optimizer import EnvelopeOptimizer
+from base_core.ipc.worker import BaseWorker
+from app_apps.analysis.phase_control.subprocess.domain.envelope_config import EnvelopeConfig
+from app_apps.analysis.phase_control.subprocess.domain.envelope_optimizer import EnvelopeOptimizer
 from app_apps.analysis.phase_control.subprocess.messages import (
     CorrectionAvailable,
-    Reset,
+    ProcessSpectrum,
+    SpectrumProcessed,
     SetEnvelopeConfig,
     SetPaused,
 )
-from app_apps.analysis.phase_control.domain.mode import ControlMode
-from spm_002.shared_spectrum_buffer import SharedSpectrumBuffer
+
+if TYPE_CHECKING:
+    from base_core.framework.events.event_bus import EventBus
+    from base_core.ipc.subprocess_connector import SubprocessPipelineConnector
+    from app_apps.io.spectrometer.buffer import SpectrumBuffer
+
+log = logging.getLogger(__name__)
+
+WORKER_ID = "envelope"
+CONSUMER_ID = "phase_control"
 
 
-class EnvelopeWorker(ConsumerWorker[SharedSpectrumBuffer]):
-    name = ControlMode.ENVELOPE.value
+class EnvelopeWorker(BaseWorker):
+    def __init__(
+        self,
+        bus: EventBus,
+        connector: SubprocessPipelineConnector,
+        config: EnvelopeConfig,
+        get_buffer: Callable[[], SpectrumBuffer],
+    ) -> None:
+        super().__init__(WORKER_ID, bus, connector)
+        self._config = config
+        self._get_buffer = get_buffer
+        self._optimizer: EnvelopeOptimizer | None = None
+        self._paused = True
 
-    def __init__(self) -> None:
-        super().__init__(buffer_id="spectrometer")
-        self._paused = True  # inactive by default; phase_tracking starts active
-        self._config = EnvelopeConfig()
-        self._optimizer: Optional[EnvelopeOptimizer] = None
+    def _setup(self) -> None:
+        self._unsubs.append(self._bus.subscribe(SetEnvelopeConfig, self._on_set_config))
+        self._unsubs.append(self._bus.subscribe(SetPaused, self._on_set_paused))
+        self._unsubs.append(self._bus.subscribe(ProcessSpectrum, self._on_spectrum))
 
-    def start(self) -> None:
+    def _start(self) -> None:
         self._optimizer = EnvelopeOptimizer(self._config)
+        self._paused = True  # envelope mode must be explicitly unpaused via SetPaused
 
-    def attach_buffer(self, spec: SharedRingBufferSpec) -> SharedSpectrumBuffer:
-        return SharedSpectrumBuffer.attach(spec)
+    def _stop(self) -> None:
+        self._optimizer = None
+        self._paused = True
 
-    def handle(self, msg: Message, request_id: Optional[str]) -> None:
-        if isinstance(msg, SetPaused):
-            self._paused = msg.paused
-            self.reply_ok(request_id)
-        elif isinstance(msg, Reset):
+    def _reset(self) -> None:
+        if self._optimizer is not None:
             self._optimizer.reset()
-            self.reply_ok(request_id)
-        elif isinstance(msg, SetEnvelopeConfig):
-            self._config = msg.config
-            self._optimizer = EnvelopeOptimizer(msg.config)
-            self.reply_ok(request_id)
-        else:
-            super().handle(msg, request_id)
 
-    def on_item(self, slot: int, item_id: int, timestamp_ns: int) -> None:  # noqa: ARG002
-        if self._paused:
-            self.ack(slot, item_id)
+    def _on_spectrum(self, msg: ProcessSpectrum) -> None:
+        if self._paused or self._optimizer is None:
             return
+        try:
+            buf = self._get_buffer()
+            wl = buf.wavelengths(msg.slot)
+            ins = buf.intensities(msg.slot)
+            result = self._optimizer.update(wl, ins)
+            if result is not None:
+                self._notify(CorrectionAvailable(angle=result.angle, sign=result.sign))
+        except Exception:
+            log.exception("EnvelopeWorker: error processing spectrum slot %d", msg.slot)
+        finally:
+            self._notify(SpectrumProcessed(slot=msg.slot, item_id=msg.item_id, consumer_id=CONSUMER_ID))
 
-        _, wavelengths, intensities = self.buffer.read_spectrum_copy(slot)
-        result = self._optimizer.update(wavelengths, intensities)
+    def _on_set_config(self, msg: SetEnvelopeConfig) -> None:
+        self._config = msg.config
+        self._optimizer = EnvelopeOptimizer(self._config)
+        self._reply_ok(msg)
 
-        if result is not None:
-            self.emit(CorrectionAvailable(angle=result.angle, sign=result.sign))
-
-        self.ack(slot, item_id)
+    def _on_set_paused(self, msg: SetPaused) -> None:
+        if msg.worker_id != self._worker_id:
+            return
+        self._paused = msg.paused
+        self._reply_ok(msg)
