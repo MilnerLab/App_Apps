@@ -1,58 +1,39 @@
 from __future__ import annotations
 
-from typing import ClassVar
-
-from base_core.framework.app.app_message import AppMessage, MessageLevel
-from base_core.framework.subprocess.subprocess_service import SubprocessService
-
-from app_apps.io.control_readout.events import RotateRequested
-from control_readout.elliptec.messages import Rotate
-from control_readout.elliptec.rotator_worker import RotatorWorker
+from base_core.framework.concurrency.task_runner import TaskRunner
+from base_core.framework.events.event_bus import EventBus
+from base_core.framework.shm.slot_coordinator import SlotCoordinator
+from base_core.framework.shm.writer_service import WriterSubprocessService
+from app_apps.io.control_readout.buffer import PressureBuffer, PressureMemorySpec
+from app_apps.io.control_readout.events import PressureAvailable, PressureAck
 
 
-class ControlReadoutService(SubprocessService):
-    """Main-process handle to the Control & Readout subprocess."""
+class ControlReadoutService(WriterSubprocessService[PressureAvailable, PressureAck]):
+    """
+    Main-process service for the control readout subprocess.
 
-    service_name: ClassVar[str] = "control_readout"
+    Owns the PressureBuffer shared memory region and the SlotCoordinator.
+    Hosts the rotator worker (ELL14 HWP) and will host pressure-sensor workers
+    when implemented.
+    """
 
-    # ------------------------------------------------------------------
-    # Stream lifecycle
-    # ------------------------------------------------------------------
-
-    def start(self) -> None:
-        super().start()
-        self._publish_status(True)
-
-    def stop(self) -> None:
-        self._publish_status(False)
-        super().stop()
-
-    # ------------------------------------------------------------------
-    # Rotator worker
-    # ------------------------------------------------------------------
-
-    def start_rotator(self) -> None:
-        self._rotating = False
-        self._rotate_sub = self._bus.subscribe(RotateRequested, self._on_rotate_requested)
-        self.worker(RotatorWorker.name).start_async(
-            key="control_readout.rotator.start",
-            on_error=lambda exc: self._bus.publish(
-                AppMessage(f"Rotator failed to start: {exc}", MessageLevel.ERROR)
+    def __init__(
+        self,
+        bus: EventBus,
+        io: TaskRunner,
+        spec: PressureMemorySpec,
+    ) -> None:
+        coordinator: SlotCoordinator[PressureAvailable, PressureAck] = SlotCoordinator(
+            spec=spec,
+            owner_id="control_readout",
+            bus=bus,
+            make_available=lambda slot, item_id, ts: PressureAvailable(
+                slot=slot, item_id=item_id, timestamp_ns=ts
             ),
+            ack_type=PressureAck,
         )
+        super().__init__(bus, io, PressureBuffer, spec, coordinator)
 
-    def stop_rotator(self) -> None:
-        self._rotate_sub()
-        self.worker(RotatorWorker.name).stop()
-
-    def _on_rotate_requested(self, event: RotateRequested) -> None:
-        if self._rotating:
-            return
-        self._rotating = True
-        self.worker(RotatorWorker.name).request_async(
-            Rotate(angle_rad=event.angle_rad),
-            key="control_readout.rotator.rotate",
-            cancel_previous=True,
-            on_success=lambda _: setattr(self, "_rotating", False),
-            on_error=lambda _: setattr(self, "_rotating", False),
-        )
+    @property
+    def _entry_module(self) -> str:
+        return "control_readout.control_readout_process"
