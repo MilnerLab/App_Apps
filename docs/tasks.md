@@ -45,7 +45,23 @@ Build order follows **D6 (devices first)** — analysis is blocked on the collab
 Each device = a new `Devices/<pkg>/` package + a new `app_apps/io/<name>/` module,
 following the `spm_002` pattern (architecture §2).
 
-### M1.A — Newport ESP301 motion (probe / delay / truncation)  ← **first**
+### M1.A — Newport ESP301 motion (probe / delay / truncation) ✅ **BUILT (import-verified, py3.12)**
+
+> Implemented on the new `base_core.ipc`/`shm` pattern, **hosted in the control_readout
+> subprocess** (per agreement with collaborator). Devices `feature/esp301`:
+> `control_readout/esp_301/` = `esp_driver.py` (relocated) + `config.py` + `messages.py`
+> (`Request[OKReply]`/`Message`, `@register`) + `Esp301Worker` (`BaseWorker` + ~20 Hz
+> position-poll thread → `_notify` telemetry over the IPC pipe + motion-complete
+> detection), registered in `control_readout_process.setup()`. App_Apps
+> `feature/routines`: `EspHandle` (`BaseWorkerHandle`) + `RequestMove` event + module
+> wiring. Driver's 13 unit tests pass against the relocated module.
+> ⚠️ **Cannot run the live subprocess yet:** `control_readout_process` also imports the
+> contributor's `RotatorWorker`, which is broken on main (`elliptec_ell14.py` imports a
+> moved-away `elliptec.base`). Pre-existing; flag to upstream. Same theme as `shell.py`
+> → `base_qt.ui.apply` (also missing on main). My ESP301 code is correct + import-clean.
+> **Remaining:** live hardware bring-up + ESP301 `DC` trajectory spike (M1.A.2b); a VM/panel.
+
+<details><summary>original sub-tasks (superseded by the above)</summary>
 - [ ] **M1.A.0** `Devices/esp_common/esp_driver.py`: shared serial driver (command set
       from `test/esp100_test.py`), parameterized by axis. *Test:* unit-test command
       framing; smoke-test against real controller.
@@ -63,6 +79,7 @@ following the `spm_002` pattern (architecture §2).
 - [ ] **M1.A.4** `ui/esp301_vm.py` + panel; register in
       [panel_window.py](../app_apps/app/panel_window.py). *Test:* manual jog/home from
       the GUI moves the stage and updates the readout.
+</details>
 
 ### M1.B — Newport ESP100 (grating)
 - [ ] **M1.B.1** `Devices/esp100/` (1 axis) reusing `esp_common/esp_driver.py`;

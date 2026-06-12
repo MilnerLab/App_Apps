@@ -125,6 +125,8 @@ infrastructure, before doing so.
 | D21 | 2026-06-12 | **Integration base moved from `start_l2p` → `main`.** Contributor reworked/consolidated all 3 repos onto main; start_l2p superseded | Discovered the contributor's rework on App_Apps/Base_Core/Devices `main` |
 | D22 | 2026-06-12 | Framework is now `base_core.ipc.*` + `base_core.framework.shm.*`; adopt the buffer/events/service/`WriterSubprocessService`/`BaseWorkerHandle`/module pattern (see architecture §0). Supersedes D7/D20 contracts | Follow the contributor's established structure |
 | D23 | 2026-06-12 | Merged `origin/main` into `feature/routines` (merge 5302ebe), kept tested pure modules; backup tag `backup/pre-main-merge-2026-06-12`; other repos untouched | Align to new structure without rebasing pushed history or touching other repos |
+| D24 | 2026-06-12 | Env aligned: Base_Core+Devices+Base_Qt → `main` (ff, conflict-free); built `.venv312` (Python 3.12) alongside `.venv` (3.10); scipy/lmfit/h5py installed; Devices `pyproject` fixed (stale `elliptec`) | Framework needed 3.11+ (`typing.Self`); user OK to drop PySpin/3.10. Contributor's main has WIP breakages (`elliptec.base`, `base_qt.ui.apply`) — flag upstream |
+| D25 | 2026-06-12 | ESP301 built on the `base_core.ipc`/`shm` pattern, **hosted in control_readout** subprocess (Devices `feature/esp301` + App_Apps `feature/routines`); ESP driver relocated to Devices | Collaborator agreed to host in control_readout; ESP100 left to them (their empty stub) — built ESP301 (unclaimed workhorse) instead |
 
 ---
 
