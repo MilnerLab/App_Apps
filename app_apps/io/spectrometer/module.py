@@ -4,11 +4,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from app_apps.io.spectrometer.service import SpectrometerService, WORKER_NAME as SPECTROMETER_WORKER
-from base_core.framework.app.app_message import AppMessage, MessageLevel
+from app_apps.app.service_config import ServiceConfig
+from app_apps.io.spectrometer.service import SpectrometerService
+from spm_002.spectrometer_worker import SpectrometerWorker
 from base_core.framework.app.context import AppContext
-from base_core.framework.app.enums import AppStatus
-from base_core.framework.app.service_status import ServiceStatus
 from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
@@ -17,7 +16,6 @@ from base_core.framework.subprocess.shared_memory.shared_memory_base_messages im
 from base_core.framework.subprocess.shared_memory.shared_buffer_coordinator import (
     SharedBufferCoordinator,
 )
-from base_core.framework.subprocess.worker_protocol import WorkerError
 from spm_002.config import PYTHON32_PATH, SpectrometerConfig
 from spm_002.messages import SetSpectrometerConfig
 from spm_002.shared_spectrum_buffer import SharedSpectrumBuffer
@@ -65,22 +63,13 @@ class SpectrometerModule(BaseModule):
 
         ctx.lifecycle.add(_cleanup_buffer)
 
-        if ctx.status == AppStatus.OFFLINE:
-            return
-
         svc = c.get(SpectrometerService)
-
-        def _on_worker_error(msg: WorkerError) -> None:
-            if msg.worker_name != SPECTROMETER_WORKER:
-                return
-            detail = f"crashed: {msg.error}"
-            ctx.event_bus.publish(AppMessage(f"Spectrometer {detail}", MessageLevel.ERROR))
-            ctx.event_bus.publish(ServiceStatus(SpectrometerService.service_name, False, detail))
-
-        ctx.lifecycle.add(ctx.event_bus.subscribe(WorkerError, _on_worker_error))
         svc.start()
         ctx.lifecycle.add(svc.stop)
-        svc.worker(SPECTROMETER_WORKER).request_async(
-            SetSpectrometerConfig(config=SpectrometerConfig()),
-            key="spectrometer.init_config",
-        )
+        if c.get(ServiceConfig).spectrometer:
+            svc.start_spectrometer()
+            ctx.lifecycle.add(svc.stop_spectrometer)
+            svc.worker(SpectrometerWorker.name).request_async(
+                SetSpectrometerConfig(config=SpectrometerConfig()),
+                key="spectrometer.init_config",
+            )

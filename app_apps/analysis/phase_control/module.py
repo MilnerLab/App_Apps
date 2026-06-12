@@ -18,8 +18,8 @@ _ALL_MESSAGES = (ConfigSynced, CorrectionAvailable, Reset, SetStabilizationConfi
 from app_apps.io.control_readout.module import ControlReadoutModule
 from app_apps.io.spectrometer.module import SpectrometerModule
 from app_apps.io.spectrometer.service import SpectrometerService
+from app_apps.app.service_config import ServiceConfig
 from base_core.framework.app.context import AppContext
-from base_core.framework.app.enums import AppStatus
 from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
@@ -54,7 +54,7 @@ class PhaseControlModule(BaseModule):
         ))
 
     def on_startup(self, c: Container, ctx: AppContext) -> None:
-        if ctx.status == AppStatus.OFFLINE:
+        if not c.get(ServiceConfig).phase_control:
             return
 
         svc = c.get(PhaseControlService)

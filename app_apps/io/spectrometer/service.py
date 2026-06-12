@@ -11,19 +11,16 @@ from base_core.framework.subprocess.shared_memory.buffer_output import BufferOut
 from base_core.framework.subprocess.shared_memory.shared_buffer_coordinator import SharedBufferCoordinator
 from base_core.framework.subprocess.worker_handle import WorkerHandle
 from spm_002.shared_spectrum_buffer import SharedSpectrumBuffer
+from spm_002.spectrometer_worker import SpectrometerWorker
 
 from app_apps.io.spectrometer.events import SpectrumAvailable, SpectrumAck
-
-
-WORKER_NAME = "spectrometer"
 
 
 class SpectrometerService(SubprocessService):
     """
     Main-process handle to the SPM-002 spectrometer subprocess.
 
-    UI consumers register via the BufferOutput returned by .output.  The
-    coordinator is an internal detail; it is not exposed in the DI container.
+    UI consumers register via the BufferOutput returned by .output.
     """
 
     service_name: ClassVar[str] = "spectrometer"
@@ -37,22 +34,18 @@ class SpectrometerService(SubprocessService):
         coordinator: SharedBufferCoordinator,
     ) -> None:
         super().__init__(io=io, endpoint=endpoint, bus=bus)
-        self._buffer = buffer
-        self._coordinator = coordinator
 
-        # Handle must exist before BufferOutput so send_grant is available.
-        # BufferOutput must exist before with_output so item_notifier can be wired.
-        handle = WorkerHandle(service=self, name=WORKER_NAME, bus=self._internal_bus)
+        send_grant = self.make_send_grant(SpectrometerWorker.name, SpectrometerWorker.name)
         self._output: BufferOutput[SpectrumAvailable, SpectrumAck] = BufferOutput(
             coordinator=coordinator,
-            send_grant=handle.send_grant,
+            send_grant=send_grant,
             bus=bus,
             available_cls=SpectrumAvailable,
             ack_cls=SpectrumAck,
-            buffer_id=WORKER_NAME,
+            buffer_id=SpectrometerWorker.name,
         )
-        handle.with_output(buffer, self._output)
-        self._register_handle(WORKER_NAME, handle)
+        self.set_write_buffer(SpectrometerWorker.name, SpectrometerWorker.name, buffer, self._output)
+        self._register_handle(SpectrometerWorker.name, WorkerHandle(service=self, name=SpectrometerWorker.name))
 
     @property
     def output(self) -> BufferOutput:
@@ -61,16 +54,21 @@ class SpectrometerService(SubprocessService):
     def start(self) -> None:
         super().start()
         self._output.start()
-        self.worker(WORKER_NAME).start_async(
+        self._publish_status(True)
+
+    def start_spectrometer(self) -> None:
+        self.worker(SpectrometerWorker.name).start_async(
+            post_start=self._send_initial_grants,
             key="spectrometer.worker.start",
             on_error=lambda exc: self._bus.publish(
                 AppMessage(f"Spectrometer failed to start: {exc}", MessageLevel.ERROR)
             ),
         )
-        self._publish_status(True)
+
+    def stop_spectrometer(self) -> None:
+        self.worker(SpectrometerWorker.name).stop()
 
     def stop(self) -> None:
         self._publish_status(False)
-        self.worker(WORKER_NAME).stop()
         self._output.stop()
         super().stop()

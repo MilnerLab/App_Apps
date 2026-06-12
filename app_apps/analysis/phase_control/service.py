@@ -42,18 +42,23 @@ class PhaseControlService(SubprocessService):
         self._config = config
         self._spec_output = spec_output
         self._current_mode = ControlMode.PHASE_TRACKING
+
+        self.add_read_buffer("spectrometer", spec_buffer, spec_output)
+
         for mode in ControlMode:
-            handle = (
-                WorkerHandle(service=self, name=mode.value, bus=self._internal_bus)
-                .with_input("spectrometer", spec_output, spec_buffer)
-            )
-            self._register_handle(mode.value, handle)
+            self._register_handle(mode.value, WorkerHandle(service=self, name=mode.value))
 
     def start(self) -> None:
         super().start()
+        # Register each worker as a consumer of the spectrometer buffer so the
+        # coordinator knows how many acks are required before re-granting a slot.
+        for mode in ControlMode:
+            self._spec_output.register_consumer(mode.value)
+
         self._unsub_config = self._internal_bus.subscribe(ConfigSynced, self._on_config_synced)
         self._unsub_rotate = self._internal_bus.subscribe(CorrectionAvailable, self._on_correction_available)
         self._unsub_spectrum = self._spec_output.subscribe_available(self._bus, self._on_spectrum_available)
+
         def _publish_err(exc: BaseException) -> None:
             self._bus.publish(AppMessage(f"Phase control failed to start: {exc}", MessageLevel.ERROR))
 
@@ -92,22 +97,18 @@ class PhaseControlService(SubprocessService):
     # ------------------------------------------------------------------
 
     def set_mode(self, mode: ControlMode) -> None:
-        """Switch the active control mode. The inactive worker acks slots without processing."""
         if mode == self._current_mode:
             return
         self.worker(self._current_mode.value).send(SetPaused(paused=True))
         self._current_mode = mode
 
     def set_worker_paused(self, paused: bool) -> None:
-        """Pause/resume the active worker. Pausing keeps the worker running so the ring buffer drains."""
         self.worker(self._current_mode.value).send(SetPaused(paused=paused))
 
     def reset_worker(self) -> None:
-        """Reset the active worker's algorithm state without restarting the subprocess."""
         self.worker(self._current_mode.value).send(Reset())
 
     def set_config(self) -> None:
-        """Push the current container config to the phase tracking worker."""
         self.worker(ControlMode.PHASE_TRACKING.value).send(SetStabilizationConfig(config=self._config))
 
     def set_envelope_config(self, config: EnvelopeConfig) -> None:
