@@ -122,6 +122,9 @@ infrastructure, before doing so.
 | D18 | 2026-06-12 | Probe scan = dedicated ProbeScanRoutine (ESP DC + scope, constant-v sweep, DG readback, auto-chunk); QWP = coarse→fine→PID; XCORR calib = append-only HDF5 (new group per timestamp+stage-combo); XCORR recal NOT auto-run (too slow) — reminder deferred low-priority | Q16/Q14/Q10/Q11 |
 | D19 | 2026-06-12 | Per-DOF control: Delay←ν₀(f0), Truncation←ν_end, Grating←f1 (chirp rate), HWP←initial_phase, QWP←envelope_lower; f2=TOD nuisance (fit not controlled) | Grating cares about linear-freq term; f2 is TOD from laser/grating misalignment, kept for fit accuracy only (Q13) |
 | D20 | 2026-06-12 | ESP worker = CommandWorker + poll thread + serial lock; events auto-publish to bus; M1 developed/tested standalone (not via full-app launch) | Verified framework contracts; full-app launch gated on collaborator (missing routines + in-flux elliptec) |
+| D21 | 2026-06-12 | **Integration base moved from `start_l2p` → `main`.** Contributor reworked/consolidated all 3 repos onto main; start_l2p superseded | Discovered the contributor's rework on App_Apps/Base_Core/Devices `main` |
+| D22 | 2026-06-12 | Framework is now `base_core.ipc.*` + `base_core.framework.shm.*`; adopt the buffer/events/service/`WriterSubprocessService`/`BaseWorkerHandle`/module pattern (see architecture §0). Supersedes D7/D20 contracts | Follow the contributor's established structure |
+| D23 | 2026-06-12 | Merged `origin/main` into `feature/routines` (merge 5302ebe), kept tested pure modules; backup tag `backup/pre-main-merge-2026-06-12`; other repos untouched | Align to new structure without rebasing pushed history or touching other repos |
 
 ---
 

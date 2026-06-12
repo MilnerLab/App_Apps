@@ -3,7 +3,17 @@
 > Execution plan. See [architecture.md](architecture.md) for design and
 > [summary.md](summary.md) for strategy. Each task is a **build → test → review →
 > commit** unit (see summary §4). `[ ]` = todo, `[~]` = in progress, `[x]` = done.
-> Last updated: 2026-06-11.
+> Last updated: 2026-06-12.
+
+> ⚠️ **Structure update (2026-06-12):** integration base is now **`main`** (D21–D23);
+> device/io wiring follows the **`base_core.ipc`/`shm`** Handle/Service/buffer pattern in
+> [architecture §0](architecture.md). Tasks below that name `base_core.framework.subprocess`
+> / `Worker`/`CommandWorker` describe the superseded `start_l2p` variant — translate to the
+> new pattern when building.
+>
+> **Done so far** (on `feature/routines`, committed, not pushed): ESP serial driver +
+> PIDController + stage-ownership guard (`6b6d96c`); spectrum_info model+generator+fit
+> (`3d23795`); 37 unit tests green.
 
 Build order follows **D6 (devices first)** — analysis is blocked on the collaborator's
 `phase_control` fix (expected ~2026-06-12).

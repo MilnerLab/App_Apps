@@ -1,9 +1,53 @@
 # usCFG Software — Architecture
 
 > Technical design. See [summary.md](summary.md) for context/strategy and
-> [tasks.md](tasks.md) for sequencing. Decisions marked **[RECOMMENDED]** are my
-> proposal pending your confirmation; **[OPEN: Qn]** points at the open-questions
-> list at the bottom. Last updated: 2026-06-11.
+> [tasks.md](tasks.md) for sequencing. Last updated: 2026-06-12.
+
+---
+
+## 0. STRUCTURE UPDATE (2026-06-12) — `main` is the integration base ⚠️ SUPERSEDES §2
+
+The contributor **consolidated and reworked everything onto `main`** (all three repos);
+`start_l2p` is **superseded**. `origin/main` was merged into our `feature/routines`
+(merge `5302ebe`; our tested pure modules kept). The IPC framework **moved namespaces**
+and the per-device layering changed. **Follow this** — §2 below describes the older
+`start_l2p` variant and is kept only for history.
+
+**Framework namespaces (Base_Core `main`):**
+- `base_core.ipc.*` — `subprocess_service.SubprocessService`, `worker_handle.BaseWorkerHandle`,
+  `message.{Message,Request,Reply,OKReply,ErrorReply}`, `worker_messages.{Start,Stop,Reset}Worker`, `BaseWorker`.
+- `base_core.framework.shm.*` — `spec.MemorySpec`, `buffer.SharedMemoryBuffer`,
+  `slot_coordinator.SlotCoordinator`, `writer_service.WriterSubprocessService`,
+  `writer_subprocess_main.WriterSubprocessMain`.
+
+**Per-device pattern — main side (`app_apps/io/<dev>/`):**
+| File | Role |
+|------|------|
+| `buffer.py` | `MemorySpec` subclass (name, slot_count, shape, dtype) + `SharedMemoryBuffer` subclass (typed `write_*`/`read_*`). |
+| `events.py` | `<X>Available`/`<X>Ack` (buffer slot events) + `Request<Cmd>` (bus command events). |
+| `service.py` | `WriterSubprocessService[Available, Ack]` subclass; builds a `SlotCoordinator(spec, owner_id, bus, make_available, ack_type)`; declares `_entry_module` = the Devices subprocess module path. |
+| `<dev>_worker_handler.py` | `BaseWorkerHandle` subclass: `WORKER_ID`; `_on_attached()` → `_subscribe(RequestX, handler)`; typed methods call `_emit(msg)` / `_request(msg, on_reply)`. Bridges bus `Request*` → IPC. |
+| `module.py` | `BaseModule`: `register()` builds spec+service+handle and registers instances; `on_startup()` `service.start()` + `handle.start()`; `on_shutdown()` stops both. |
+
+Plus `app/service_config.py` = `ServiceConfig` feature-flag dataclass (which services enable).
+
+**Per-device pattern — worker side (Devices `<pkg>/`):**
+- Subprocess entry subclasses `WriterSubprocessMain`; `setup()` calls
+  `self.register_worker(<Worker>(bus=self.bus, connector=self.connector, config=..., port=...))`;
+  entry `if __name__ == "__main__": <Process>.main()`.
+- The `BaseWorker` + device messages live under `<pkg>/<subpkg>/` (e.g.
+  `control_readout/elliptec/{messages,ell14_worker,config}.py`).
+
+**Placement realignment for our work:** the ESP **driver** (`esp_driver.py`) belongs in a
+Devices package (e.g. `newport_esp/`) alongside its `BaseWorker`; our `control/`
+(PID + ownership) and `analysis/spectrum_info/` stay in `app_apps` (lower-layer, tested,
+structure-independent). The ESP **io module** follows the buffer/events/service/handler/
+module pattern above.
+
+> ⚠️ **Not runnable locally yet:** the merged tree imports `base_core.ipc/shm`, which are on
+> Base_Core `origin/main` but not in the local Base_Core checkout. Our pure unit tests
+> (driver/PID/ownership/spectrum) still pass (no framework import). Framework-coupled
+> code needs Base_Core+Devices updated to `main` first.
 
 ---
 
