@@ -254,8 +254,9 @@ spectrometer, direct to computer (not via scope).** Core domain library built & 
       fake ESP + real in-process scope buffer + background trace producer). Verifier-audited.
       (commit `3894d3b`) — NOTE: probe is automated *stepping*; true continuous scan = M5.1
       (ESP DC trajectory); full ν_start/ν_end control = M4 PID loops.
-- [ ] **R.7** Routine **authoring guide** (write-a-routine-in-5-min; full verb reference;
-      pasteable as LLM context).
+- [x] **R.7** Routine **authoring guide** ([routine_authoring_guide.md](routine_authoring_guide.md)):
+      5-min quickstart, mental model, full `lab.*` verb reference (matched to the facade),
+      recipes, common mistakes, and a paste-in LLM spec.
 - [ ] **R.8** *(roadmap, not committed)* T1 voice/standby trigger; T2 supervised planner;
       T3 bounded autonomous loop — see roadmap §6 of the plan.
 

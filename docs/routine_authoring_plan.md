@@ -151,8 +151,11 @@ actuation, dry-run mode.**
   ([experiment_physics.md](experiment_physics.md)).
 - ✅ Branches renamed & pushed: App_Apps `feature/io-control-analysis`, Devices
   `feature/device-drivers`; this work on App_Apps `feature/routine-authoring`.
-- ✅ Linear routine layer foundations: **R.1 bridge** (`778cee1`), **R.2 registry** (`57fa3c8`),
-  **R.3 lab facade** (`b857db6`) — 32 tests, full suite 89 green. No Devices changes needed (§4.2).
-- ⬜ R.4 runner (`LinearRoutineRunner`), R.5 module + `app.py` wiring, R.6 example scripts
-  (incl. overnight ν-scan), R.7 authoring guide.
-- ⬜ T1+ LLM tiers — roadmap only.
+- ✅ **Linear routine layer COMPLETE** (R.1–R.7): bridge (`778cee1`), registry (`57fa3c8`),
+  lab facade (`b857db6`), runner+events (`b7b7ead`), module+app wiring (`97bb221`), example
+  scripts (`3894d3b`), authoring guide ([routine_authoring_guide.md](routine_authoring_guide.md)).
+  No Devices changes needed (§4.2). Verify command `scripts/check.py` + read-only verifier
+  agent (`.claude/agents/verifier.md`) added; full check 131 green, mypy clean. Verifier-audited.
+- ⬜ T1+ LLM tiers — roadmap only (the authoring guide §6 is the LLM action spec they'd use).
+- Runs live in the app once the contributor's `main` breakages (`elliptec.base`,
+  `base_qt.ui.apply`) are fixed; our wiring is ready and inert until then.

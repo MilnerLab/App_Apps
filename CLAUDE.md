@@ -3,8 +3,9 @@
 Control/readout/analysis software for the **ultrashort optical centrifuge (usCFG)**.
 Read `docs/` first: `summary.md` (decision log), `architecture.md` (design),
 `experiment_physics.md` (physics + hardware map + the `lab.*` action grammar),
-`routine_authoring_plan.md` (linear routine layer + LLM roadmap), `tasks.md` (milestones),
-`status.md` (what's built + collaborator blockers).
+`routine_authoring_plan.md` (linear routine layer + LLM roadmap),
+`routine_authoring_guide.md` (how to write a routine — author + LLM facing),
+`tasks.md` (milestones), `status.md` (what's built + collaborator blockers).
 
 ## Verify command (run before declaring work done)
 ```
