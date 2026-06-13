@@ -1,7 +1,20 @@
 # usCFG Software — Architecture
 
 > Technical design. See [summary.md](summary.md) for context/strategy and
-> [tasks.md](tasks.md) for sequencing. Last updated: 2026-06-12.
+> [tasks.md](tasks.md) for sequencing. Physics + hardware + action grammar in
+> [experiment_physics.md](experiment_physics.md); the routine-authoring layer + LLM-automation
+> roadmap in [routine_authoring_plan.md](routine_authoring_plan.md). Last updated: 2026-06-12.
+
+> **STATUS (2026-06-12, current):** Device layer **built** (mock-first): ESP301
+> (probe/delay/truncation), TBS2012C scope (own streaming subprocess), RGV100BL (HWP),
+> picomotors, servo shutters — hosted in `control_readout` (+ `oscilloscope/`); ~62 unit
+> tests green on `.venv312`. The **routines framework IS present** on `main`
+> (`base_core.framework.routines.{routine,step}` + `centrifuge_calibration` example) —
+> the old "absent" note in §2 is superseded. Branches: App_Apps
+> `feature/io-control-analysis` (device handles + analysis + control), Devices
+> `feature/device-drivers` (drivers); current work on App_Apps `feature/routine-authoring`
+> (the linear authoring layer — design only so far, see
+> [routine_authoring_plan.md](routine_authoring_plan.md)).
 
 ---
 
@@ -151,19 +164,20 @@ periodic telemetry" device: `CommandWorker` handles moves on the worker thread (
 serial OK), a poll thread `emit`s `PositionUpdate` on a timer, and both guard the serial
 port with one lock. (Flag to the collaborator as a candidate future framework primitive.)
 
-### ⚠️ Known gaps / external dependencies (from start_l2p, 2026-06-12)
+### ⚠️ Known gaps / external dependencies (updated 2026-06-12)
 
-- **Routines framework is ABSENT** — `base_core.framework.routines.{routine,step}` exists
-  on **no** Base_Core branch, yet App_Apps' `centrifuge_calibration` imports it. It blocks
-  our **routine-based** work (reference-calibration, control loops, `ProbeScanRoutine`) —
-  **but NOT the device milestone (M1)**, which uses only `Worker`/`SubprocessService`.
-  → **[PENDING — user to confirm with collaborator]** whether/when they push
-  `Routine`/`Step`. Fallback if it slips = define a minimal `Routine`/`Step` locally in
-  `app_apps/` (per D3) to stay unblocked. Does **not** block M1.
-- **Full-app launch (`python -m app`) is gated on the collaborator** (missing routines +
-  in-flux elliptec). ⇒ We develop/test **M1 device packages standalone** (run the
-  subprocess module directly, drive it with JSONL, unit-test the driver) rather than via
-  the full app — keeps M1 unblocked regardless of the collaborator's timeline.
+- **Routines framework is PRESENT** (supersedes the earlier "absent" note).
+  `base_core.framework.routines.{routine,step}` now exists on `main`: `Routine` (abstract
+  `start()`/`stop()`, injected `EventBus`+`TaskRunner`) and `Step` (abstract `stop()`),
+  with `app_apps/routines/centrifuge_calibration` as the worked example. Routine-based work
+  (reference-calibration, control loops, `ProbeScanRoutine`, and the new linear authoring
+  layer) is unblocked. The linear layer builds **additively on top** of these base classes.
+- **Full-app launch (`python -m app`) is still gated on the collaborator** — two WIP
+  breakages on `main`: `elliptec.base` import (control_readout subprocess can't fully start)
+  and `base_qt.ui.apply`/`lab_main_window` (shell won't launch → UI panels blocked). Our
+  code is import-clean regardless; see [status.md](status.md). ⇒ device + routine work is
+  developed/tested **standalone** (mock drivers, fake handles, unit tests) until the
+  collaborator's reworks land.
 
 ---
 
@@ -337,8 +351,14 @@ Per the SDS, controlled DOFs:
      loud, with no stale commands, no unbounded waits, deadlock-resistant.
   The ownership guard is a **required M4 deliverable**.
 
-**Per-DOF control mapping [RESOLVED Q13].** Measured variable + setpoint per loop
-(gains / update-rate / safety-limits stay empirical, tuned at build):
+**Per-DOF control mapping [RESOLVED Q13; refined 2026-06-12 LAB].** Measured variable +
+setpoint per loop (gains / update-rate / safety-limits stay empirical, tuned at build).
+**Refinement:** these are the *dominant* correlations — **each has an offset and some
+cross-coupling**, so loops close on the *fitted* quantity, not an open-loop dial. Precise
+definitions: **ν₀ (central frequency) = ½(ν_start + ν_end)** = mean of the two half-max
+frequencies, driven by the **delay** stage; the **grating** stage sets the **chirp rate**,
+which controls the **span = (ν_start − ν_end)** (difference of the half-max frequencies);
+**truncation** sets **ν_end** directly. See [experiment_physics.md §2.2](experiment_physics.md).
 
 | DOF (actuator) | Controlled quantity | Measured variable (`SpectrumInfo`) | Setpoint |
 |---|---|---|---|

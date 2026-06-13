@@ -11,26 +11,34 @@
 > / `Worker`/`CommandWorker` describe the superseded `start_l2p` variant — translate to the
 > new pattern when building.
 >
-> **Done so far** (on `feature/routines`, committed, not pushed): ESP serial driver +
-> PIDController + stage-ownership guard (`6b6d96c`); spectrum_info model+generator+fit
-> (`3d23795`); 37 unit tests green.
+> **Branches (2026-06-12):** device handles + analysis + control = App_Apps
+> `feature/io-control-analysis` (pushed); drivers = Devices `feature/device-drivers` (pushed);
+> the linear routine-authoring layer = App_Apps `feature/routine-authoring` (current).
+>
+> **Done so far** (committed, not pushed unless noted): full **device layer** mock-first
+> (M1.A/C/D/E/G — ESP301, RGV100BL, picomotors, servo shutters in `control_readout`;
+> TBS2012C scope in `oscilloscope/`); **`control/`** PIDController + stage-ownership guard;
+> **`analysis/spectrum_info`** model+generator+fit; **`analysis/xcorr`** cross-correlation +
+> calibration store. **~62 unit tests green on `.venv312`.** Routines framework confirmed
+> present on `main`.
 
-Build order follows **D6 (devices first)** — analysis is blocked on the collaborator's
-`phase_control` fix (expected ~2026-06-12).
+Build order followed **D6 (devices first)**. Analysis is **no longer blocked** — the new
+framework is on `main` and our pure modules are built and tested.
 
 ---
 
-## Milestone 0 — Environment baseline (blocking)
+## Milestone 0 — Environment baseline ✅ **DONE (superseded by `main`)**
 
-- [ ] **M0.1** Check out `start_l2p` in `Base_Core` and `Devices` (or branch from it).
-- [ ] **M0.2** Reinstall editable packages so `base_core`/`devices` resolve to the
-      local `C:` paths instead of the dead `D:` path (`pip install -e .` in each).
-- [ ] **M0.3** Verify `python -m app` launches. ⚠️ **May be blocked** until the
-      collaborator pushes the **routines framework** + fixes elliptec (see architecture
-      "Known gaps"). If blocked, we proceed on M1 regardless via standalone testing.
-- [ ] **M0.4** Create our working branch (off `start_l2p`) in App_Apps + Devices.
-
-*Owner note:* you set up the env; I verify and report.
+- [x] **M0.1** Base_Core / Devices / Base_Qt all updated to **`main`** (the integration base;
+      `start_l2p` superseded, D21).
+- [x] **M0.2** Editable packages reinstalled to local `C:` paths; built **`.venv312`**
+      (Python 3.12 — framework needs ≥3.11 `typing.Self`). Devices `pyproject` stale-`elliptec`
+      fixed locally.
+- [~] **M0.3** `python -m app` **still gated on the collaborator** (`elliptec.base`,
+      `base_qt.ui.apply` WIP-broken on `main`). We proceed via **standalone testing**
+      (mocks/fake handles/unit tests) — see [status.md](status.md).
+- [x] **M0.4** Working branches created (now `feature/io-control-analysis`,
+      `feature/device-drivers`, `feature/routine-authoring`).
 
 > **Decoupling:** M1 device packages are developed/tested **standalone** — run the
 > subprocess module directly (`python -m <device>.<device>_process`), drive it with
@@ -141,18 +149,17 @@ following the `spm_002` pattern (architecture §2).
 
 ## Milestone 2 — Spectrum analysis  (`analysis/spectrum_info/`)
 
-Unblocks after collaborator's `phase_control` fix (so import paths/stable Base_Core
-are confirmed). Reuses Base_Core math/physics only (architecture §4.2).
+Reuses Base_Core math/physics only (architecture §4.2). **Spectrum source = SPM-002
+spectrometer, direct to computer (not via scope).** Core domain library built & tested.
 
-- [ ] **M2.0** Forward-model generator (envelope-bounded sinusoid, quadratic
+- [x] **M2.0** Forward-model generator (envelope-bounded sinusoid, quadratic
       `f(t)`, independent upper/lower envelopes, configurable noise) → synthetic
-      spectra + XCORR traces; serves as fitter ground truth. **[RESOLVED Q9]**
-- [ ] **M2.1** Pure domain library: our own lmfit model = envelope-bounded sinusoid
+      spectra; serves as fitter ground truth. **[RESOLVED Q9]** — `spectrum_info/generator.py`.
+- [x] **M2.1** Pure domain library: our own lmfit model = envelope-bounded sinusoid
       with independent parametric upper/lower envelopes + single system chirp
       (quadratic `f(t)=[f0,f1,f2]`, cubic phase) + delay + initial phase. Fit raw
-      spectrum → `SpectrumInfo` (λ0, bandwidth, chirp, delay, initial_phase,
-      ν_start/ν_end, env_up, env_lo, residual, ts). *Test:* unit tests on synthetic
-      spectra (generate via `CircularChirpedPulse` / our forward model). **[RESOLVED Q6/Q6b/Q7]**
+      spectrum → `SpectrumInfo`. **[RESOLVED Q6/Q6b/Q7]** — `spectrum_info/{model,fit}.py`,
+      8 unit tests green.
 - [ ] **M2.2** `ReferenceBuffer` (1 reference snapshot + deque(5) of recent raw
       spectra); reset event. Reference = single-arm drift baseline. *Test:* unit test
       buffer behavior. **[RESOLVED Q5]**
@@ -172,13 +179,17 @@ are confirmed). Reuses Base_Core math/physics only (architecture §4.2).
 > **Lower priority [RESOLVED Q8]:** characterization-only (weekly recal), not a
 > real-time control input. Build after M2 (analysis) and ideally after M4 (PID).
 
-- [ ] **M3.1** XCORR analysis = **reuse `spectrum_info` fit** on the scan trace (time
-      abscissa) + match to the wavelength-domain fit → wavelength↔probe-delay table.
-      Input `(positions[], traces[])` from a probe scan. *Test:* synthetic/recorded
-      data (synthetic for now). **[RESOLVED Q8/Q9]**
-- [ ] **M3.2** Append-only **HDF5** calibration store (Base_Core h5_utils; new group
-      per UTC-timestamp + grating/delay-stage combo; never overwrite; index table).
-      *Test:* write twice, confirm both retained. **[RESOLVED Q10]**
+> **Readout (2026-06-12 LAB):** XCORR signal = oscilloscope **CH1 photodiode**. Per probe-delay
+> step: capture a scope trace, take the **mean of the 20 highest samples** → one scalar; sweep
+> probe delay, plot scalar vs delay → bounded sinusoid. (Distinct from the SPM-002 spectrum.)
+
+- [x] **M3.1** XCORR core: `cross_correlate`, lag→delay, `WavelengthDelayCalibration`
+      (wavelength↔probe-delay table). *Test:* synthetic data, 8 unit tests green.
+      **[RESOLVED Q8/Q9]** — `analysis/xcorr/calibration.py`. *(Remaining: the per-step
+      "mean of top-20" scope reduction + full probe-scan wiring lands with M5.1.)*
+- [x] **M3.2** Append-only **HDF5** calibration store (new group per UTC-timestamp +
+      grating/delay-stage combo; never overwrite; index table). *Test:* 4 unit tests green.
+      **[RESOLVED Q10]** — `analysis/xcorr/store.py`.
 - [ ] **M3.3** *(deferred, low priority)* XCORR-recal reminder/trigger — XCORR is NOT
       auto-run (too slow). Design the nudge later; last-calib time comes from the store.
       **[RESOLVED Q11 → deferred]**
@@ -187,11 +198,11 @@ are confirmed). Reuses Base_Core math/physics only (architecture §4.2).
 
 ## Milestone 4 — PID control  (`control/`)
 
-- [ ] **M4.1** Generic `PIDController` in `app_apps/control/` (App-level, per D3).
-      *Test:* unit tests (step response, anti-windup, limits, deadband, slew limit).
-- [ ] **M4.1b** **Per-stage ownership guard** (registry of tokens; `try_acquire()` →
-      reject if owned; release). *Test:* second acquirer is rejected; release frees it.
-      **[RESOLVED Q12 — required]**
+- [x] **M4.1** Generic `PIDController` in `app_apps/control/pid.py` (App-level, per D3:
+      kp/ki/kd, output limits, deadband, slew limit, anti-windup). *Test:* 8 unit tests green.
+- [x] **M4.1b** **Per-stage ownership guard** (`app_apps/control/ownership.py`:
+      `try_acquire()`/`acquire()`/`release()`/`hold()` ctx mgr; REJECT on contention).
+      *Test:* 8 unit tests green. **[RESOLVED Q12 — required]**
 - [ ] **M4.2** Control-loop **Routine** base consuming `SpectrumInfo` (read-only) +
       true position → stage command; owns one stage via the guard; anti-spasm
       (deadband + slew limit) here. Test against a **fake stage**. **[RESOLVED Q12/Q13]**
@@ -203,6 +214,36 @@ are confirmed). Reuses Base_Core math/physics only (architecture §4.2).
       make-arm-horizontal = minimize single-arm amplitude (shared with M2.5). **[RESOLVED Q13/Q15]**
 - [ ] **M4.7** QWP loop: coarse full-range scan → fine local scan → PID tracking on
       the lower-envelope metric. Reuses collaborator's ELL14 rotator (Q2). **[RESOLVED Q14]**
+
+---
+
+## Milestone R — Linear routine-authoring layer (physicist/LLM-friendly)
+
+> **Design recorded, build awaiting go-ahead.** Full design + LLM-automation roadmap in
+> [routine_authoring_plan.md](routine_authoring_plan.md). Goal: a routine = a plain blocking
+> function (`@routine` + a `lab` facade), ~10 lines instead of ~300, additive on top of the
+> existing `Routine`/`Step`. Same verb set is the target for voice/autonomous LLM tiers.
+> Branch `feature/routine-authoring`. All additive; no Base_Core/Base_Qt edits.
+
+- [x] **R.0** Design + physics/action-grammar docs (`experiment_physics.md`,
+      `routine_authoring_plan.md`); async→sync bridge validated against the real threading model.
+- [ ] **R.1** `cancel.py` + `bridge.py` — `_await_event`/`_await_reply`/cancellable sleep;
+      timeouts. *Test:* against the real `EventBus`, publishing from a 2nd thread.
+- [ ] **R.2** `registry.py` — `@routine` decorator + registry (no BaseModule for authors).
+- [ ] **R.3** `lab.py` — facade (probe/delay/truncation/hwp/qwp/picomotor/shutter/scope/
+      spectrometer + record/save-CSV/fit/plot/sleep). **Add `*Complete` events to Devices
+      workers** (RGV `HwpMoveComplete`, picomotor `StepsSettled`, servo `ArmSettled`) so
+      blocking is exact (not settle-time).
+- [ ] **R.4** `runner.py` — `LinearRoutineRunner(Routine)` (single-flight v1, ownership +
+      scope-consumer auto-acquire/release, cooperative cancel).
+- [ ] **R.5** `module.py` (`LinearRoutinesModule`, written once) + one `app.py` line.
+- [ ] **R.6** Example scripts incl. an **overnight ν_start/ν_end scan** (validate-and-repeat;
+      probe *scanning* not stepping → est. 3–4× data). *Test:* fake handles publishing
+      completion events from a timer thread (no subprocess).
+- [ ] **R.7** Routine **authoring guide** (write-a-routine-in-5-min; full verb reference;
+      pasteable as LLM context).
+- [ ] **R.8** *(roadmap, not committed)* T1 voice/standby trigger; T2 supervised planner;
+      T3 bounded autonomous loop — see roadmap §6 of the plan.
 
 ---
 
@@ -237,7 +278,7 @@ M0 ──> M1 (devices)
         ├─ M1.E pico    │
         └─ M1.F ELL14   │
 M2 (analysis) ──────────┴─> M4 (PID) ──> M5 (routines/scan) ──> M6 (QoL)
-   (M2 blocked on collaborator phase_control fix ~06-12)
+   MR (linear routine-authoring layer) ── enables M5 + LLM tiers; build any time
 ```
 
 Open questions Q1–Q17 are catalogued in
