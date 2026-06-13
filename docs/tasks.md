@@ -238,8 +238,11 @@ spectrometer, direct to computer (not via scope).** Core domain library built & 
       command workers already emit completion telemetry (`MoveComplete`/`HwpAngleUpdate`/
       `StepsMoved`/`ArmStateChanged`), so the facade awaits those (OKReply already = settled
       for HWP/picomotor/servo). 11 tests incl. real in-process shm consumer path. (commit `b857db6`)
-- [ ] **R.4** `runner.py` — `LinearRoutineRunner(Routine)` (single-flight v1, ownership +
-      scope-consumer auto-acquire/release, cooperative cancel).
+- [x] **R.4** `runner.py` + `events.py` — `LinearRoutineRunner(Routine)`: single-flight
+      `launch(name, **params)` on a TaskRunner thread with fresh Lab + cancel token; `stop()`
+      cooperative cancel; lifecycle events (Started/Completed/Failed/CancelledEvent). Per-stage
+      `StageOwnership` deferred (single-flight already prevents routine-vs-routine races;
+      integrates at lab-verb level when M4 loops can run alongside a routine). 9 tests. (commit `b7b7ead`)
 - [ ] **R.5** `module.py` (`LinearRoutinesModule`, written once) + one `app.py` line.
 - [ ] **R.6** Example scripts incl. an **overnight ν_start/ν_end scan** (validate-and-repeat;
       probe *scanning* not stepping → est. 3–4× data). *Test:* fake handles publishing
