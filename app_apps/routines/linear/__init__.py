@@ -15,10 +15,28 @@ from app_apps.routines.linear.cancel import (
     RoutineError,
     RoutineTimeout,
 )
+from app_apps.routines.linear.registry import (
+    RoutineNotFound,
+    RoutineParam,
+    RoutineRegistrationError,
+    RoutineSpec,
+    all_routines,
+    get_routine,
+    routine,
+    routine_names,
+)
 
 __all__ = [
     "CancelToken",
     "RoutineCancelled",
     "RoutineError",
     "RoutineTimeout",
+    "routine",
+    "RoutineSpec",
+    "RoutineParam",
+    "RoutineRegistrationError",
+    "RoutineNotFound",
+    "all_routines",
+    "get_routine",
+    "routine_names",
 ]
