@@ -114,22 +114,28 @@ following the `spm_002` pattern (architecture §2).
       consumer + a trace-display panel. *Test:* mock traces stream + render.
 </details>
 
-### M1.E — Picomotors (mirrors, manual)
-- [ ] **M1.E.1** `Devices/picomotor/`: `picomotor_driver.py` (`pylablib`
-      `Newport.Picomotor8742`), config, messages (`StepBy`). *Test:* step a mirror axis.
-- [ ] **M1.E.2** `app_apps/io/picomotor/` module/service + manual jog panel
-      (no PID). *Test:* GUI buttons step the picomotor.
+### M1.C — RGV100BL (HWP rotation, Newport XPS) ✅ **BUILT (mock, py3.12)**
+> Devices `control_readout/rgv100bl/` (config, messages, mock + `xps_driver` skeleton via
+> `newportxps`, `Rgv100blWorker` — command-style, notifies `HwpAngleUpdate` after each move),
+> registered in control_readout. App_Apps: `RgvHandle` + `RequestRotateHwp`. Mock test passes.
+> **Remaining:** real XPS bring-up (admin account); a panel (blocked on base_qt UI rework).
+
+### M1.E — Picomotors (mirrors, manual) ✅ **BUILT (mock, py3.12)**
+> Devices `control_readout/picomotor/` (config, messages `StepBy`, mock + `picomotor_driver`
+> skeleton via `pylablib`, `PicomotorWorker`, no PID), registered in control_readout. App_Apps:
+> `PicomotorHandle` + `RequestStepPicomotor`. Mock test passes. **Remaining:** real 8742 +
+> a manual jog panel (blocked on base_qt UI rework).
 
 ### M1.F — ELL14 / QWP (reuse + defer) **[RESOLVED Q2]**
 - No device-layer work in this milestone. The QWP reuses the collaborator's ELL14
   rotator; QWP-specific logic (ellipticity min, global scan) lives in our control layer
   and is built at **M4.7**. HWP is driven by the RGV100BL (M1.C).
 
-### M1.G — Servo shutters (high-level only) **[NEW — Q5]**
-- [ ] **M1.G.1** Define the device interface + messages (`BlockArm(arm)`,
-      `UnblockArm(arm)`, state events) and a **stub** worker that logs/prompts for a
-      **manual** arm-block. *Test:* the reference-calibration routine (M2.5) drives the
-      stub. **TODO:** real Arduino/ESP32 servo actuation once comms details exist.
+### M1.G — Servo shutters (high-level stub) ✅ **BUILT (py3.12)** **[Q5]**
+> Devices `control_readout/servo_shutter/` (config, messages `BlockArm`/`UnblockArm` +
+> `ArmStateChanged`, `ManualShutterStub` driver, `ServoShutterWorker`), registered in
+> control_readout. App_Apps: `ServoShutterHandle` + `RequestSetArmBlocked`. Mock test passes.
+> **TODO:** real Arduino/ESP32 servo actuation once comms details exist (D16).
 
 ---
 
