@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TypeVar, overload
+
+F = TypeVar("F", bound=Callable[..., None])
 
 
 class RoutineRegistrationError(Exception):
@@ -103,16 +105,22 @@ def _same_function(a: Callable[..., Any], b: Callable[..., Any]) -> bool:
     )
 
 
-def routine(
-    name: Optional[str | Callable[..., None]] = None,
-) -> Callable[..., None]:
+@overload
+def routine(name: F) -> F: ...  # bare @routine
+
+
+@overload
+def routine(name: Optional[str] = ...) -> Callable[[F], F]: ...  # @routine("name")
+
+
+def routine(name: Any = None) -> Any:
     """Register a function as a named routine.
 
     Usable as `@routine` (name defaults to the function name) or `@routine("name")`.
     Returns the original function unchanged, so it stays directly callable/testable.
     """
 
-    def decorator(func: Callable[..., None]) -> Callable[..., None]:
+    def decorator(func: F) -> F:
         routine_name = func.__name__ if name is None or callable(name) else name
         spec = _build_spec(routine_name, func)
         existing = _REGISTRY.get(routine_name)
