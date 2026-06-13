@@ -92,7 +92,18 @@ following the `spm_002` pattern (architecture §2).
 - [ ] **M1.C.2** `app_apps/io/newport_xps/` module/service/VM + panel. *Test:* GUI
       rotate + true-angle readout.
 
-### M1.D — Oscilloscope (Tektronix TBS, mock first) **[RESOLVED Q3]**
+### M1.D — Oscilloscope (Tektronix **TBS2012C**, mock first) ✅ **BUILT (import-verified, py3.12)**
+
+> Devices `feature/esp301`: `oscilloscope/` = config, buffer (`ScopeMemorySpec`/`ScopeBuffer`,
+> shape `(channels, n_samples)`), messages (`SetScopeConfig`), `mock_driver` (synthetic
+> envelope-bounded chirped trace on CH1 + position ramp on CH2 for analog-sync, Q4),
+> `tbs_driver` (PyVISA/SCPI skeleton for the real TBS2012C), `OscilloscopeWorker` (producer,
+> streams traces into slots), process entry. App_Apps `feature/routines`: `io/oscilloscope/`
+> = service (`WriterSubprocessService`), handle, module + buffer re-export + events. 5 mock
+> unit tests pass. **Remaining:** real `tbs_driver` hardware bring-up; a trace-display panel
+> (blocked on contributor's base_qt UI rework).
+
+<details><summary>original sub-tasks (superseded by the above)</summary>
 - [ ] **M1.D.1** `Devices/oscilloscope/`: driver interface `configure()/arm()/
       acquire_trace() -> (t[], v[]/chan, trigger_ts)`; a **mock** impl (synthetic
       chirped trace) now; config; messages. Producer worker + shared ring buffer.
@@ -101,6 +112,7 @@ following the `spm_002` pattern (architecture §2).
       a VISA backend (NI-VISA or `pyvisa-py`).
 - [ ] **M1.D.2** `app_apps/io/oscilloscope/` module/service + `BufferOutput`
       consumer + a trace-display panel. *Test:* mock traces stream + render.
+</details>
 
 ### M1.E — Picomotors (mirrors, manual)
 - [ ] **M1.E.1** `Devices/picomotor/`: `picomotor_driver.py` (`pylablib`
