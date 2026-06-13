@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 APP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 LINEAR_DIR = os.path.join(APP_ROOT, "app_apps", "routines", "linear")
-MODULES = ["cancel", "config", "bridge", "registry", "lab"]
+MODULES = ["cancel", "config", "bridge", "registry", "events", "lab", "runner"]
 
 
 def _parse(filename: str) -> ast.AST:
