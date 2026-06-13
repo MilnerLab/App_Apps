@@ -243,7 +243,10 @@ spectrometer, direct to computer (not via scope).** Core domain library built & 
       cooperative cancel; lifecycle events (Started/Completed/Failed/CancelledEvent). Per-stage
       `StageOwnership` deferred (single-flight already prevents routine-vs-routine races;
       integrates at lab-verb level when M4 loops can run alongside a routine). 9 tests. (commit `b7b7ead`)
-- [ ] **R.5** `module.py` (`LinearRoutinesModule`, written once) + one `app.py` line.
+- [x] **R.5** `module.py` (`LinearRoutinesModule`) + `scripts/` package + one `app.py` line.
+      Builds the `lab_factory` via defensive `container.try_get` (un-composed devices →
+      `LabUnavailable`); imports `scripts` for `@routine` self-registration; adds `runner.stop`
+      to lifecycle. 4 tests (real Container/AppContext). (commit `97bb221`)
 - [ ] **R.6** Example scripts incl. an **overnight ν_start/ν_end scan** (validate-and-repeat;
       probe *scanning* not stepping → est. 3–4× data). *Test:* fake handles publishing
       completion events from a timer thread (no subprocess).
