@@ -19,7 +19,7 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, TypeVar, overload
 
-F = TypeVar("F", bound=Callable[..., None])
+F = TypeVar("F", bound=Callable[..., Any])  # a routine may return a value (ignored by the runner)
 
 
 class RoutineRegistrationError(Exception):
@@ -45,12 +45,12 @@ class RoutineSpec:
     """A registered routine: its callable plus introspected metadata."""
 
     name: str
-    func: Callable[..., None]
+    func: Callable[..., Any]
     summary: str  # first line of the docstring ("" if none)
     doc: str  # full docstring ("" if none)
     params: tuple[RoutineParam, ...] = field(default_factory=tuple)
 
-    def __call__(self, lab: Any, *args: Any, **kwargs: Any) -> None:
+    def __call__(self, lab: Any, *args: Any, **kwargs: Any) -> Any:
         """Convenience: invoke the underlying function with the injected facade."""
         return self.func(lab, *args, **kwargs)
 
