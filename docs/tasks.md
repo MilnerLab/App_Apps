@@ -247,9 +247,13 @@ spectrometer, direct to computer (not via scope).** Core domain library built & 
       Builds the `lab_factory` via defensive `container.try_get` (un-composed devices →
       `LabUnavailable`); imports `scripts` for `@routine` self-registration; adds `runner.stop`
       to lifecycle. 4 tests (real Container/AppContext). (commit `97bb221`)
-- [ ] **R.6** Example scripts incl. an **overnight ν_start/ν_end scan** (validate-and-repeat;
-      probe *scanning* not stepping → est. 3–4× data). *Test:* fake handles publishing
-      completion events from a timer thread (no subprocess).
+- [x] **R.6** Example scripts (`scripts/probe_scan.py`, self-registering): `probe_xcorr_scan`
+      (probe sweep → XCORR mean-of-top-N vs position → CSV/plot), `probe_scan_with_spectrum`
+      (adds SPM-002 fit per point), `overnight_central_freq_series` (sweep delay setpoints =
+      dominant central-freq knob D19, validate-and-repeat). 3 integration tests (wired Lab:
+      fake ESP + real in-process scope buffer + background trace producer). Verifier-audited.
+      (commit `3894d3b`) — NOTE: probe is automated *stepping*; true continuous scan = M5.1
+      (ESP DC trajectory); full ν_start/ν_end control = M4 PID loops.
 - [ ] **R.7** Routine **authoring guide** (write-a-routine-in-5-min; full verb reference;
       pasteable as LLM context).
 - [ ] **R.8** *(roadmap, not committed)* T1 voice/standby trigger; T2 supervised planner;
