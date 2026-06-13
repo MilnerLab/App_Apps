@@ -227,13 +227,17 @@ spectrometer, direct to computer (not via scope).** Core domain library built & 
 
 - [x] **R.0** Design + physics/action-grammar docs (`experiment_physics.md`,
       `routine_authoring_plan.md`); async→sync bridge validated against the real threading model.
-- [ ] **R.1** `cancel.py` + `bridge.py` — `_await_event`/`_await_reply`/cancellable sleep;
-      timeouts. *Test:* against the real `EventBus`, publishing from a 2nd thread.
-- [ ] **R.2** `registry.py` — `@routine` decorator + registry (no BaseModule for authors).
-- [ ] **R.3** `lab.py` — facade (probe/delay/truncation/hwp/qwp/picomotor/shutter/scope/
-      spectrometer + record/save-CSV/fit/plot/sleep). **Add `*Complete` events to Devices
-      workers** (RGV `HwpMoveComplete`, picomotor `StepsSettled`, servo `ArmSettled`) so
-      blocking is exact (not settle-time).
+- [x] **R.1** `cancel.py` + `bridge.py` — `await_event`/`await_reply`/`cancellable_sleep`
+      + `CancelToken`/`RoutineCancelled`/`RoutineTimeout`. Subscribe-first-then-emit. *Test:*
+      11 tests against the real `EventBus`, cross-thread wakeup. (commit `778cee1`)
+- [x] **R.2** `registry.py` — `@routine` decorator + registry (no BaseModule for authors);
+      `RoutineSpec` captures param metadata for UI/LLM. 10 tests. (commit `57fa3c8`)
+- [x] **R.3** `lab.py` + `config.py` — facade (probe/delay/truncation/hwp/picomotor/shutter/
+      scope/spectrometer + record/save-CSV/fit/plot/sleep/frange/xcorr_point); qwp raises
+      LabUnavailable (deferred M4.7). **No Devices changes were needed** — the synchronous
+      command workers already emit completion telemetry (`MoveComplete`/`HwpAngleUpdate`/
+      `StepsMoved`/`ArmStateChanged`), so the facade awaits those (OKReply already = settled
+      for HWP/picomotor/servo). 11 tests incl. real in-process shm consumer path. (commit `b857db6`)
 - [ ] **R.4** `runner.py` — `LinearRoutineRunner(Routine)` (single-flight v1, ownership +
       scope-consumer auto-acquire/release, cooperative cancel).
 - [ ] **R.5** `module.py` (`LinearRoutinesModule`, written once) + one `app.py` line.

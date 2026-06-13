@@ -70,11 +70,16 @@ verbs reflect the real data flow: `lab.scope.capture()` / `lab.xcorr_point()` (C
 mean of top-20 samples) and `lab.spectrometer.read()` (SPM-002, direct). `lab.save` → **CSV**
 (human-accessible). Facade name = **`lab`**.
 
-### 4.2 Completion signals (decision: real events, not settle-times)
-When built, add additive `*Complete` telemetry to the **Devices** workers so every blocking
-verb is exact: RGV100BL → `HwpMoveComplete`, picomotor → `StepsSettled`, servo → `ArmSettled`.
-ESP301 already emits `MoveComplete`; scope already emits `TraceAvailable`. No settle-time
-guessing anywhere.
+### 4.2 Completion signals — RESOLVED at build (no Devices changes needed)
+Original plan was to add `*Complete` events to the Devices workers. On reading the workers
+this proved **unnecessary**: the command workers (RGV/picomotor/servo) handle commands
+**synchronously** — they call the blocking driver method, emit telemetry, *then* reply OK — so
+OKReply already means "settled" and each already emits a usable completion event. The facade
+therefore awaits the existing telemetry: ESP301 `MoveComplete(axis)` (poll thread), HWP
+`HwpAngleUpdate`, picomotor `StepsMoved(axis)`, servo `ArmStateChanged(arm)`, scope
+`TraceAvailable`, spectrometer `SpectrumAvailable`. **Zero Devices-repo edits.** (Limitation:
+a failed command surfaces as a `RoutineTimeout` rather than a typed error, since error replies
+aren't currently forwarded to the bus — a future refinement.)
 
 ### 4.3 Registration without a BaseModule
 `@routine("name")` writes into a module-level registry (import side-effect). Author scripts
@@ -146,6 +151,8 @@ actuation, dry-run mode.**
   ([experiment_physics.md](experiment_physics.md)).
 - ✅ Branches renamed & pushed: App_Apps `feature/io-control-analysis`, Devices
   `feature/device-drivers`; this work on App_Apps `feature/routine-authoring`.
-- ⬜ Linear routine layer (§5) — **awaiting go-ahead to build.**
-- ⬜ Authoring guide.
+- ✅ Linear routine layer foundations: **R.1 bridge** (`778cee1`), **R.2 registry** (`57fa3c8`),
+  **R.3 lab facade** (`b857db6`) — 32 tests, full suite 89 green. No Devices changes needed (§4.2).
+- ⬜ R.4 runner (`LinearRoutineRunner`), R.5 module + `app.py` wiring, R.6 example scripts
+  (incl. overnight ν-scan), R.7 authoring guide.
 - ⬜ T1+ LLM tiers — roadmap only.
