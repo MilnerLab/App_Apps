@@ -15,6 +15,8 @@ from app_apps.routines.linear.cancel import (
     RoutineError,
     RoutineTimeout,
 )
+from app_apps.routines.linear.config import LabConfig
+from app_apps.routines.linear.lab import Lab, LabUnavailable, SpectrumReading
 from app_apps.routines.linear.registry import (
     RoutineNotFound,
     RoutineParam,
@@ -39,4 +41,8 @@ __all__ = [
     "all_routines",
     "get_routine",
     "routine_names",
+    "Lab",
+    "LabConfig",
+    "LabUnavailable",
+    "SpectrumReading",
 ]
