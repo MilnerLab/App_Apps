@@ -22,7 +22,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-MYPY_TARGET = "app_apps.routines.linear"
+MYPY_TARGETS = ["app_apps.routines.linear", "app_apps.assistant"]
 MYPY_FLAGS = [
     "--ignore-missing-imports",
     "--follow-imports=silent",
@@ -48,10 +48,10 @@ def main() -> int:
     failures: list[str] = []
 
     if _mypy_installed():
-        rc = _run(
-            "type check (mypy)",
-            [sys.executable, "-m", "mypy", "-p", MYPY_TARGET, *MYPY_FLAGS],
-        )
+        targets: list[str] = []
+        for t in MYPY_TARGETS:
+            targets += ["-p", t]
+        rc = _run("type check (mypy)", [sys.executable, "-m", "mypy", *targets, *MYPY_FLAGS])
         if rc != 0:
             failures.append("mypy")
     else:

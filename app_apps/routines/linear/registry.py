@@ -49,6 +49,9 @@ class RoutineSpec:
     summary: str  # first line of the docstring ("" if none)
     doc: str  # full docstring ("" if none)
     params: tuple[RoutineParam, ...] = field(default_factory=tuple)
+    # Safety metadata for the LLM assistant layer (no effect on direct/runner use):
+    safe: bool = False  # True => assistant may auto-run; False (default) => requires confirm
+    bounds: Optional[dict[str, tuple[float, float]]] = None  # optional per-param numeric clamps
 
     def __call__(self, lab: Any, *args: Any, **kwargs: Any) -> Any:
         """Convenience: invoke the underlying function with the injected facade."""
@@ -66,7 +69,13 @@ def _annotation_str(annotation: Any) -> str:
     return str(annotation)
 
 
-def _build_spec(name: str, func: Callable[..., None]) -> RoutineSpec:
+def _build_spec(
+    name: str,
+    func: Callable[..., Any],
+    *,
+    safe: bool = False,
+    bounds: Optional[dict[str, tuple[float, float]]] = None,
+) -> RoutineSpec:
     sig = inspect.signature(func)
     parameters = list(sig.parameters.values())
     if not parameters:
@@ -89,10 +98,24 @@ def _build_spec(name: str, func: Callable[..., None]) -> RoutineSpec:
             )
         )
 
+    if bounds:
+        known = {p.name for p in params}
+        unknown = set(bounds) - known
+        if unknown:
+            raise RoutineRegistrationError(
+                f"routine {name!r} bounds reference unknown params: {sorted(unknown)}"
+            )
+
     doc = inspect.getdoc(func) or ""
     summary = doc.splitlines()[0] if doc else ""
     return RoutineSpec(
-        name=name, func=func, summary=summary, doc=doc, params=tuple(params)
+        name=name,
+        func=func,
+        summary=summary,
+        doc=doc,
+        params=tuple(params),
+        safe=safe,
+        bounds=bounds,
     )
 
 
@@ -110,19 +133,31 @@ def routine(name: F) -> F: ...  # bare @routine
 
 
 @overload
-def routine(name: Optional[str] = ...) -> Callable[[F], F]: ...  # @routine("name")
+def routine(
+    name: Optional[str] = ...,
+    *,
+    safe: bool = ...,
+    bounds: Optional[dict[str, tuple[float, float]]] = ...,
+) -> Callable[[F], F]: ...  # @routine("name", safe=..., bounds=...)
 
 
-def routine(name: Any = None) -> Any:
+def routine(
+    name: Any = None,
+    *,
+    safe: bool = False,
+    bounds: Optional[dict[str, tuple[float, float]]] = None,
+) -> Any:
     """Register a function as a named routine.
 
-    Usable as `@routine` (name defaults to the function name) or `@routine("name")`.
-    Returns the original function unchanged, so it stays directly callable/testable.
+    Usable as `@routine`, `@routine("name")`, or `@routine("name", safe=True, bounds=...)`.
+    `safe=True` lets the LLM assistant auto-run it (default False => assistant must confirm
+    before running, since most routines move hardware). `bounds` gives optional numeric clamps
+    `{param: (lo, hi)}` the assistant validates against. Returns the original function unchanged.
     """
 
     def decorator(func: F) -> F:
         routine_name = func.__name__ if name is None or callable(name) else name
-        spec = _build_spec(routine_name, func)
+        spec = _build_spec(routine_name, func, safe=safe, bounds=bounds)
         existing = _REGISTRY.get(routine_name)
         if existing is not None and not _same_function(existing.func, func):
             raise RoutineRegistrationError(
