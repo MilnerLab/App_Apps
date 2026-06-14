@@ -5,8 +5,26 @@ A small Claude model maps natural-language commands to the *closed set* of regis
 or asks a human to confirm. Off by default; runtime kill switch. See
 `docs/routine_authoring_plan.md` (LLM roadmap) and the approved plan.
 
-This module is built bottom-up; L1 = `tools` (schema builder) + `validation`.
+This module is built bottom-up; L1 = `tools` + `validation`, L2 = `assistant` core + `events`.
 """
+from app_apps.assistant.assistant import Assistant
+from app_apps.assistant.client import LLMClient, ToolCall
+from app_apps.assistant.models import (
+    AssistantResult,
+    CodeProposal,
+    Proposal,
+    ResultKind,
+)
 from app_apps.assistant.validation import ParamValidationError, validate_params
 
-__all__ = ["ParamValidationError", "validate_params"]
+__all__ = [
+    "Assistant",
+    "AssistantResult",
+    "ResultKind",
+    "Proposal",
+    "CodeProposal",
+    "LLMClient",
+    "ToolCall",
+    "ParamValidationError",
+    "validate_params",
+]
