@@ -12,6 +12,7 @@ from app_apps.io.spectrometer.module import SpectrometerModule
 from app_apps.io.control_readout.module import ControlReadoutModule
 from app_apps.analysis.phase_control.module import PhaseControlModule
 from app_apps.routines.linear.module import LinearRoutinesModule
+from app_apps.assistant.module import AssistantModule
 from base_core.framework.app import AppContext
 from base_core.framework.app.enums import AppStatus
 from base_core.framework.di import Container
@@ -42,6 +43,7 @@ def build_container(ctx: AppContext) -> Container:
         spectrometer=True,
         rotator=False,
         phase_control=True,
+        assistant=False,  # LLM control layer off by default; flip to enable (also toggleable at runtime)
     ))
     return c
 
@@ -60,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
         ControlReadoutModule(),
         PhaseControlModule(),
         LinearRoutinesModule(),
+        AssistantModule(),
     ]
     mm = ModuleManager(modules)
     mm.bootstrap(c, ctx)

@@ -8,13 +8,14 @@ or asks a human to confirm. Off by default; runtime kill switch. See
 This module is built bottom-up; L1 = `tools` + `validation`, L2 = `assistant` core + `events`.
 """
 from app_apps.assistant.assistant import Assistant
-from app_apps.assistant.client import LLMClient, ToolCall
+from app_apps.assistant.client import ClaudeClient, LLMClient, ToolCall
 from app_apps.assistant.models import (
     AssistantResult,
     CodeProposal,
     Proposal,
     ResultKind,
 )
+from app_apps.assistant.prompt import build_system_prompt
 from app_apps.assistant.validation import ParamValidationError, validate_params
 
 __all__ = [
@@ -24,7 +25,9 @@ __all__ = [
     "Proposal",
     "CodeProposal",
     "LLMClient",
+    "ClaudeClient",
     "ToolCall",
+    "build_system_prompt",
     "ParamValidationError",
     "validate_params",
 ]
