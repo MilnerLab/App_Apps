@@ -15,6 +15,7 @@ from app_apps.assistant.models import (
     Proposal,
     ResultKind,
 )
+from app_apps.assistant.planner import AcceptResult, accept_routine
 from app_apps.assistant.prompt import build_system_prompt
 from app_apps.assistant.validation import ParamValidationError, validate_params
 
@@ -28,6 +29,8 @@ __all__ = [
     "ClaudeClient",
     "ToolCall",
     "build_system_prompt",
+    "accept_routine",
+    "AcceptResult",
     "ParamValidationError",
     "validate_params",
 ]

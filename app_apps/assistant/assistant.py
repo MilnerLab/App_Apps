@@ -27,6 +27,7 @@ from app_apps.assistant.models import (
     Proposal,
     ResultKind,
 )
+from app_apps.assistant.planner import AcceptResult, accept_routine
 from app_apps.assistant.tools import (
     GET_STATUS,
     LIST_ROUTINES,
@@ -124,6 +125,10 @@ class Assistant:
     def cancel(self) -> None:
         """Stop the running routine (kill switch for an in-flight action)."""
         self._runner.stop()
+
+    def accept(self, code_proposal: CodeProposal) -> AcceptResult:
+        """Human-approved: write/verify/register a planner CodeProposal. Never automatic."""
+        return accept_routine(code_proposal)
 
     # -- internals ----------------------------------------------------------------------
 
