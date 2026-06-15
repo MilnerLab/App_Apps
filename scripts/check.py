@@ -11,7 +11,8 @@ Run with the project interpreter so it uses the right environment and finds mypy
     python scripts/check.py                                # if your venv is active
 
 Scope notes:
-  * mypy is scoped to app_apps.routines.linear (the type-clean package); broaden later.
+  * mypy is scoped to the type-clean packages: app_apps.routines.linear, app_apps.assistant,
+    app_apps.control; broaden further as other packages are cleaned up.
   * tests run via unittest discovery over test/unit/test_*.py.
 """
 from __future__ import annotations
@@ -22,7 +23,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-MYPY_TARGETS = ["app_apps.routines.linear", "app_apps.assistant"]
+MYPY_TARGETS = ["app_apps.routines.linear", "app_apps.assistant", "app_apps.control"]
 MYPY_FLAGS = [
     "--ignore-missing-imports",
     "--follow-imports=silent",
