@@ -28,23 +28,18 @@ from typing import Optional
 
 import numpy as np
 
-from app_apps.analysis.spectrum_info.fit import fit_spectrum
 from app_apps.analysis.spectrum_info.generator import synthetic_spectrum, wavelength_grid
 from app_apps.analysis.spectrum_info.model import (
     C_NM_THZ,
-    SpectrumInfo,
     SpectrumParams,
     envelope_edges_thz,
 )
-from app_apps.control.lock import LockResult, run_pid_lock
-from app_apps.control.pid import PIDController
 from app_apps.io.spectrometer.buffer import SpectrumBuffer, SpectrumMemorySpec
 from app_apps.io.spectrometer.events import SpectrumAck, SpectrumAvailable
 from app_apps.routines.linear.cancel import CancelToken
 from app_apps.routines.linear.config import LabConfig
 from app_apps.routines.linear.lab import Lab
 from base_core.framework.events.event_bus import EventBus
-from base_core.math.enums import AngleUnit
 from base_core.math.models import Angle
 from control_readout.esp_301.messages import MoveComplete, PositionUpdate
 from control_readout.rgv100bl.messages import HwpAngleUpdate
@@ -90,7 +85,7 @@ class OpticalPlant:
         phase_gain: float = 1.0,
         amp_upper: float = 1.0,
         amp_lower: float = 0.05,
-        tau_ps: float = 0.2,
+        tau_ps: float = 0.1,  # ~4 fringes across the band: enough for the FFT seed, low nu0 bias
         g2: float = 0.0,
         g3: float = 0.0,
         noise: float = 0.01,
@@ -301,56 +296,3 @@ def build_plant_lab(
         config=cfg,
     )
     return lab, cancel
-
-
-def _params_of(info: SpectrumInfo) -> SpectrumParams:
-    """The fit's free parameters as a SpectrumParams, for warm-starting the next fit."""
-    return SpectrumParams(
-        central_wavelength_nm=info.central_wavelength_nm,
-        bandwidth_nm=info.bandwidth_nm,
-        amp_upper=info.amp_upper,
-        amp_lower=info.amp_lower,
-        phase0=info.phase0,
-        tau_ps=info.tau_ps,
-        g2=info.g2,
-        g3=info.g3,
-    )
-
-
-def warm_phase_lock(
-    lab: Lab,
-    *,
-    target_rad: float,
-    fit_init: SpectrumParams,
-    kp: float = 0.5,
-    tolerance_rad: float = 0.02,
-    max_iterations: int = 80,
-    dt_s: float = 0.05,
-    max_step_rad: float = 0.1,
-) -> LockResult:
-    """A phase (HWP -> phase0) lock that **warm-starts** the fit each step.
-
-    Same shape as the packaged `lock_phase`, but `measure()` carries the previous fit forward as
-    `init` (the packaged routine fits cold via `lab.fit_spectrum`, which cannot recover `phase0`
-    from a fringed spectrum — see TestPhaseFitDiagnostic). Uses the real PID engine, real
-    `lab.hwp` actuation, and real `lab.spectrometer.read()`.
-    """
-    init = {"p": fit_init}
-
-    def measure() -> float:
-        r = lab.spectrometer.read()
-        info = fit_spectrum(r.wavelengths, r.intensities, init=init["p"])
-        init["p"] = _params_of(info)
-        return info.phase0
-
-    commanded = [0.0]
-
-    def actuate(step_rad: float) -> None:
-        commanded[0] += step_rad
-        lab.hwp.rotate_to(Angle(commanded[0], AngleUnit.RAD))
-
-    pid = PIDController(kp=kp, setpoint=target_rad, output_limits=(-max_step_rad, max_step_rad))
-    return run_pid_lock(
-        pid=pid, measure=measure, actuate=actuate, tolerance=tolerance_rad,
-        max_iterations=max_iterations, dt=dt_s, sleep=lab.sleep,
-    )

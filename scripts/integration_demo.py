@@ -22,13 +22,13 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "test", "integration"))
 
-from app_apps.analysis.spectrum_info.model import SpectrumParams  # noqa: E402
 from app_apps.routines.linear.scripts.control_loops import (  # noqa: E402
     lock_central_frequency,
+    lock_phase,
     lock_terminal_frequency,
 )
 from base_core.framework.events.event_bus import EventBus  # noqa: E402
-from optical_plant import OpticalPlant, build_plant_lab, warm_phase_lock  # noqa: E402
+from optical_plant import OpticalPlant, build_plant_lab  # noqa: E402
 from report import format_trace, plot_convergence, write_csv  # noqa: E402
 
 
@@ -73,16 +73,13 @@ def demo_terminal_frequency(out: str) -> None:
 
 
 def demo_phase(out: str) -> None:
-    plant = OpticalPlant(EventBus(), tau_ps=0.15, phase_off=0.05, phase_gain=1.0)
+    plant = OpticalPlant(EventBus(), phase_off=0.05, phase_gain=1.0)  # default tau_ps=0.1
     target = 0.80
-    fit_init = SpectrumParams(
-        central_wavelength_nm=801.6, bandwidth_nm=30.0, amp_upper=1.0, amp_lower=0.05,
-        phase0=0.0, tau_ps=0.15, g2=0.0, g3=0.0)
-    result = _run(plant, lambda lab: warm_phase_lock(
-        lab, target_rad=target, fit_init=fit_init, kp=0.5))
+    result = _run(plant, lambda lab: lock_phase(
+        lab, target_rad=target, kp=0.5, tolerance_rad=0.02, max_iterations=80, dt_s=0.05))
     print(format_trace(
-        "Closed loop: HWP -> phase0 (warm-started fit)",
-        "phase0[rad] = 0.05 + 1.00*hwp_angle[rad];  fit warm-started each step",
+        "Closed loop: lock_phase (HWP -> phase0, FFT-seeded cold fit)",
+        "phase0[rad] = 0.05 + 1.00*hwp_angle[rad];  cold fit, fringe rate FFT-seeded",
         plant, "phase0", target=target, tolerance=0.02, command_unit="rad",
         result=result, final_true=plant.state().phase0))
     write_csv(plant, "phase0", os.path.join(out, "phase.csv"), target=target)

@@ -11,11 +11,60 @@ from __future__ import annotations
 import numpy as np
 
 from app_apps.analysis.spectrum_info.model import (
+    C_NM_THZ,
     SpectrumInfo,
     SpectrumParams,
     bounded_chirp_intensity,
     envelope_edges_thz,
 )
+
+
+def estimate_fringe_rate(
+    wavelengths_nm: np.ndarray,
+    intensities: np.ndarray,
+    *,
+    tau_min: float = 0.02,
+    tau_max: float = 2.0,
+) -> float:
+    """Estimate the spectral fringe rate ``tau_ps`` by FFT (Fourier-transform interferometry).
+
+    The fringe phase is ``phase0 + 2*pi*(tau*dnu + ...)``, so the spectrum oscillates in optical
+    frequency at rate ``tau`` (cycles per THz == ps). We resample onto a uniform ``nu`` grid,
+    flatten the Gaussian envelope, window, FFT, and take the dominant peak (parabolically
+    interpolated) within ``[tau_min, tau_max]``. Seeding ``tau`` is what lets the cold fit lock
+    onto the fringes; ``phase0`` then falls out of the least-squares fit. Returns 0.0 if there is
+    no usable signal (the caller's fit will still run, just without a fringe-rate hint).
+    """
+    w = np.asarray(wavelengths_nm, dtype=float)
+    y = np.clip(np.asarray(intensities, dtype=float), 0.0, None)
+    if w.size < 8 or y.sum() <= 0:
+        return 0.0
+    nu = C_NM_THZ / w
+    order = np.argsort(nu)
+    nu, y = nu[order], y[order]
+    nu_u = np.linspace(nu[0], nu[-1], nu.size)
+    y = np.interp(nu_u, nu, y)
+    # flatten the broad Gaussian envelope so the FFT sees a clean fringe peak (not envelope leakage)
+    k = max(y.size // 8, 3)
+    ker = np.exp(-0.5 * (np.arange(-3 * k, 3 * k + 1) / k) ** 2)
+    ker /= ker.sum()
+    env = np.convolve(y, ker, mode="same")
+    env[env < 1e-9] = 1e-9
+    yf = (y / env - 1.0)
+    yf = (yf - yf.mean()) * np.hanning(yf.size)
+    dnu = nu_u[1] - nu_u[0]
+    freqs = np.fft.rfftfreq(yf.size, d=dnu)  # cycles per THz == ps
+    amp = np.abs(np.fft.rfft(yf))
+    band = np.where((freqs >= tau_min) & (freqs <= tau_max))[0]
+    if band.size == 0:
+        return 0.0
+    i = int(band[np.argmax(amp[band])])
+    delta = 0.0  # parabolic sub-bin interpolation of the peak
+    if 0 < i < amp.size - 1:
+        denom = amp[i - 1] - 2.0 * amp[i] + amp[i + 1]
+        if denom != 0.0:
+            delta = 0.5 * (amp[i - 1] - amp[i + 1]) / denom
+    return float(freqs[i] + delta * (freqs[1] - freqs[0]))
 
 
 def _intensity(
@@ -48,7 +97,13 @@ def _intensity(
 def estimate_envelope_init(
     wavelengths_nm: np.ndarray, intensities: np.ndarray
 ) -> SpectrumParams:
-    """Heuristic envelope/amplitude init from the data (phase/chirp left at 0)."""
+    """Heuristic init from the data: envelope/amplitudes + an FFT-seeded fringe rate ``tau_ps``.
+
+    The fringe rate is seeded from :func:`estimate_fringe_rate` (FFT) so the cold least-squares
+    fit can lock onto the fringes on the *first* spectrum; ``phase0``/``g2``/``g3`` are left at 0
+    and recovered by the fit. (Previously ``tau`` started at 0, i.e. "no fringes", which made the
+    cold fit diverge on any fringed spectrum.)
+    """
     w = np.asarray(wavelengths_nm, dtype=float)
     y = np.clip(np.asarray(intensities, dtype=float), 0.0, None)
     total = y.sum()
@@ -65,7 +120,7 @@ def estimate_envelope_init(
         amp_upper=float(y.max()),
         amp_lower=float(np.percentile(y, 5)),
         phase0=0.0,
-        tau_ps=0.0,
+        tau_ps=estimate_fringe_rate(w, y),
         g2=0.0,
         g3=0.0,
     )
