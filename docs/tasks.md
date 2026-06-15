@@ -3,7 +3,7 @@
 > Execution plan. See [architecture.md](architecture.md) for design and
 > [summary.md](summary.md) for strategy. Each task is a **build → test → review →
 > commit** unit (see summary §4). `[ ]` = todo, `[~]` = in progress, `[x]` = done.
-> Last updated: 2026-06-12.
+> Last updated: 2026-06-14.
 
 > ⚠️ **Structure update (2026-06-12):** integration base is now **`main`** (D21–D23);
 > device/io wiring follows the **`base_core.ipc`/`shm`** Handle/Service/buffer pattern in
@@ -160,9 +160,9 @@ spectrometer, direct to computer (not via scope).** Core domain library built & 
       (quadratic `f(t)=[f0,f1,f2]`, cubic phase) + delay + initial phase. Fit raw
       spectrum → `SpectrumInfo`. **[RESOLVED Q6/Q6b/Q7]** — `spectrum_info/{model,fit}.py`,
       8 unit tests green.
-- [ ] **M2.2** `ReferenceBuffer` (1 reference snapshot + deque(5) of recent raw
-      spectra); reset event. Reference = single-arm drift baseline. *Test:* unit test
-      buffer behavior. **[RESOLVED Q5]**
+- [x] **M2.2** `ReferenceBuffer` (1 reference snapshot + bounded rolling history of recent raw
+      spectra) + reset; set/promote/mean. Reference = single-arm drift baseline. Pure numpy.
+      8 unit tests green. **[RESOLVED Q5]** — `analysis/spectrum_info/reference.py`.
 - [ ] **M2.5** *(routine, depends on HWP M1.C)* Reference-calibration routine:
       block one arm (**manual for now — servo actuation = TODO**) → HWP-minimize
       single-arm amplitude (= Q15 "make horizontal") → capture reference. Triggers:
@@ -203,17 +203,26 @@ spectrometer, direct to computer (not via scope).** Core domain library built & 
 - [x] **M4.1b** **Per-stage ownership guard** (`app_apps/control/ownership.py`:
       `try_acquire()`/`acquire()`/`release()`/`hold()` ctx mgr; REJECT on contention).
       *Test:* 8 unit tests green. **[RESOLVED Q12 — required]**
-- [ ] **M4.2** Control-loop **Routine** base consuming `SpectrumInfo` (read-only) +
-      true position → stage command; owns one stage via the guard; anti-spasm
-      (deadband + slew limit) here. Test against a **fake stage**. **[RESOLVED Q12/Q13]**
-      (per-DOF measured variables in architecture §4.4; gains/limits empirical at build)
-- [ ] **M4.3** Delay loop — measured ν₀ (`f0`/λ0) → delay stage. *Test:* fake plant converges. **[RESOLVED Q13]**
-- [ ] **M4.4** Truncation loop — measured `nu_end` → truncation stage. **[RESOLVED Q13]**
-- [ ] **M4.5** Grating loop — measured `f1` (chirp rate) → grating stage; `f2`=TOD ignored. **[RESOLVED Q13]**
-- [ ] **M4.6** HWP loop — measured `initial_phase`, hold reference → HWP. Plus
-      make-arm-horizontal = minimize single-arm amplitude (shared with M2.5). **[RESOLVED Q13/Q15]**
+- [x] **M4.2** Control-loop base — built as a **feedback `@routine`** over the linear layer
+      (control loops *are* routines), backed by a reusable hardware-free PID engine
+      `control/lock.py::run_pid_lock` (measure → PID → actuate → settle; `output_limits` =
+      per-step anti-spasm cap). Verified against simulated plants. **[RESOLVED Q12/Q13]**
+      *(Per-stage ownership guard integrates at the lab-verb level once M4 loops run alongside
+      other routines; single-flight already prevents routine-vs-routine races.)*
+- [x] **M4.3** Delay loop — `lock_central_frequency`: measured ν₀ → delay stage. Sim plant
+      converges. **[RESOLVED Q13]** — `routines/linear/scripts/control_loops.py`.
+- [x] **M4.4** Truncation loop — `lock_terminal_frequency`: measured `nu_end` → truncation stage.
+      Sim plant converges. **[RESOLVED Q13]**.
+- [ ] **M4.5** Grating loop — measured `f1` (chirp rate) → grating stage; `f2`=TOD ignored.
+      **BLOCKED:** ESP100 is the contributor's empty stub (no driver/handle). ~15-line copy of
+      the others once a handle exists. **[RESOLVED Q13]**
+- [x] **M4.6** HWP loop — `lock_phase`: measured `initial_phase` → HWP (tracks commanded angle,
+      rotator has no read-back). Sim plant converges. **[RESOLVED Q13/Q15]**
+      *(make-arm-horizontal = minimize single-arm amplitude — shared with M2.5, still to build.)*
 - [ ] **M4.7** QWP loop: coarse full-range scan → fine local scan → PID tracking on
-      the lower-envelope metric. Reuses collaborator's ELL14 rotator (Q2). **[RESOLVED Q14]**
+      the lower-envelope metric. Reuses collaborator's ELL14 rotator (Q2).
+      **BLOCKED:** needs ELL14 wiring / a `lab.qwp` verb (currently raises `LabUnavailable`).
+      **[RESOLVED Q14]**
 
 ---
 
@@ -257,8 +266,12 @@ spectrometer, direct to computer (not via scope).** Core domain library built & 
 - [x] **R.7** Routine **authoring guide** ([routine_authoring_guide.md](routine_authoring_guide.md)):
       5-min quickstart, mental model, full `lab.*` verb reference (matched to the facade),
       recipes, common mistakes, and a paste-in LLM spec.
-- [ ] **R.8** *(roadmap, not committed)* T1 voice/standby trigger; T2 supervised planner;
-      T3 bounded autonomous loop — see roadmap §6 of the plan.
+- [~] **R.8** LLM-automation tiers (see roadmap §6 of the plan). **Text core built** in
+      `app_apps/assistant/` (off by default + runtime kill switch): registry→tool schemas,
+      param validation, T1 dispatch (safe auto-run / unsafe confirm), T2 supervised planner
+      (gated write → `check.py` → register), Claude wiring (lazy, no network until enabled).
+      *Remaining:* L5 voice adapter (wake-word → STT → TTS); T3 bounded autonomous loop (low
+      merit, deferred). Tested with a fake LLM client — no network in the suite.
 
 ---
 
