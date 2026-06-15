@@ -138,6 +138,7 @@ celerybeat.pid
 .env
 .envrc
 .venv
+.venv312
 .venv32
 .venv64
 env/
@@ -482,6 +483,9 @@ TSWLatexianTemp*
 ### LaTeX Patch ###
 # glossaries
 *.glstex
+
+# Local demo / integration artifacts (CSV + PNG written by scripts/integration_demo.py)
+out/
 
 ### Linux ###
 *~

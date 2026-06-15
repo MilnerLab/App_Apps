@@ -9,6 +9,7 @@ Run with the project interpreter so it uses the right environment and finds mypy
 
     .venv312/Scripts/python.exe scripts/check.py          # Windows (this project)
     python scripts/check.py                                # if your venv is active
+    .venv312/Scripts/python.exe scripts/check.py --integration   # also run test/integration
 
 Scope notes:
   * mypy is scoped to the type-clean packages: app_apps.routines.linear, app_apps.assistant,
@@ -67,6 +68,16 @@ def main() -> int:
     )
     if rc != 0:
         failures.append("unittest")
+
+    # Integration tests are slower (lmfit x iterations through the full chain) and opt-in.
+    if "--integration" in sys.argv:
+        rc = _run(
+            "integration tests",
+            [sys.executable, "-m", "unittest", "discover", "-s", "test/integration",
+             "-p", "test_*.py"],
+        )
+        if rc != 0:
+            failures.append("integration")
 
     print("\n" + "=" * 56)
     if failures:
