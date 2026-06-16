@@ -169,6 +169,21 @@ quantities, not open-loop dial values. (Refines decision-log **D19**.)
 - **Goal:** higher rotational excitation; possibly approach the **Landau critical velocity**.
 - **Probe pulse:** ~120 fs (detection); **not** a software-controlled quantity.
 
+### 2.5b Optical frequency (THz) vs rotational frequency (GHz)
+
+Two *different* quantities share the word "frequency":
+- **Optical** edges `nu0_thz` / `nu_start_thz` / `nu_end_thz` (≈ **370–377 THz**, i.e. ~800 nm
+  light) — the spectrum envelope/edges from `fit_spectrum`. §2.2 maps truncation → `nu_end_thz`.
+- **Rotational** frequency (the centrifuge spin, **≤ 200 GHz**, §2.5) — *derived* from the
+  spectrum, not equal to the optical edge. The SPM-002 records the field through a polarizer;
+  mapping wavelength → time (via the pulse chirp) turns the spectral fringes into the
+  polarizer-modulated rotation signal. By Malus's law (`cos²` ⇒ peaks every π) the signal is at
+  **twice** the rotation, so **rotation = ½ · observed-time-frequency**. Concretely
+  (`analysis/spectrum_info/rotation.py`):
+  `rotation_ghz(ν) = ½ · |tau_ps + 2·g2·dν + 3·g3·dν²| · chirp_rate · 1e3`, with the chirp rate
+  `dν/dt` from the pulse (300 ps / 802 nm / 8 nm FWHM ⇒ ≈ 0.0124 THz/ps). **[PHYSICS-CONFIRM]:**
+  leading-order linear chirp; swap in a measured chirp calibration when available.
+
 ## 2.6 Analysis outputs a routine can consume
 
 - `SpectrumInfo`: `nu0_thz`, `nu_start_thz`, `nu_end_thz`, `g2`, `g3`, `amp_upper`, `amp_lower`,

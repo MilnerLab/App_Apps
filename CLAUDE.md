@@ -32,6 +32,9 @@ Runs mypy (scoped to `app_apps.routines.linear`) + the full `test/unit` suite. M
   clean block.
 - **Don't push or open PRs unless asked. Never push to `main`.** Commit on feature branches;
   branch off the current feature branch, not `main` (it lacks our io/analysis/control work).
+- **Never merge `dev` into `main`** (or open/auto-merge a `dev`→`main` PR) unless the user
+  explicitly gives permission for that specific merge. Feature branches PR into `dev`; `dev`→`main`
+  is the user's call alone.
 - Drop the `Co-Authored-By` trailer from commits unless asked otherwise.
 
 ## Branches (2026-06)
