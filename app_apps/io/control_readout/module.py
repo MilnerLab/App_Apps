@@ -7,7 +7,6 @@ from app_apps.io.control_readout.rotator_worker_handler import RotatorHandle
 from app_apps.io.control_readout.servo_worker_handler import ServoShutterHandle
 from app_apps.io.control_readout.service import ControlReadoutService
 from base_core.framework.app.context import AppContext
-from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
 
@@ -16,7 +15,7 @@ class ControlReadoutModule(BaseModule):
     name = "control_readout"
 
     def register(self, c: Container, ctx: AppContext) -> None:
-        service = ControlReadoutService(bus=ctx.event_bus, io=c.get(TaskRunner))
+        service = ControlReadoutService(bus=ctx.event_bus)
 
         handle = RotatorHandle(bus=ctx.event_bus)
         service.add_handle(handle)

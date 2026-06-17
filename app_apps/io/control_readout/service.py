@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.events.event_bus import EventBus
 from base_core.ipc.subprocess_service import SubprocessService
 
@@ -14,8 +13,8 @@ class ControlReadoutService(SubprocessService):
     when the sensor worker is implemented.
     """
 
-    def __init__(self, bus: EventBus, io: TaskRunner) -> None:
-        super().__init__(bus, io)
+    def __init__(self, bus: EventBus) -> None:
+        super().__init__(bus)
 
     @property
     def _entry_module(self) -> str:

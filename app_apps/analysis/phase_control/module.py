@@ -7,7 +7,6 @@ from app_apps.io.spectrometer.buffer import SpectrumMemorySpec
 from app_apps.io.spectrometer.module import SpectrometerModule
 from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
 from base_core.framework.app.context import AppContext
-from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
 
@@ -21,7 +20,6 @@ class PhaseControlModule(BaseModule):
 
         service = PhaseControlService(
             bus=ctx.event_bus,
-            io=c.get(TaskRunner),
             spec=spec,
             writer_handle=c.get(SpectrometerWorkerHandle),
         )

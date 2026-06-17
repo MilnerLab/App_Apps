@@ -4,7 +4,6 @@ from app_apps.io.spectrometer.buffer import SpectrumBuffer, SpectrumMemorySpec
 from app_apps.io.spectrometer.service import SpectrometerService
 from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
 from base_core.framework.app.context import AppContext
-from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
 from spm_002.config import PYTHON32_PATH
@@ -19,7 +18,6 @@ class SpectrometerModule(BaseModule):
 
         service = SpectrometerService(
             bus=ctx.event_bus,
-            io=c.get(TaskRunner),
             python_exe=PYTHON32_PATH,
         )
 

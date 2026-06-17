@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from typing import Callable, TYPE_CHECKING, Any
+from typing import Callable, Any
 
-from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.events.event_bus import EventBus
 from base_core.ipc.subprocess_service import SubprocessService
 from app_apps.io.spectrometer.buffer import SpectrumBuffer, SpectrumMemorySpec
@@ -27,11 +26,10 @@ class PhaseControlService(SubprocessService):
     def __init__(
         self,
         bus: EventBus,
-        io: TaskRunner,
         spec: SpectrumMemorySpec,
         writer_handle: Any,
     ) -> None:
-        super().__init__(bus, io)
+        super().__init__(bus)
         self.add_buffer(SpectrumBuffer, spec)
         self._writer_handle = writer_handle
         self._spectrum_unsub: Callable[[], None] | None = None

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.events.event_bus import EventBus
 from base_core.ipc.subprocess_service import SubprocessService
 
@@ -16,10 +15,9 @@ class SpectrometerService(SubprocessService):
     def __init__(
         self,
         bus: EventBus,
-        io: TaskRunner,
         python_exe: str | None = None,
     ) -> None:
-        super().__init__(bus, io, python_exe)
+        super().__init__(bus, python_exe)
 
     @property
     def _entry_module(self) -> str:
