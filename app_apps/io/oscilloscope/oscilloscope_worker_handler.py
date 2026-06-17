@@ -1,24 +1,33 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from base_core.framework.events.event_bus import EventBus
+from base_core.framework.shm.writer_worker_handle import WriterWorkerHandle
 from base_core.ipc.message import OKReply
-from base_core.ipc.worker_handle import BaseWorkerHandle
 from oscilloscope.config import ScopeConfig
 from oscilloscope.messages import SetScopeConfig
 
-if TYPE_CHECKING:
-    from base_core.ipc.subprocess_service import SubprocessService
+from app_apps.io.oscilloscope.buffer import ScopeBuffer, ScopeMemorySpec
+from app_apps.io.oscilloscope.events import TraceAvailable, TraceAck
 
+class OscilloscopeWorkerHandle(WriterWorkerHandle[ScopeBuffer, TraceAvailable, TraceAck]):
+    """Main-process handle to the OscilloscopeWorker.
 
-class OscilloscopeWorkerHandle(BaseWorkerHandle):
-    """Main-process handle to the OscilloscopeWorker (config push)."""
+    Owns ScopeBuffer shared memory and the SlotCoordinator.
+    """
 
     WORKER_ID = "oscilloscope"
 
-    def __init__(self, service: "SubprocessService", bus: EventBus) -> None:
-        super().__init__(self.WORKER_ID, service, bus)
+    def __init__(self, bus: EventBus, spec: ScopeMemorySpec) -> None:
+        super().__init__(
+            worker_id=self.WORKER_ID,
+            bus=bus,
+            buffer_cls=ScopeBuffer,
+            spec=spec,
+            make_available=lambda slot, item_id, ts: TraceAvailable(
+                slot=slot, item_id=item_id, timestamp_ns=ts
+            ),
+            ack_type=TraceAck,
+        )
 
     def set_config(self, config: ScopeConfig) -> None:
         self._request(SetScopeConfig(config=config), self._on_reply)

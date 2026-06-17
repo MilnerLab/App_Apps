@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from app_apps.io.control_readout.buffer import PressureMemorySpec
 from app_apps.io.control_readout.esp_worker_handler import EspHandle
 from app_apps.io.control_readout.picomotor_worker_handler import PicomotorHandle
 from app_apps.io.control_readout.rgv_worker_handler import RgvHandle
@@ -17,24 +16,15 @@ class ControlReadoutModule(BaseModule):
     name = "control_readout"
 
     def register(self, c: Container, ctx: AppContext) -> None:
-        spec = PressureMemorySpec("control_readout_pressure")
-        c.register_instance(PressureMemorySpec, spec)
+        service = ControlReadoutService(bus=ctx.event_bus, io=c.get(TaskRunner))
 
-        service = ControlReadoutService(
-            bus=ctx.event_bus,
-            io=c.get(TaskRunner),
-            spec=spec,
-        )
-
-        handle = RotatorHandle(service=service, bus=ctx.event_bus)
+        handle = RotatorHandle(bus=ctx.event_bus)
         service.add_handle(handle)
 
-        # ESP301 stages + RGV100BL HWP + picomotors + servo shutters share the
-        # control_readout subprocess (additive).
-        esp_handle = EspHandle(service=service, bus=ctx.event_bus)
-        rgv_handle = RgvHandle(service=service, bus=ctx.event_bus)
-        pico_handle = PicomotorHandle(service=service, bus=ctx.event_bus)
-        servo_handle = ServoShutterHandle(service=service, bus=ctx.event_bus)
+        esp_handle = EspHandle(bus=ctx.event_bus)
+        rgv_handle = RgvHandle(bus=ctx.event_bus)
+        pico_handle = PicomotorHandle(bus=ctx.event_bus)
+        servo_handle = ServoShutterHandle(bus=ctx.event_bus)
         for h in (esp_handle, rgv_handle, pico_handle, servo_handle):
             service.add_handle(h)
 

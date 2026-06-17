@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app_apps.io.spectrometer.buffer import SpectrumMemorySpec
+from app_apps.io.spectrometer.buffer import SpectrumBuffer, SpectrumMemorySpec
 from app_apps.io.spectrometer.service import SpectrometerService
 from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
 from base_core.framework.app.context import AppContext
@@ -20,11 +20,11 @@ class SpectrometerModule(BaseModule):
         service = SpectrometerService(
             bus=ctx.event_bus,
             io=c.get(TaskRunner),
-            spec=spec,
             python_exe=PYTHON32_PATH,
         )
 
-        handle = SpectrometerWorkerHandle(service=service, bus=ctx.event_bus)
+        handle = SpectrometerWorkerHandle(bus=ctx.event_bus, spec=spec)
+        service.add_buffer(SpectrumBuffer, spec)
         service.add_handle(handle)
 
         c.register_instance(SpectrometerService, service)

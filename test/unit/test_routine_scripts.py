@@ -70,7 +70,7 @@ class _ScanFixture(unittest.TestCase):
             bus=self.bus,
             cancel=CancelToken(),
             esp=self.esp,
-            scope_service=FakeScopeService(),
+            scope_handle=FakeScopeService(),
             scope_spec=self.spec,
             config=LabConfig(xcorr_top_n=3, capture_timeout_s=2.0, move_timeout_s=2.0),
         )

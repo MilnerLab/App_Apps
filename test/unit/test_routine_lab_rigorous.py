@@ -162,7 +162,7 @@ class TestScopeConsumerRigor(unittest.TestCase):
         self.service = FakeWriterService()
         self.lab = Lab(
             bus=self.bus, cancel=CancelToken(),
-            scope_service=self.service, scope_spec=self.spec,
+            scope_handle=self.service, scope_spec=self.spec,
             config=LabConfig(capture_timeout_s=2.0), consumer_id="rig",
         )
 

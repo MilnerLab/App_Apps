@@ -369,9 +369,9 @@ class Lab:
         rgv: Any = None,
         picomotor: Any = None,
         servo: Any = None,
-        scope_service: Any = None,
+        scope_handle: Any = None,
         scope_spec: Optional[ScopeMemorySpec] = None,
-        spectrometer_service: Any = None,
+        spectrum_handle: Any = None,
         spectrum_spec: Optional[SpectrumMemorySpec] = None,
         probe_axis: int = 1,
         delay_axis: int = 2,
@@ -409,20 +409,20 @@ class Lab:
         self.shutter = ShutterFacade(bus, cancel, servo, config) if servo is not None \
             else _Unavailable("shutter", "ServoShutterHandle")
 
-        if scope_service is not None and scope_spec is not None:
-            self.scope = ScopeFacade(bus, cancel, scope_service, scope_spec, consumer_id, config)
+        if scope_handle is not None and scope_spec is not None:
+            self.scope = ScopeFacade(bus, cancel, scope_handle, scope_spec, consumer_id, config)
             self._closeables.append(self.scope.shutdown)
         else:
-            self.scope = _Unavailable("scope", "OscilloscopeService + ScopeMemorySpec")  # type: ignore[assignment]
+            self.scope = _Unavailable("scope", "OscilloscopeWorkerHandle + ScopeMemorySpec")  # type: ignore[assignment]
 
-        if spectrometer_service is not None and spectrum_spec is not None:
+        if spectrum_handle is not None and spectrum_spec is not None:
             self.spectrometer = SpectrometerFacade(
-                bus, cancel, spectrometer_service, spectrum_spec, consumer_id, config
+                bus, cancel, spectrum_handle, spectrum_spec, consumer_id, config
             )
             self._closeables.append(self.spectrometer.shutdown)
         else:
             self.spectrometer = _Unavailable(  # type: ignore[assignment]
-                "spectrometer", "SpectrometerService + SpectrumMemorySpec"
+                "spectrometer", "SpectrometerWorkerHandle + SpectrumMemorySpec"
             )
 
     # ---- analysis ---------------------------------------------------------------------

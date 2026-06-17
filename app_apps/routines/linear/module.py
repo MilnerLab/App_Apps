@@ -27,9 +27,9 @@ from app_apps.io.control_readout.picomotor_worker_handler import PicomotorHandle
 from app_apps.io.control_readout.rgv_worker_handler import RgvHandle
 from app_apps.io.control_readout.servo_worker_handler import ServoShutterHandle
 from app_apps.io.oscilloscope.buffer import ScopeMemorySpec
-from app_apps.io.oscilloscope.service import OscilloscopeService
+from app_apps.io.oscilloscope.oscilloscope_worker_handler import OscilloscopeWorkerHandle
 from app_apps.io.spectrometer.buffer import SpectrumMemorySpec
-from app_apps.io.spectrometer.service import SpectrometerService
+from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
 from app_apps.routines.linear.cancel import CancelToken
 from app_apps.routines.linear.lab import Lab
 from app_apps.routines.linear.runner import LinearRoutineRunner
@@ -49,9 +49,9 @@ def _make_lab_factory(
             rgv=c.try_get(RgvHandle),
             picomotor=c.try_get(PicomotorHandle),
             servo=c.try_get(ServoShutterHandle),
-            scope_service=c.try_get(OscilloscopeService),
+            scope_handle=c.try_get(OscilloscopeWorkerHandle),
             scope_spec=c.try_get(ScopeMemorySpec),
-            spectrometer_service=c.try_get(SpectrometerService),
+            spectrum_handle=c.try_get(SpectrometerWorkerHandle),
             spectrum_spec=c.try_get(SpectrumMemorySpec),
             consumer_id=f"linear-routine-{uuid.uuid4().hex[:8]}",
         )

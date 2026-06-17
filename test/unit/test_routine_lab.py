@@ -173,7 +173,7 @@ class TestScopeCapture(unittest.TestCase):
         self.lab = Lab(
             bus=self.bus,
             cancel=CancelToken(),
-            scope_service=self.service,
+            scope_handle=self.service,
             scope_spec=self.spec,
             config=LabConfig(xcorr_top_n=3, capture_timeout_s=2.0),
             consumer_id="test",
@@ -219,7 +219,7 @@ class TestSpectrometerRead(unittest.TestCase):
         self.lab = Lab(
             bus=self.bus,
             cancel=CancelToken(),
-            spectrometer_service=self.service,
+            spectrum_handle=self.service,
             spectrum_spec=self.spec,
             config=LabConfig(spectrum_timeout_s=2.0),
             consumer_id="test",

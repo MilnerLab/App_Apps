@@ -2,37 +2,20 @@ from __future__ import annotations
 
 from base_core.framework.concurrency.task_runner import TaskRunner
 from base_core.framework.events.event_bus import EventBus
-from base_core.framework.shm.slot_coordinator import SlotCoordinator
-from base_core.framework.shm.writer_service import WriterSubprocessService
-from app_apps.io.control_readout.buffer import PressureBuffer, PressureMemorySpec
-from app_apps.io.control_readout.events import PressureAvailable, PressureAck
+from base_core.ipc.subprocess_service import SubprocessService
 
 
-class ControlReadoutService(WriterSubprocessService[PressureAvailable, PressureAck]):
+class ControlReadoutService(SubprocessService):
     """
     Main-process service for the control readout subprocess.
 
-    Owns the PressureBuffer shared memory region and the SlotCoordinator.
-    Hosts the rotator worker (ELL14 HWP) and will host pressure-sensor workers
-    when implemented.
+    Hosts the rotator (ELL14 HWP), ESP301 stages, RGV100BL HWP, picomotors,
+    and servo shutters. A pressure-sensor WriterWorkerHandle will be added here
+    when the sensor worker is implemented.
     """
 
-    def __init__(
-        self,
-        bus: EventBus,
-        io: TaskRunner,
-        spec: PressureMemorySpec,
-    ) -> None:
-        coordinator: SlotCoordinator[PressureAvailable, PressureAck] = SlotCoordinator(
-            spec=spec,
-            owner_id="control_readout",
-            bus=bus,
-            make_available=lambda slot, item_id, ts: PressureAvailable(
-                slot=slot, item_id=item_id, timestamp_ns=ts
-            ),
-            ack_type=PressureAck,
-        )
-        super().__init__(bus, io, PressureBuffer, spec, coordinator)
+    def __init__(self, bus: EventBus, io: TaskRunner) -> None:
+        super().__init__(bus, io)
 
     @property
     def _entry_module(self) -> str:

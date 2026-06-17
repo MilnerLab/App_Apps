@@ -7,8 +7,6 @@ ESP301 worker lives in the control_readout subprocess alongside the rotator).
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from base_core.framework.events.event_bus import EventBus
 from base_core.ipc.message import OKReply
 from base_core.ipc.worker_handle import BaseWorkerHandle
@@ -22,15 +20,11 @@ from control_readout.esp_301.messages import (
 
 from app_apps.io.control_readout.esp_events import RequestMove
 
-if TYPE_CHECKING:
-    from base_core.ipc.subprocess_service import SubprocessService
-
-
 class EspHandle(BaseWorkerHandle):
     WORKER_ID = "esp301"
 
-    def __init__(self, service: "SubprocessService", bus: EventBus) -> None:
-        super().__init__(self.WORKER_ID, service, bus)
+    def __init__(self, bus: EventBus) -> None:
+        super().__init__(self.WORKER_ID, bus)
 
     def _on_attached(self) -> None:
         self._subscribe(RequestMove, self._on_request_move)
