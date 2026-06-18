@@ -7,6 +7,7 @@ from app_apps.io.control_readout.rotator_worker_handler import RotatorHandle
 from app_apps.io.control_readout.servo_worker_handler import ServoShutterHandle
 from app_apps.io.control_readout.service import ControlReadoutService
 from base_core.framework.app.context import AppContext
+from base_core.framework.app.enums import AppStatus
 from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
 
@@ -36,8 +37,9 @@ class ControlReadoutModule(BaseModule):
 
     def on_startup(self, c: Container, ctx: AppContext) -> None:
         c.get(ControlReadoutService).start()
-        for handle_type in (RotatorHandle, EspHandle, RgvHandle, PicomotorHandle, ServoShutterHandle):
-            c.get(handle_type).start()
+        if ctx.status == AppStatus.CONNECTED:
+            for handle_type in (RotatorHandle, EspHandle, RgvHandle, PicomotorHandle, ServoShutterHandle):
+                c.get(handle_type).start()
 
     def on_shutdown(self, c: Container, ctx: AppContext) -> None:
         for handle_type in (ServoShutterHandle, PicomotorHandle, RgvHandle, EspHandle, RotatorHandle):

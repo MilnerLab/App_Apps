@@ -19,12 +19,12 @@ from app_apps.analysis.phase_control.subprocess.messages import (
 if TYPE_CHECKING:
     from base_core.framework.events.event_bus import EventBus
     from base_core.ipc.subprocess_connector import SubprocessPipelineConnector
-    from app_apps.io.spectrometer.buffer import SpectrumBuffer
+    from spm_002.buffer import SpectrumBuffer
 
 log = logging.getLogger(__name__)
 
 WORKER_ID = "phase_tracking"
-CONSUMER_ID = "phase_control"
+CONSUMER_ID = "phase_tracking"
 
 
 class PhaseTrackingWorker(BaseWorker):
@@ -62,13 +62,15 @@ class PhaseTrackingWorker(BaseWorker):
         self._corrector = PhaseCorrector()
 
     def _on_spectrum(self, msg: ProcessSpectrum) -> None:
-        if self._paused or self._tracker is None or self._corrector is None:
-            return
         try:
+            if self._paused or self._tracker is None or self._corrector is None:
+                return
             buf = self._get_buffer()
             wl = buf.wavelengths(msg.slot)
             ins = buf.intensities(msg.slot)
-            self._tracker.update(wl, ins)
+            config_changed = self._tracker.update(wl, ins)
+            if config_changed:
+                self._notify(ConfigSynced(config=self._config))
             phase = self._tracker.current_phase
             if phase is not None:
                 result = self._corrector.update(phase)

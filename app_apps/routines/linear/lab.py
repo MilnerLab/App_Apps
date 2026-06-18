@@ -29,9 +29,8 @@ import numpy as np
 
 from app_apps.analysis.spectrum_info.fit import fit_spectrum
 from app_apps.analysis.spectrum_info.model import SpectrumInfo
-from app_apps.io.oscilloscope.buffer import ScopeBuffer, ScopeMemorySpec
 from app_apps.io.oscilloscope.events import TraceAck, TraceAvailable
-from app_apps.io.spectrometer.buffer import SpectrumBuffer, SpectrumMemorySpec
+from spm_002.buffer import SpectrumBuffer, SpectrumMemorySpec
 from app_apps.io.spectrometer.events import SpectrumAck, SpectrumAvailable
 from app_apps.routines.linear.bridge import await_event, cancellable_sleep
 from app_apps.routines.linear.cancel import CancelToken, RoutineError

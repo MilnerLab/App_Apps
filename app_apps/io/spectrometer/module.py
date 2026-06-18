@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from app_apps.io.spectrometer.buffer import SpectrumBuffer, SpectrumMemorySpec
 from app_apps.io.spectrometer.service import SpectrometerService
 from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
 from base_core.framework.app.context import AppContext
+from base_core.framework.app.enums import AppStatus
 from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
 from spm_002.config import PYTHON32_PATH
@@ -32,7 +32,8 @@ class SpectrometerModule(BaseModule):
         service = c.get(SpectrometerService)
         handle = c.get(SpectrometerWorkerHandle)
         service.start()
-        handle.start()
+        if ctx.status == AppStatus.CONNECTED:
+            handle.start()
 
     def on_shutdown(self, c: Container, ctx: AppContext) -> None:
         handle = c.get(SpectrometerWorkerHandle)

@@ -6,7 +6,7 @@ from base_core.ipc.message import OKReply
 from spm_002.config import SpectrometerConfig
 from spm_002.messages import SetSpectrometerConfig
 
-from app_apps.io.spectrometer.buffer import SpectrumBuffer, SpectrumMemorySpec
+from spm_002.buffer import SpectrumBuffer, SpectrumMemorySpec
 from app_apps.io.spectrometer.events import SpectrumAvailable, SpectrumAck
 
 class SpectrometerWorkerHandle(WriterWorkerHandle[SpectrumBuffer, SpectrumAvailable, SpectrumAck]):

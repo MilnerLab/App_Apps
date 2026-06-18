@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QWidget
 from app_apps.analysis.phase_control.subprocess.domain.mode import ControlMode
 from app_apps.io.spectrometer.events import SpectrumAvailable, SpectrumAck
 from base_core.framework.events import EventBus
-from base_core.framework.subprocess.shared_memory.buffer_output import BufferOutput
+from base_qt.ui.buffer_consumer_mixin import BufferOutput
 from base_qt.app.dispatcher import QtDispatcher
 from base_qt.ui.app_message import MessageLevel
 from base_qt.ui.buffer_consumer_mixin import BufferConsumerMixin

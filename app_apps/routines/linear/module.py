@@ -28,7 +28,7 @@ from app_apps.io.control_readout.rgv_worker_handler import RgvHandle
 from app_apps.io.control_readout.servo_worker_handler import ServoShutterHandle
 from app_apps.io.oscilloscope.buffer import ScopeMemorySpec
 from app_apps.io.oscilloscope.oscilloscope_worker_handler import OscilloscopeWorkerHandle
-from app_apps.io.spectrometer.buffer import SpectrumMemorySpec
+from spm_002.buffer import SpectrumMemorySpec
 from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
 from app_apps.routines.linear.cancel import CancelToken
 from app_apps.routines.linear.lab import Lab

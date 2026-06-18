@@ -5,7 +5,7 @@ from app_apps.analysis.phase_control.subprocess.domain.envelope_config import En
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.analysis.phase_control.subprocess.envelope_worker import EnvelopeWorker
 from app_apps.analysis.phase_control.subprocess.phase_tracking_worker import PhaseTrackingWorker
-from app_apps.io.spectrometer.buffer import SpectrumBuffer
+from spm_002.buffer import SpectrumBuffer
 
 
 class PhaseControlProcess(BaseSubprocessMain):

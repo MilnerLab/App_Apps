@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 
 from base_core.quantities.enums import Prefix
-from app_apps.analysis.phase_control.domain.envelope_config import EnvelopeConfig, EnvelopeMode
-from app_apps.analysis.phase_control.domain.phase_corrector import CorrectionResult
+from app_apps.analysis.phase_control.subprocess.domain.envelope_config import EnvelopeConfig, EnvelopeMode
+from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import CorrectionResult
 from base_core.math.models import Angle
 
 
