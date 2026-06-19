@@ -12,21 +12,20 @@ from base_qt.ui.form import (
     IntSpec,
     LengthSpec,
     RangeSpec,
-    TimeSpec,
 )
 
 
 class PhaseConfigDialog(ConfigForm):
     _specs = {
-        "central_wavelength": LengthSpec("Central wavelength", Prefix.NANO, min=700, max=1000),
-        "bandwidth":          LengthSpec("Bandwidth",          Prefix.NANO, min=0.1,  max=50),
-        "baseline":           FloatSpec("Baseline",         -10.0, 10.0),
-        "phase":              AngleSpec("Phase"),
-        "tau_ps":             TimeSpec("τ", Prefix.PICO),
-        "a_R_THz_per_ps":     FloatSpec("a_R (THz/ps)",    -10.0, 10.0),
-        "a_L_THz_per_ps":     FloatSpec("a_L (THz/ps)",    -10.0, 10.0),
-        "has_acceleration":   BoolSpec("Asymmetric chirp"),
-        "wavelength_range":   RangeSpec(
+        "lambda0":             LengthSpec("λ₀",              Prefix.NANO, min=700,  max=1000),
+        "delta_lambda_fwhm":   LengthSpec("FWHM bandwidth",  Prefix.NANO, min=0.1,  max=50),
+        "A":                   FloatSpec("Amplitude",         0.0,  10.0),
+        "dphi0":               AngleSpec("Phase φ₀"),
+        "delta_z":             FloatSpec("δz [mm]",          -10.0, 10.0),
+        "delta_beta":          FloatSpec("δβ [ps²]",          -10.0, 10.0),
+        "offset":              FloatSpec("Offset",             0.0,   1.0),
+        "has_acceleration":    BoolSpec("Asymmetric chirp (use cfg_spectrum)"),
+        "wavelength_range":    RangeSpec(
             "Wavelength range",
             LengthSpec("", Prefix.NANO, min=700, max=1000),
         ),
@@ -35,8 +34,8 @@ class PhaseConfigDialog(ConfigForm):
     }
     _groups = [
         ("Spectral Fit", [
-            "central_wavelength", "bandwidth", "baseline", "phase",
-            "tau_ps", "a_R_THz_per_ps", "a_L_THz_per_ps", "has_acceleration",
+            "lambda0", "delta_lambda_fwhm", "A", "dphi0",
+            "delta_z", "delta_beta", "offset", "has_acceleration",
         ]),
         ("Tracking", [
             "wavelength_range", "residuals_threshold", "avg_spectra",

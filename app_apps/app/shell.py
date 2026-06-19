@@ -37,9 +37,27 @@ class AppShell(LabMainWindow):
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setCentralWidget(label)
 
+        self._build_devices_menu(container)
+
         from app_apps.app.panel_window import AppPanelWindow
-        self._panel_window = AppPanelWindow(container, bus, dispatcher)
+        self._panel_window = AppPanelWindow(container)
         self._panel_window.show()
+
+    def _build_devices_menu(self, container: Container) -> None:
+        from app_apps.io.spectrometer.ui.spectrometer_popout import SpectrometerPopout
+        from app_apps.io.spectrometer.ui.spectrometer_vm import SpectrometerVM
+
+        menu = self.menuBar().addMenu("Devices")
+        self._spectrometer_popout: SpectrometerPopout | None = None
+
+        def _open_spectrometer() -> None:
+            if self._spectrometer_popout is None:
+                self._spectrometer_popout = SpectrometerPopout(
+                    container.get(SpectrometerVM), parent=self
+                )
+            self._spectrometer_popout.open()
+
+        menu.addAction("Spectrometer", _open_spectrometer)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         # Bypass PanelWindow.closeEvent (which ignores) and destroy it directly.

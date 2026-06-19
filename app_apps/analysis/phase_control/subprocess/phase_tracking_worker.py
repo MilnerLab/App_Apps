@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Callable, TYPE_CHECKING
 
-from base_core.ipc.worker import BaseWorker
+from base_core.ipc.threaded_worker import ThreadedWorker, worker_thread
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.analysis.phase_control.subprocess.domain.phase_tracker import PhaseTracker
 from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import PhaseCorrector
@@ -19,15 +19,15 @@ from app_apps.analysis.phase_control.subprocess.messages import (
 if TYPE_CHECKING:
     from base_core.framework.events.event_bus import EventBus
     from base_core.ipc.subprocess_connector import SubprocessPipelineConnector
-    from app_apps.io.spectrometer.buffer import SpectrumBuffer
+    from spm_002.buffer import SpectrumBuffer
 
 log = logging.getLogger(__name__)
 
 WORKER_ID = "phase_tracking"
-CONSUMER_ID = "phase_control"
+CONSUMER_ID = "phase_tracking"
 
 
-class PhaseTrackingWorker(BaseWorker):
+class PhaseTrackingWorker(ThreadedWorker):
     def __init__(
         self,
         bus: EventBus,
@@ -52,7 +52,7 @@ class PhaseTrackingWorker(BaseWorker):
         self._corrector = PhaseCorrector()
         self._paused = False
 
-    def _stop(self) -> None:
+    def _pause(self) -> None:
         self._tracker = None
         self._corrector = None
         self._paused = True
@@ -61,14 +61,17 @@ class PhaseTrackingWorker(BaseWorker):
         self._tracker = PhaseTracker(self._config)
         self._corrector = PhaseCorrector()
 
+    @worker_thread
     def _on_spectrum(self, msg: ProcessSpectrum) -> None:
-        if self._paused or self._tracker is None or self._corrector is None:
-            return
         try:
+            if self._paused or self._tracker is None or self._corrector is None:
+                return
             buf = self._get_buffer()
             wl = buf.wavelengths(msg.slot)
             ins = buf.intensities(msg.slot)
-            self._tracker.update(wl, ins)
+            config_changed = self._tracker.update(wl, ins)
+            if config_changed:
+                self._notify(ConfigSynced(config=self._config))
             phase = self._tracker.current_phase
             if phase is not None:
                 result = self._corrector.update(phase)
@@ -79,6 +82,7 @@ class PhaseTrackingWorker(BaseWorker):
         finally:
             self._notify(SpectrumProcessed(slot=msg.slot, item_id=msg.item_id, consumer_id=CONSUMER_ID))
 
+    @worker_thread
     def _on_set_config(self, msg: SetStabilizationConfig) -> None:
         self._config = msg.config
         if self._tracker is not None:
@@ -86,6 +90,7 @@ class PhaseTrackingWorker(BaseWorker):
         self._notify(ConfigSynced(config=self._config))
         self._reply_ok(msg)
 
+    @worker_thread
     def _on_set_paused(self, msg: SetPaused) -> None:
         if msg.worker_id != self._worker_id:
             return

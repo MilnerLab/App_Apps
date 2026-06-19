@@ -8,6 +8,7 @@ import lmfit
 import numpy as np
 
 from base_core.framework.serialization.serde import Primitive, PrimitiveSerde
+from base_core.math.functions import cfg_spectrum, cfCFG_spectrum
 from base_core.math.models import Angle, Range
 from base_core.quantities.enums import Prefix
 from base_core.quantities.models import Length
@@ -15,15 +16,21 @@ from base_core.quantities.models import Length
 T = TypeVar("T", bound="SpectralFitParams")
 
 
+def _first_param(func: Callable) -> str:
+    return next(iter(inspect.signature(func).parameters))
+
+
 @dataclass
 class SpectralFitParams:
-    central_wavelength: Length = Length(802.38, Prefix.NANO)
-    bandwidth: Length = Length(7.4728, Prefix.NANO)
-    baseline: float = 0.3338
-    phase: Angle = Angle(-3.34)
-    tau_ps: float = 0.30
-    a_R_THz_per_ps: float = 0.60
-    a_L_THz_per_ps: float = 0.60
+    """Fit parameters matching the cfg_spectrum / cfCFG_spectrum signatures."""
+
+    lambda0: Length = Length(802.38, Prefix.NANO)
+    delta_lambda_fwhm: Length = Length(7.4728, Prefix.NANO)
+    A: float = 1.0
+    dphi0: Angle = Angle(-3.34)
+    delta_z: float = 0.09       # arm path-length difference [mm]; tau = delta_z / c
+    delta_beta: float = 0.0     # GDD difference [ps²]; 0 when has_acceleration=False
+    offset: float = 0.3338
     residual: float = 0.0
 
     def to_fit_kwargs(self, func: Callable[..., Any]) -> dict[str, float]:
@@ -106,15 +113,47 @@ class StabilizationConfig(SpectralFitParams, PrimitiveSerde):
     avg_spectra: int = 10
     has_acceleration: bool = True
 
+    def _fit_func(self) -> Callable:
+        return cfg_spectrum if self.has_acceleration else cfCFG_spectrum
+
+    def fit_full(self, wavelengths_nm: np.ndarray, intensities: np.ndarray) -> SpectralFitParams:
+        """Multi-parameter fit using current values as initial guesses. Fixes envelope params."""
+        func = self._fit_func()
+        first_arg = _first_param(func)
+        model = lmfit.Model(func, independent_vars=[first_arg])
+        params = model.make_params(**self.to_fit_kwargs(func))
+        params["lambda0"].set(vary=False)
+        params["delta_lambda_fwhm"].set(vary=False)
+        # Seed amplitude and offset from data (intensity arrives pre-normalized to [0, 1]
+        # by PhaseTracker._prepare, so the config's stored A/offset don't apply directly).
+        params["A"].set(value=float(intensities.max() - intensities.min()), min=0.0)
+        params["offset"].set(value=float(intensities.min()))
+        result = model.fit(
+            intensities, params=params,
+            **{first_arg: wavelengths_nm}, max_nfev=1_000_000,
+        )
+        return SpectralFitParams.from_fit_result(self, result)
+
+    def fit_phase_only(self, wavelengths_nm: np.ndarray, intensities: np.ndarray) -> SpectralFitParams:
+        """Phase-only fit — all parameters fixed except dphi0."""
+        func = self._fit_func()
+        first_arg = _first_param(func)
+        model = lmfit.Model(func, independent_vars=[first_arg])
+        params = model.make_params(**self.to_fit_kwargs(func))
+        for name, par in params.items():
+            par.vary = (name == "dphi0")
+        result = model.fit(intensities, params=params, **{first_arg: wavelengths_nm})
+        return SpectralFitParams.from_fit_result(self, result)
+
     def to_primitive(self) -> Primitive:
         return {
-            "central_wavelength": self.central_wavelength.to_primitive(),
-            "bandwidth": self.bandwidth.to_primitive(),
-            "baseline": self.baseline,
-            "phase": self.phase.to_primitive(),
-            "tau_ps": self.tau_ps,
-            "a_R_THz_per_ps": self.a_R_THz_per_ps,
-            "a_L_THz_per_ps": self.a_L_THz_per_ps,
+            "lambda0": self.lambda0.to_primitive(),
+            "delta_lambda_fwhm": self.delta_lambda_fwhm.to_primitive(),
+            "A": self.A,
+            "dphi0": self.dphi0.to_primitive(),
+            "delta_z": self.delta_z,
+            "delta_beta": self.delta_beta,
+            "offset": self.offset,
             "residual": self.residual,
             "wavelength_range": {
                 "min": self.wavelength_range.min.to_primitive(),
@@ -129,13 +168,13 @@ class StabilizationConfig(SpectralFitParams, PrimitiveSerde):
     def from_primitive(cls, v: Primitive) -> "StabilizationConfig":
         wl_range = v["wavelength_range"]
         return cls(
-            central_wavelength=Length.from_primitive(v["central_wavelength"]),
-            bandwidth=Length.from_primitive(v["bandwidth"]),
-            baseline=float(v["baseline"]),
-            phase=Angle.from_primitive(v["phase"]),
-            tau_ps=float(v["tau_ps"]),
-            a_R_THz_per_ps=float(v["a_R_THz_per_ps"]),
-            a_L_THz_per_ps=float(v["a_L_THz_per_ps"]),
+            lambda0=Length.from_primitive(v["lambda0"]),
+            delta_lambda_fwhm=Length.from_primitive(v["delta_lambda_fwhm"]),
+            A=float(v["A"]),
+            dphi0=Angle.from_primitive(v["dphi0"]),
+            delta_z=float(v["delta_z"]),
+            delta_beta=float(v["delta_beta"]),
+            offset=float(v["offset"]),
             residual=float(v["residual"]),
             wavelength_range=Range(
                 Length.from_primitive(wl_range["min"]),
