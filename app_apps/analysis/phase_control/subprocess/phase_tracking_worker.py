@@ -52,7 +52,7 @@ class PhaseTrackingWorker(ThreadedWorker):
         self._corrector = PhaseCorrector()
         self._paused = False
 
-    def _stop(self) -> None:
+    def _pause(self) -> None:
         self._tracker = None
         self._corrector = None
         self._paused = True

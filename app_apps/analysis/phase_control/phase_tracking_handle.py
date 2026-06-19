@@ -26,15 +26,15 @@ class PhaseTrackingHandle(BaseWorkerHandle):
         self._spectrum_writer = spectrum_writer
         self._config = config
 
-    def _on_attached(self) -> None:
+    def subscribe(self) -> None:
         self._subscribe_service(CorrectionAvailable, self._on_correction_available)
         self._subscribe_service(SpectrumProcessed, self._on_spectrum_processed)
         self._subscribe_service(ConfigSynced, self._on_config_synced)
         self._spectrum_writer.register_consumer(self.CONSUMER_ID)
 
-    def _on_detached(self) -> None:
+    def _unbind(self) -> None:
         self._spectrum_writer.unregister_consumer(self.CONSUMER_ID)
-        super()._on_detached()
+        super()._unbind()
 
     def _on_correction_available(self, msg: CorrectionAvailable) -> None:
         self._bus.publish(RequestRotate(angle=msg.angle, sign=msg.sign))

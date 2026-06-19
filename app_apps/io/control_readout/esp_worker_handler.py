@@ -26,7 +26,7 @@ class EspHandle(BaseWorkerHandle):
     def __init__(self, bus: EventBus) -> None:
         super().__init__(self.WORKER_ID, bus)
 
-    def _on_attached(self) -> None:
+    def subscribe(self) -> None:
         self._subscribe(RequestMove, self._on_request_move)
 
     # --- typed API (called by control-loop routines / VMs) -------------

@@ -3,8 +3,6 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 
 from base_core.framework.di import Container
-from base_core.framework.events import EventBus
-from base_qt.app.dispatcher import QtDispatcher
 from base_qt.ui.panel_window import PanelWindow
 
 
@@ -16,42 +14,17 @@ class AppPanelWindow(PanelWindow):
     as new panels are added.
     """
 
-    def __init__(
-        self,
-        container: Container,
-        bus: EventBus,
-        dispatcher: QtDispatcher,
-    ) -> None:
+    def __init__(self, container: Container) -> None:
         super().__init__("Panels")
         self.resize(1100, 750)
-        self._build_panels(container, bus, dispatcher)
+        self._build_panels(container)
 
-    def _build_panels(
-        self,
-        container: Container,
-        bus: EventBus,
-        dispatcher: QtDispatcher,
-    ) -> None:
-        from app_apps.analysis.phase_control.service import PhaseControlService
+    def _build_panels(self, container: Container) -> None:
+        from app_apps.analysis.phase_control.ui.phase_control_panel import PhaseControlPanel
 
         c = container
-
-        def make_phase_control():
-            from app_apps.analysis.phase_control.ui.phase_control_panel import PhaseControlPanel
-            from app_apps.analysis.phase_control.ui.phase_control_vm import PhaseControlVM
-            from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
-            handle = c.get(SpectrometerWorkerHandle)
-            return PhaseControlPanel(
-                PhaseControlVM(
-                    bus, dispatcher,
-                    c.get(PhaseControlService),
-                    handle,
-                    handle.buffer,
-                )
-            )
-
         self.register_panel(
             "Phase Control",
-            make_phase_control,
+            lambda: c.get(PhaseControlPanel),
             Qt.DockWidgetArea.LeftDockWidgetArea,
         )

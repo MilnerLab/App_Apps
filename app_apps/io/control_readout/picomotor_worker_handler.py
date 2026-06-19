@@ -16,7 +16,7 @@ class PicomotorHandle(BaseWorkerHandle):
     def __init__(self, bus: EventBus) -> None:
         super().__init__(self.WORKER_ID, bus)
 
-    def _on_attached(self) -> None:
+    def subscribe(self) -> None:
         self._subscribe(RequestStepPicomotor, self._on_request_step)
 
     def step(self, axis: int, steps: int) -> None:

@@ -30,5 +30,5 @@ class OscilloscopeModule(BaseModule):
         handle.start()
 
     def on_shutdown(self, c: Container, ctx: AppContext) -> None:
-        c.get(OscilloscopeWorkerHandle).stop()
+        c.get(OscilloscopeWorkerHandle).pause()
         c.get(OscilloscopeService).stop()

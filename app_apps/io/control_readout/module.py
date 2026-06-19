@@ -43,5 +43,5 @@ class ControlReadoutModule(BaseModule):
 
     def on_shutdown(self, c: Container, ctx: AppContext) -> None:
         for handle_type in (ServoShutterHandle, PicomotorHandle, RgvHandle, EspHandle, RotatorHandle):
-            c.get(handle_type).stop()
+            c.get(handle_type).pause()
         c.get(ControlReadoutService).stop()

@@ -9,7 +9,12 @@ from spm_002.config import SpectrometerConfig
 from spm_002.messages import SetSpectrometerConfig
 
 from spm_002.buffer import SpectrumBuffer, SpectrumMemorySpec
-from app_apps.io.spectrometer.events import SpectrumAvailable, SpectrumAck
+from app_apps.io.spectrometer.events import (
+    SpectrumAvailable,
+    SpectrumAck,
+    SpectrometerConfigChanged,
+    SpectrometerWorkerStateChanged,
+)
 
 class SpectrometerWorkerHandle(WriterWorkerHandle[SpectrumBuffer, SpectrumAvailable, SpectrumAck]):
     """
@@ -21,14 +26,14 @@ class SpectrometerWorkerHandle(WriterWorkerHandle[SpectrumBuffer, SpectrumAvaila
 
     Usage (from module or UI layer):
         handle.start()                      # begins acquisition
-        handle.stop()                       # pauses acquisition
+        handle.pause()                      # pauses acquisition
         handle.set_config(new_config)       # updates hardware settings live
         handle.register_consumer(id)        # from read-only consumers (e.g. PhaseControlService)
     """
 
     WORKER_ID = "spectrometer"
 
-    def __init__(self, bus: EventBus, spec: SpectrumMemorySpec) -> None:
+    def __init__(self, bus: EventBus, spec: SpectrumMemorySpec, config: SpectrometerConfig) -> None:
         super().__init__(
             worker_id=self.WORKER_ID,
             bus=bus,
@@ -38,27 +43,39 @@ class SpectrometerWorkerHandle(WriterWorkerHandle[SpectrumBuffer, SpectrumAvaila
                 slot=slot, item_id=item_id, timestamp_ns=ts
             ),
             ack_type=SpectrumAck,
+            state_event=SpectrometerWorkerStateChanged,
         )
+        self._config = config
 
     @property
     def buffer(self) -> SpectrumBuffer:
         assert self._writer_buffer is not None, "buffer not yet created (service not started)"
         return self._writer_buffer
 
-    def _on_pre_attach(self) -> None:
+    def _bind(self, connector, service_bus) -> None:  # type: ignore[override]
         # Unlink any stale segment left by a previous crash (POSIX shm persists across processes)
         try:
             SharedMemory(name=self._spec.name, create=False).unlink()
         except FileNotFoundError:
             pass
-        super()._on_pre_attach()
+        super()._bind(connector, service_bus)
 
-    def set_config(self, config: SpectrometerConfig) -> None:
+    def subscribe(self) -> None:
+        self._subscribe(SpectrometerConfigChanged, self._on_config_changed)
+    
+    def start(self):
+        self.set_config()
+        super().start()
+
+    def set_config(self) -> None:
         """Send a new SpectrometerConfig to the subprocess and apply it to the hardware."""
         self._request(
-            SetSpectrometerConfig(config=config),
+            SetSpectrometerConfig(config=self._config),
             self._on_set_config_reply,
         )
+
+    def _on_config_changed(self, _: SpectrometerConfigChanged) -> None:
+        self.set_config()
 
     def _on_set_config_reply(self, reply: OKReply) -> None:
         pass

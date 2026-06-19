@@ -17,13 +17,13 @@ class EnvelopeHandle(BaseWorkerHandle):
         super().__init__(self.WORKER_ID, bus)
         self._spectrum_writer = spectrum_writer
 
-    def _on_attached(self) -> None:
+    def subscribe(self) -> None:
         self._subscribe_service(SpectrumProcessed, self._on_spectrum_processed)
         # Envelope starts paused — do not register as consumer until explicitly unpaused.
 
-    def _on_detached(self) -> None:
+    def _unbind(self) -> None:
         self._spectrum_writer.unregister_consumer(self.CONSUMER_ID)
-        super()._on_detached()
+        super()._unbind()
 
     def _on_spectrum_processed(self, msg: SpectrumProcessed) -> None:
         self._bus.publish(SpectrumAck(slot=msg.slot, item_id=msg.item_id, consumer_id=msg.consumer_id))

@@ -48,7 +48,7 @@ class EnvelopeWorker(ThreadedWorker):
         self._optimizer = EnvelopeOptimizer(self._config)
         self._paused = True  # envelope mode must be explicitly unpaused via SetPaused
 
-    def _stop(self) -> None:
+    def _pause(self) -> None:
         self._optimizer = None
         self._paused = True
 

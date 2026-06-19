@@ -38,6 +38,17 @@ class PhaseControlModule(BaseModule):
         c.register_instance(PhaseTrackingHandle, phase_tracking_handle)
         c.register_instance(EnvelopeHandle, envelope_handle)
 
+        from app_apps.analysis.phase_control.ui.phase_control_vm import PhaseControlVM
+        from app_apps.analysis.phase_control.ui.phase_control_panel import PhaseControlPanel
+        from base_qt.app.dispatcher import QtDispatcher
+        c.register_factory(PhaseControlVM, lambda c: PhaseControlVM(
+            ctx.event_bus,
+            c.get(QtDispatcher),
+            c.get(PhaseControlService),
+            c.get(SpectrometerWorkerHandle),
+        ))
+        c.register_factory(PhaseControlPanel, lambda c: PhaseControlPanel(c.get(PhaseControlVM)))
+
     def on_startup(self, c: Container, ctx: AppContext) -> None:
         service = c.get(PhaseControlService)
         service.start()
@@ -46,6 +57,6 @@ class PhaseControlModule(BaseModule):
         phase_tracking_handle = c.get(PhaseTrackingHandle)
         envelope_handle = c.get(EnvelopeHandle)
         service = c.get(PhaseControlService)
-        phase_tracking_handle.stop()
-        envelope_handle.stop()
+        phase_tracking_handle.pause()
+        envelope_handle.pause()
         service.stop()

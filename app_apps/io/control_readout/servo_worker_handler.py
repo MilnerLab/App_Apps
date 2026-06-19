@@ -16,7 +16,7 @@ class ServoShutterHandle(BaseWorkerHandle):
     def __init__(self, bus: EventBus) -> None:
         super().__init__(self.WORKER_ID, bus)
 
-    def _on_attached(self) -> None:
+    def subscribe(self) -> None:
         self._subscribe(RequestSetArmBlocked, self._on_request)
 
     def block(self, arm: int) -> None:
