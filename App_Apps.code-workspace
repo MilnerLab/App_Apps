@@ -1,9 +1,21 @@
 {
   "folders": [
-    { "path": ".", "name": "App_Apps" },
-    { "path": "../Base_Core" },
-    { "path": "../Base_Qt" },
-    { "path": "../Devices" }
+    {
+      "name": "App_Apps",
+      "path": "."
+    },
+    {
+      "name": "Base_Core",
+      "path": "../Base_Core"
+    },
+    {
+      "name": "Base_Qt",
+      "path": "../Base_Qt"
+    },
+    {
+      "name": "Devices",
+      "path": "../Devices"
+    }
   ],
   "launch": {
     "version": "0.2.0",

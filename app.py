@@ -41,6 +41,7 @@ def build_container(ctx: AppContext) -> Container:
         spectrometer=True,
         rotator=False,
         phase_control=True,
+        assistant=False,  # LLM control layer off by default; flip to enable (also toggleable at runtime)
     ))
     return c
 

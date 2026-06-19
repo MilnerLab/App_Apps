@@ -28,11 +28,9 @@ Set-Location $root
 # -----------------------------
 $venvPath          = Join-Path $root ".venv"
 $requirementsFile  = Join-Path $root "_requirements.txt"
-$extensionsFile    = Join-Path $root "_extensions.txt"
 
 # Windows-only: which Python to use via the py launcher (if present)
-# If you need 32-bit on Windows, set to "-3.13-32" (or your exact installed version)
-$windowsPySpec = "-3.10"   # e.g. "-3.13" or "-3.13-32"
+$windowsPySpec = "-3.12"   # x64; e.g. "-3.12" or "-3.13"
 
 # -----------------------------
 # Helpers
@@ -40,12 +38,12 @@ $windowsPySpec = "-3.10"   # e.g. "-3.13" or "-3.13-32"
 function Invoke-Native {
     param(
         [Parameter(Mandatory = $true)][string] $Exe,
-        [Parameter(Mandatory = $false)][string[]] $Args = @()
+        [Parameter(Mandatory = $false)][string[]] $ArgList = @()
     )
 
-    & $Exe @Args
+    & $Exe @ArgList
     if ($LASTEXITCODE -ne 0) {
-        $argStr = ($Args -join " ")
+        $argStr = ($ArgList -join " ")
         throw "Command failed ($LASTEXITCODE): $Exe $argStr"
     }
 }
@@ -85,33 +83,6 @@ function Ensure-Pip([string] $PythonExe) {
 
     Write-Host "Upgrading pip/setuptools/wheel..."
     Invoke-Native $PythonExe @("-m", "pip", "install", "-U", "pip", "setuptools", "wheel")
-}
-
-function Resolve-CodeCli {
-    if ($script:OnWindows) {
-        $candidates = @(
-            "code.cmd",
-            "code-insiders.cmd",
-            "codium.cmd",
-            "code-oss.cmd",
-            "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd",
-            "$env:ProgramFiles\Microsoft VS Code\bin\code.cmd",
-            "$env:ProgramFiles(x86)\Microsoft VS Code\bin\code.cmd"
-        )
-
-        foreach ($candidate in $candidates) {
-            $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
-            if ($cmd) { return $cmd.Source }
-            if (Test-Path $candidate) { return $candidate }
-        }
-    }
-
-    foreach ($cmd in @("code", "code-insiders", "codium", "code-oss")) {
-        $found = Get-Command $cmd -ErrorAction SilentlyContinue
-        if ($found) { return $found.Source }
-    }
-
-    return $null
 }
 
 # -----------------------------

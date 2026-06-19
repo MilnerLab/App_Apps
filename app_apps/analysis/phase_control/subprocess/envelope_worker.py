@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Callable, TYPE_CHECKING
 
-from base_core.ipc.worker import BaseWorker
+from base_core.ipc.threaded_worker import ThreadedWorker, worker_thread
 from app_apps.analysis.phase_control.subprocess.domain.envelope_config import EnvelopeConfig
 from app_apps.analysis.phase_control.subprocess.domain.envelope_optimizer import EnvelopeOptimizer
 from app_apps.analysis.phase_control.subprocess.messages import (
@@ -17,15 +17,15 @@ from app_apps.analysis.phase_control.subprocess.messages import (
 if TYPE_CHECKING:
     from base_core.framework.events.event_bus import EventBus
     from base_core.ipc.subprocess_connector import SubprocessPipelineConnector
-    from app_apps.io.spectrometer.buffer import SpectrumBuffer
+    from spm_002.buffer import SpectrumBuffer
 
 log = logging.getLogger(__name__)
 
 WORKER_ID = "envelope"
-CONSUMER_ID = "phase_control"
+CONSUMER_ID = "envelope"
 
 
-class EnvelopeWorker(BaseWorker):
+class EnvelopeWorker(ThreadedWorker):
     def __init__(
         self,
         bus: EventBus,
@@ -48,7 +48,7 @@ class EnvelopeWorker(BaseWorker):
         self._optimizer = EnvelopeOptimizer(self._config)
         self._paused = True  # envelope mode must be explicitly unpaused via SetPaused
 
-    def _stop(self) -> None:
+    def _pause(self) -> None:
         self._optimizer = None
         self._paused = True
 
@@ -56,10 +56,11 @@ class EnvelopeWorker(BaseWorker):
         if self._optimizer is not None:
             self._optimizer.reset()
 
+    @worker_thread
     def _on_spectrum(self, msg: ProcessSpectrum) -> None:
-        if self._paused or self._optimizer is None:
-            return
         try:
+            if self._paused or self._optimizer is None:
+                return
             buf = self._get_buffer()
             wl = buf.wavelengths(msg.slot)
             ins = buf.intensities(msg.slot)
@@ -71,11 +72,13 @@ class EnvelopeWorker(BaseWorker):
         finally:
             self._notify(SpectrumProcessed(slot=msg.slot, item_id=msg.item_id, consumer_id=CONSUMER_ID))
 
+    @worker_thread
     def _on_set_config(self, msg: SetEnvelopeConfig) -> None:
         self._config = msg.config
         self._optimizer = EnvelopeOptimizer(self._config)
         self._reply_ok(msg)
 
+    @worker_thread
     def _on_set_paused(self, msg: SetPaused) -> None:
         if msg.worker_id != self._worker_id:
             return
