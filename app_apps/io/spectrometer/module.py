@@ -6,6 +6,7 @@ from base_core.framework.app.context import AppContext
 from base_core.framework.app.enums import AppStatus
 from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
+from spm_002.buffer import SpectrumBuffer, SpectrumMemorySpec
 from spm_002.config import PYTHON32_PATH
 
 

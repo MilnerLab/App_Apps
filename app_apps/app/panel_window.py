@@ -39,14 +39,14 @@ class AppPanelWindow(PanelWindow):
         def make_phase_control():
             from app_apps.analysis.phase_control.ui.phase_control_panel import PhaseControlPanel
             from app_apps.analysis.phase_control.ui.phase_control_vm import PhaseControlVM
-            from app_apps.io.spectrometer.service import SpectrometerService
-            from spm_002.shared_spectrum_buffer import SharedSpectrumBuffer
+            from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
+            handle = c.get(SpectrometerWorkerHandle)
             return PhaseControlPanel(
                 PhaseControlVM(
                     bus, dispatcher,
                     c.get(PhaseControlService),
-                    c.get(SpectrometerService).output,
-                    c.get(SharedSpectrumBuffer),
+                    handle,
+                    handle.buffer,
                 )
             )
 

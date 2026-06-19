@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Callable, TYPE_CHECKING
 
-from base_core.ipc.worker import BaseWorker
+from base_core.ipc.threaded_worker import ThreadedWorker, worker_thread
 from app_apps.analysis.phase_control.subprocess.domain.envelope_config import EnvelopeConfig
 from app_apps.analysis.phase_control.subprocess.domain.envelope_optimizer import EnvelopeOptimizer
 from app_apps.analysis.phase_control.subprocess.messages import (
@@ -25,7 +25,7 @@ WORKER_ID = "envelope"
 CONSUMER_ID = "envelope"
 
 
-class EnvelopeWorker(BaseWorker):
+class EnvelopeWorker(ThreadedWorker):
     def __init__(
         self,
         bus: EventBus,
@@ -56,6 +56,7 @@ class EnvelopeWorker(BaseWorker):
         if self._optimizer is not None:
             self._optimizer.reset()
 
+    @worker_thread
     def _on_spectrum(self, msg: ProcessSpectrum) -> None:
         try:
             if self._paused or self._optimizer is None:
@@ -71,11 +72,13 @@ class EnvelopeWorker(BaseWorker):
         finally:
             self._notify(SpectrumProcessed(slot=msg.slot, item_id=msg.item_id, consumer_id=CONSUMER_ID))
 
+    @worker_thread
     def _on_set_config(self, msg: SetEnvelopeConfig) -> None:
         self._config = msg.config
         self._optimizer = EnvelopeOptimizer(self._config)
         self._reply_ok(msg)
 
+    @worker_thread
     def _on_set_paused(self, msg: SetPaused) -> None:
         if msg.worker_id != self._worker_id:
             return

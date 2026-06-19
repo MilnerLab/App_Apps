@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from multiprocessing.shared_memory import SharedMemory
+
 from base_core.framework.events.event_bus import EventBus
 from base_core.framework.shm.writer_worker_handle import WriterWorkerHandle
 from base_core.ipc.message import OKReply
@@ -37,6 +39,19 @@ class SpectrometerWorkerHandle(WriterWorkerHandle[SpectrumBuffer, SpectrumAvaila
             ),
             ack_type=SpectrumAck,
         )
+
+    @property
+    def buffer(self) -> SpectrumBuffer:
+        assert self._writer_buffer is not None, "buffer not yet created (service not started)"
+        return self._writer_buffer
+
+    def _on_pre_attach(self) -> None:
+        # Unlink any stale segment left by a previous crash (POSIX shm persists across processes)
+        try:
+            SharedMemory(name=self._spec.name, create=False).unlink()
+        except FileNotFoundError:
+            pass
+        super()._on_pre_attach()
 
     def set_config(self, config: SpectrometerConfig) -> None:
         """Send a new SpectrometerConfig to the subprocess and apply it to the hardware."""

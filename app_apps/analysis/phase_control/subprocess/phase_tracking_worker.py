@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Callable, TYPE_CHECKING
 
-from base_core.ipc.worker import BaseWorker
+from base_core.ipc.threaded_worker import ThreadedWorker, worker_thread
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.analysis.phase_control.subprocess.domain.phase_tracker import PhaseTracker
 from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import PhaseCorrector
@@ -27,7 +27,7 @@ WORKER_ID = "phase_tracking"
 CONSUMER_ID = "phase_tracking"
 
 
-class PhaseTrackingWorker(BaseWorker):
+class PhaseTrackingWorker(ThreadedWorker):
     def __init__(
         self,
         bus: EventBus,
@@ -61,6 +61,7 @@ class PhaseTrackingWorker(BaseWorker):
         self._tracker = PhaseTracker(self._config)
         self._corrector = PhaseCorrector()
 
+    @worker_thread
     def _on_spectrum(self, msg: ProcessSpectrum) -> None:
         try:
             if self._paused or self._tracker is None or self._corrector is None:
@@ -81,6 +82,7 @@ class PhaseTrackingWorker(BaseWorker):
         finally:
             self._notify(SpectrumProcessed(slot=msg.slot, item_id=msg.item_id, consumer_id=CONSUMER_ID))
 
+    @worker_thread
     def _on_set_config(self, msg: SetStabilizationConfig) -> None:
         self._config = msg.config
         if self._tracker is not None:
@@ -88,6 +90,7 @@ class PhaseTrackingWorker(BaseWorker):
         self._notify(ConfigSynced(config=self._config))
         self._reply_ok(msg)
 
+    @worker_thread
     def _on_set_paused(self, msg: SetPaused) -> None:
         if msg.worker_id != self._worker_id:
             return

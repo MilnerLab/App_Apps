@@ -13,8 +13,7 @@ from base_qt.app.dispatcher import QtDispatcher
 from base_qt.ui.app_message import MessageLevel
 from base_qt.ui.buffer_consumer_mixin import BufferConsumerMixin
 from base_qt.ui.panel_vm import PanelVM, ui_thread
-from spm_002.shared_spectrum_buffer import SharedSpectrumBuffer
-
+from spm_002.buffer import SpectrumBuffer
 from app_apps.analysis.phase_control.subprocess.messages import CorrectionAvailable
 from app_apps.analysis.phase_control.service import PhaseControlService
 
@@ -33,7 +32,7 @@ class PhaseControlVM(BufferConsumerMixin, PanelVM):
         dispatcher: QtDispatcher,
         phase_control_svc: PhaseControlService,
         spec_output: BufferOutput,
-        spec_buffer: SharedSpectrumBuffer,
+        spec_buffer: SpectrumBuffer,
     ) -> None:
         PanelVM.__init__(self, bus, dispatcher)
         self._setup_consumer(spec_output)
