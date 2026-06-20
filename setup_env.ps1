@@ -30,7 +30,7 @@ $venvPath          = Join-Path $root ".venv"
 $requirementsFile  = Join-Path $root "_requirements.txt"
 
 # Windows-only: which Python to use via the py launcher (if present)
-$windowsPySpec = "-3.12"   # x64; e.g. "-3.12" or "-3.13"
+$windowsPySpec = "-3.13"   # x64; e.g. "-3.12" or "-3.13"
 
 # -----------------------------
 # Helpers

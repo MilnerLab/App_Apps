@@ -13,7 +13,7 @@ from app_apps.io.spectrometer.ui.spectrometer_vm import SpectrometerVM
 
 class SpectrometerPopout(ConfigForm):
     _specs = {
-        "exposure_ms":      TimeSpec("Exposure", Prefix.MILLI),
+        "exposure_time":      TimeSpec("Exposure", Prefix.MILLI),
         "average":          IntSpec("Averages", 1, 100),
         "device_index":     IntSpec("Device index", 0, 9),
         "dark_subtraction": IntSpec("Dark subtraction", 0, 1),
@@ -21,7 +21,7 @@ class SpectrometerPopout(ConfigForm):
         "scan_delay":       IntSpec("Scan delay", 0, 9_999),
     }
     _groups = [
-        ("Acquisition", ["exposure_ms", "average"]),
+        ("Acquisition", ["exposure_time", "average"]),
         ("Hardware",    ["device_index", "dark_subtraction", "mode", "scan_delay"]),
     ]
 
