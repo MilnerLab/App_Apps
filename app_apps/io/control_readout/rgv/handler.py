@@ -6,7 +6,7 @@ from base_core.ipc.worker_handle import BaseWorkerHandle
 from base_core.math.models import Angle
 from control_readout.rgv100bl.messages import HomeHwp, RotateHwpTo
 
-from app_apps.io.control_readout.command_events import RequestRotateHwp
+from app_apps.io.control_readout.rgv.events import RequestRotateHwp
 
 
 class RgvHandle(BaseWorkerHandle):

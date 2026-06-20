@@ -12,7 +12,7 @@ from app_apps.analysis.phase_control.subprocess.messages import (
     SetStabilizationConfig,
     SpectrumProcessed,
 )
-from app_apps.io.control_readout.events import RequestRotate
+from app_apps.io.control_readout.ell14.events import RequestRotate
 from app_apps.io.spectrometer.events import SpectrumAck
 from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
 

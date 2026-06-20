@@ -5,7 +5,7 @@ from base_core.ipc.message import OKReply
 from base_core.ipc.worker_handle import BaseWorkerHandle
 from control_readout.servo_shutter.messages import BlockArm, UnblockArm
 
-from app_apps.io.control_readout.command_events import RequestSetArmBlocked
+from app_apps.io.control_readout.servo.events import RequestSetArmBlocked
 
 
 class ServoShutterHandle(BaseWorkerHandle):

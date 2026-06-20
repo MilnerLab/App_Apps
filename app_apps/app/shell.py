@@ -46,9 +46,12 @@ class AppShell(LabMainWindow):
     def _build_devices_menu(self, container: Container) -> None:
         from app_apps.io.spectrometer.ui.spectrometer_popout import SpectrometerPopout
         from app_apps.io.spectrometer.ui.spectrometer_vm import SpectrometerVM
+        from app_apps.io.control_readout.ell14.ui.popout import ELL14RotatorPopout
+        from app_apps.io.control_readout.ell14.ui.vm import ELL14RotatorVM
 
         menu = self.menuBar().addMenu("Devices")
         self._spectrometer_popout: SpectrometerPopout | None = None
+        self._ell14_popout: ELL14RotatorPopout | None = None
 
         def _open_spectrometer() -> None:
             if self._spectrometer_popout is None:
@@ -57,7 +60,15 @@ class AppShell(LabMainWindow):
                 )
             self._spectrometer_popout.open()
 
+        def _open_ell14() -> None:
+            if self._ell14_popout is None:
+                self._ell14_popout = ELL14RotatorPopout(
+                    container.get(ELL14RotatorVM), parent=self
+                )
+            self._ell14_popout.open()
+
         menu.addAction("Spectrometer", _open_spectrometer)
+        menu.addAction("ELL14 Rotator", _open_ell14)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         # Bypass PanelWindow.closeEvent (which ignores) and destroy it directly.

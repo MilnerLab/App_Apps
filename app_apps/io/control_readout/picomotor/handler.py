@@ -5,7 +5,7 @@ from base_core.ipc.message import OKReply
 from base_core.ipc.worker_handle import BaseWorkerHandle
 from control_readout.picomotor.messages import StepBy
 
-from app_apps.io.control_readout.command_events import RequestStepPicomotor
+from app_apps.io.control_readout.picomotor.events import RequestStepPicomotor
 
 
 class PicomotorHandle(BaseWorkerHandle):
