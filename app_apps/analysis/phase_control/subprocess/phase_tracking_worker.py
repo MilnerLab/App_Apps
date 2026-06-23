@@ -50,6 +50,7 @@ class PhaseTrackingWorker(ThreadedWorker):
     def _start(self) -> None:
         self._tracker = PhaseTracker(self._config)
         self._corrector = PhaseCorrector()
+        self._corrector.target_phase = self._config.set_phase
         self._paused = False
 
     def _pause(self) -> None:
@@ -60,6 +61,7 @@ class PhaseTrackingWorker(ThreadedWorker):
     def _reset(self) -> None:
         self._tracker = PhaseTracker(self._config)
         self._corrector = PhaseCorrector()
+        self._corrector.target_phase = self._config.set_phase
 
     @worker_thread
     def _on_spectrum(self, msg: ProcessSpectrum) -> None:
@@ -87,6 +89,8 @@ class PhaseTrackingWorker(ThreadedWorker):
         self._config = msg.config
         if self._tracker is not None:
             self._tracker = PhaseTracker(self._config)
+        if self._corrector is not None:
+            self._corrector.target_phase = self._config.set_phase
         self._notify(ConfigSynced(config=self._config))
         self._reply_ok(msg)
 

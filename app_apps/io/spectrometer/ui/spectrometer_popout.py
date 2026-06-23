@@ -2,16 +2,13 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QWidget
 
-from base_core.quantities.enums import Prefix
-from base_qt.ui.form import IntSpec, TimeSpec
-from base_qt.ui.form.config_form import ConfigForm
-
+from base_qt.ui.form import DirtyForm, FloatSpec, IntSpec
 from base_qt.ui.worker_control_widget import WorkerControlWidget
 
 from app_apps.io.spectrometer.ui.spectrometer_vm import SpectrometerVM
 
 
-class SpectrometerPopout(ConfigForm):
+class SpectrometerPopout(DirtyForm):
     _specs = {
         "exposure_time":      TimeSpec("Exposure", Prefix.MILLI),
         "average":          IntSpec("Averages", 1, 100),

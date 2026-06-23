@@ -83,7 +83,7 @@ class SpectralFitParams:
 
     def copy_from(self, other: "SpectralFitParams") -> None:
         for f in fields(self):
-            if f.name not in ("wavelength_range", "avg_spectra", "residuals_threshold", "has_acceleration"):
+            if f.name not in ("wavelength_range", "avg_spectra", "residuals_threshold", "has_acceleration", "fit_all_params", "set_phase"):
                 setattr(self, f.name, getattr(other, f.name))
 
     _TO_FLOAT: ClassVar[dict[type[Any], Callable[[Any], float]]] = {
@@ -112,6 +112,8 @@ class StabilizationConfig(SpectralFitParams, PrimitiveSerde):
     residuals_threshold: float = 15
     avg_spectra: int = 10
     has_acceleration: bool = True
+    fit_all_params: bool = True
+    set_phase: Angle = Angle(0)
 
     def _fit_func(self) -> Callable:
         return cfg_spectrum if self.has_acceleration else cfCFG_spectrum
@@ -162,6 +164,8 @@ class StabilizationConfig(SpectralFitParams, PrimitiveSerde):
             "residuals_threshold": self.residuals_threshold,
             "avg_spectra": self.avg_spectra,
             "has_acceleration": self.has_acceleration,
+            "fit_all_params": self.fit_all_params,
+            "set_phase": self.set_phase.to_primitive(),
         }
 
     @classmethod
@@ -183,4 +187,6 @@ class StabilizationConfig(SpectralFitParams, PrimitiveSerde):
             residuals_threshold=float(v["residuals_threshold"]),
             avg_spectra=int(v["avg_spectra"]),
             has_acceleration=bool(v["has_acceleration"]),
+            fit_all_params=bool(v["fit_all_params"]),
+            set_phase=Angle.from_primitive(v["set_phase"]),
         )

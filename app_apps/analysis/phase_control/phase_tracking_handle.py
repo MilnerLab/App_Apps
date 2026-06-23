@@ -3,7 +3,8 @@ from __future__ import annotations
 from base_core.framework.events.event_bus import EventBus
 from base_core.ipc.message import OKReply
 from base_core.ipc.worker_handle import BaseWorkerHandle
-from app_apps.analysis.phase_control.events import StabilizationConfigChanged
+from app_apps.analysis.phase_control.events import PhaseTrackingStateChanged, StabilizationConfigChanged
+
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.analysis.phase_control.subprocess.messages import (
     ConfigSynced,
@@ -22,7 +23,7 @@ class PhaseTrackingHandle(BaseWorkerHandle):
     CONSUMER_ID = "phase_tracking"
 
     def __init__(self, bus: EventBus, spectrum_writer: SpectrometerWorkerHandle, config: StabilizationConfig) -> None:
-        super().__init__(self.WORKER_ID, bus)
+        super().__init__(self.WORKER_ID, bus, state_event=PhaseTrackingStateChanged)
         self._spectrum_writer = spectrum_writer
         self._config = config
 
@@ -45,6 +46,10 @@ class PhaseTrackingHandle(BaseWorkerHandle):
     def _on_config_synced(self, msg: ConfigSynced) -> None:
         self._config.copy_from(msg.config)
         self._bus.publish(StabilizationConfigChanged())
+
+    @property
+    def config(self) -> StabilizationConfig:
+        return self._config
 
     def set_config(self, config: StabilizationConfig) -> None:
         self._request(SetStabilizationConfig(config=config), self._on_set_config_reply)

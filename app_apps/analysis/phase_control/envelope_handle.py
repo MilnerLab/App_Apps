@@ -3,6 +3,7 @@ from __future__ import annotations
 from base_core.framework.events.event_bus import EventBus
 from base_core.ipc.message import OKReply
 from base_core.ipc.worker_handle import BaseWorkerHandle
+from app_apps.analysis.phase_control.events import EnvelopeStateChanged
 from app_apps.analysis.phase_control.subprocess.domain.envelope_config import EnvelopeConfig
 from app_apps.analysis.phase_control.subprocess.messages import SetEnvelopeConfig, SetPaused, SpectrumProcessed
 from app_apps.io.spectrometer.events import SpectrumAck
@@ -14,7 +15,7 @@ class EnvelopeHandle(BaseWorkerHandle):
     CONSUMER_ID = "envelope"
 
     def __init__(self, bus: EventBus, spectrum_writer: SpectrometerWorkerHandle) -> None:
-        super().__init__(self.WORKER_ID, bus)
+        super().__init__(self.WORKER_ID, bus, state_event=EnvelopeStateChanged)
         self._spectrum_writer = spectrum_writer
 
     def subscribe(self) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from app_apps.analysis.phase_control.envelope_handle import EnvelopeHandle
 from app_apps.analysis.phase_control.phase_tracking_handle import PhaseTrackingHandle
 from app_apps.analysis.phase_control.service import PhaseControlService
+from app_apps.analysis.phase_control.subprocess.domain.envelope_config import EnvelopeConfig
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 from spm_002.buffer import SpectrumMemorySpec
 from app_apps.io.spectrometer.module import SpectrometerModule
@@ -21,6 +22,7 @@ class PhaseControlModule(BaseModule):
         spec = c.get(SpectrumMemorySpec)
         writer = c.get(SpectrometerWorkerHandle)
         config = StabilizationConfig()
+        envelope_config = EnvelopeConfig()
 
         phase_tracking_handle = PhaseTrackingHandle(bus=ctx.event_bus, spectrum_writer=writer, config=config)
         envelope_handle = EnvelopeHandle(bus=ctx.event_bus, spectrum_writer=writer)
@@ -34,18 +36,35 @@ class PhaseControlModule(BaseModule):
         )
 
         c.register_instance(StabilizationConfig, config)
+        c.register_instance(EnvelopeConfig, envelope_config)
         c.register_instance(PhaseControlService, service)
         c.register_instance(PhaseTrackingHandle, phase_tracking_handle)
         c.register_instance(EnvelopeHandle, envelope_handle)
 
+        from app_apps.analysis.phase_control.ui.stabilization_control_vm import StabilizationControlVM
+        from app_apps.analysis.phase_control.ui.envelope_control_vm import EnvelopeControlVM
         from app_apps.analysis.phase_control.ui.phase_control_vm import PhaseControlVM
         from app_apps.analysis.phase_control.ui.phase_control_panel import PhaseControlPanel
         from base_qt.app.dispatcher import QtDispatcher
+
+        c.register_factory(StabilizationControlVM, lambda c: StabilizationControlVM(
+            ctx.event_bus,
+            c.get(QtDispatcher),
+            c.get(PhaseTrackingHandle),
+            c.get(StabilizationConfig),
+        ))
+        c.register_factory(EnvelopeControlVM, lambda c: EnvelopeControlVM(
+            ctx.event_bus,
+            c.get(QtDispatcher),
+            c.get(EnvelopeHandle),
+        ))
         c.register_factory(PhaseControlVM, lambda c: PhaseControlVM(
             ctx.event_bus,
             c.get(QtDispatcher),
             c.get(PhaseControlService),
             c.get(SpectrometerWorkerHandle),
+            c.get(StabilizationControlVM),
+            c.get(EnvelopeControlVM),
         ))
         c.register_factory(PhaseControlPanel, lambda c: PhaseControlPanel(c.get(PhaseControlVM)))
 
