@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QWidget
 
-from base_qt.ui.form import DirtyForm, FloatSpec, IntSpec
+from base_core.quantities.enums import Prefix
+from base_qt.ui.form import DirtyForm, FloatSpec, IntSpec, TimeSpec
 from base_qt.ui.worker_control_widget import WorkerControlWidget
 
 from app_apps.io.spectrometer.ui.spectrometer_vm import SpectrometerVM

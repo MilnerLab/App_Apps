@@ -11,6 +11,7 @@ from app_apps.app.shell import AppShell
 from app_apps.io.spectrometer.module import SpectrometerModule
 from app_apps.io.control_readout.module import ControlReadoutModule
 from app_apps.analysis.phase_control.module import PhaseControlModule
+from app_apps.routines.cfg_calibration.module import CfgCalibrationModule
 from base_core.framework.app import AppContext
 from base_core.framework.app.enums import AppStatus
 from base_core.framework.di import Container
@@ -59,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
         SpectrometerModule(),
         ControlReadoutModule(),
         PhaseControlModule(),
+        CfgCalibrationModule(),
     ]
     mm = ModuleManager(modules)
     mm.bootstrap(c, ctx)

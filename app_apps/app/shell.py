@@ -38,6 +38,7 @@ class AppShell(LabMainWindow):
         self.setCentralWidget(label)
 
         self._build_devices_menu(container)
+        self._build_routines_menu(container)
 
         from app_apps.app.panel_window import AppPanelWindow
         self._panel_window = AppPanelWindow(container)
@@ -69,6 +70,22 @@ class AppShell(LabMainWindow):
 
         menu.addAction("Spectrometer", _open_spectrometer)
         menu.addAction("ELL14 Rotator", _open_ell14)
+
+    def _build_routines_menu(self, container: Container) -> None:
+        from app_apps.routines.cfg_calibration.ui.popout import CfgCalibrationPopout
+        from app_apps.routines.cfg_calibration.ui.vm import CfgCalibrationVM
+
+        menu = self.menuBar().addMenu("Routines")
+        self._cfg_calibration_popout: CfgCalibrationPopout | None = None
+
+        def _open_cfg_calibration() -> None:
+            if self._cfg_calibration_popout is None:
+                self._cfg_calibration_popout = CfgCalibrationPopout(
+                    container.get(CfgCalibrationVM), parent=self
+                )
+            self._cfg_calibration_popout.open()
+
+        menu.addAction("CFG Calibration", _open_cfg_calibration)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         # Bypass PanelWindow.closeEvent (which ignores) and destroy it directly.
