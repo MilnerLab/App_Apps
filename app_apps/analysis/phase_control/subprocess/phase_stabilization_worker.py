@@ -27,7 +27,7 @@ WORKER_ID = "phase_tracking"
 CONSUMER_ID = "phase_tracking"
 
 
-class PhaseTrackingWorker(ThreadedWorker):
+class PhaseStabilizationWorker(ThreadedWorker):
     def __init__(
         self,
         bus: EventBus,

@@ -4,7 +4,7 @@ from base_core.framework.events import EventBus
 from base_core.framework.routines.routine_base import BaseRoutine
 from base_core.ipc.worker_handle import WorkerStatus
 
-from app_apps.analysis.phase_control.phase_tracking_handle import PhaseTrackingHandle
+from app_apps.analysis.phase_control.phase_stabilization_handle import PhaseStabilizationHandle
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.routines.cfg_calibration.cfg_range import CfgRange
 from app_apps.routines.cfg_calibration.compare_and_publish_step import CompareAndPublishStep
@@ -16,7 +16,7 @@ class CfgCalibrationRoutine(BaseRoutine):
     def __init__(
         self,
         bus: EventBus,
-        handle: PhaseTrackingHandle,
+        handle: PhaseStabilizationHandle,
         config: StabilizationConfig,
         cfg_range: CfgRange,
     ) -> None:

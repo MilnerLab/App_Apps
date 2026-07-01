@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Any, ClassVar, TYPE_CHECKING
 
 from base_core.ipc.worker_handle import WorkerStatus
 from base_core.quantities.enums import Prefix
@@ -16,15 +16,20 @@ _STOPPED = (WorkerStatus.NEW, WorkerStatus.PAUSED)
 
 
 class PhaseConfigDialog(DirtyForm):
+    _PARAMS_FIELDS: ClassVar[frozenset[str]] = frozenset({
+        "lambda0", "delta_lambda_fwhm", "A",
+        "theta0", "theta1", "theta2", "V", "offset",
+    })
+
     _specs = {
         "lambda0":             LengthSpec("λ₀",             Prefix.NANO, min=700,  max=1000),
         "delta_lambda_fwhm":   LengthSpec("FWHM bandwidth", Prefix.NANO, min=0.1,  max=50),
         "A":                   FloatSpec("Amplitude",        0.0,  10.0),
-        "dphi0":               AngleSpec("Phase φ₀"),
-        "delta_z":             FloatSpec("δz [mm]",         -10.0, 10.0),
-        "delta_beta":          FloatSpec("δβ [ps²]",        -10.0, 10.0),
+        "theta0":              AngleSpec("Phase θ₀"),
+        "theta1":              FloatSpec("θ₁ [ps]",         -10.0, 10.0),
+        "theta2":              FloatSpec("θ₂ [ps²]",        -10.0, 10.0),
+        "V":                   FloatSpec("Visibility",        0.0,   1.0),
         "offset":              FloatSpec("Offset",            0.0,   1.0),
-        "has_acceleration":    BoolSpec("Asymmetric chirp (use cfg_spectrum)"),
         "wavelength_range":    RangeSpec(
             "Wavelength range",
             LengthSpec("", Prefix.NANO, min=700, max=1000),
@@ -34,17 +39,16 @@ class PhaseConfigDialog(DirtyForm):
     }
     _groups = [
         ("Spectral Fit", [
-            "lambda0", "delta_lambda_fwhm", "A", "dphi0",
-            "delta_z", "delta_beta", "offset", "has_acceleration",
+            "lambda0", "delta_lambda_fwhm", "A",
+            "theta0", "theta1", "theta2", "V", "offset",
         ]),
         ("Tracking", [
             "wavelength_range", "residuals_threshold", "avg_spectra",
         ]),
     ]
-    # Subprocess owns these during tracking — grey them when running
     _readonly_when_running = frozenset({
-        "lambda0", "delta_lambda_fwhm", "A", "dphi0",
-        "delta_z", "delta_beta", "offset", "has_acceleration",
+        "lambda0", "delta_lambda_fwhm", "A",
+        "theta0", "theta1", "theta2", "V", "offset",
     })
 
     def __init__(
@@ -53,10 +57,10 @@ class PhaseConfigDialog(DirtyForm):
         vm: StabilizationControlVM,
         parent: QWidget,
     ) -> None:
+        self._params = svc._config.params   # set before super().__init__ calls _populate
         super().__init__("Phase Tracking Configuration", svc._config, parent)
         self._svc = svc
 
-        # Grey fit params when running; refresh them when subprocess syncs
         self.set_running(vm.worker_state not in _STOPPED)
         vm.worker_state_changed.connect(
             lambda status: self.set_running(status not in _STOPPED)
@@ -64,6 +68,29 @@ class PhaseConfigDialog(DirtyForm):
         vm.config_updated.connect(
             lambda: self.refresh_fields(self._readonly_when_running)
         )
+
+    def _obj(self, name: str) -> Any:
+        return self._params if name in self._PARAMS_FIELDS else self._config
+
+    def _populate(self) -> None:
+        for name, spec in self._specs.items():
+            spec.set_value(self._widgets[name], getattr(self._obj(name), name))
+        for ind in self._indicators.values():
+            ind.set_dirty(False)
+
+    def _apply(self) -> None:
+        for name, spec in self._specs.items():
+            setattr(self._obj(name), name, spec.get_value(self._widgets[name]))
+        for ind in self._indicators.values():
+            ind.set_dirty(False)
+        self.on_apply()
+
+    def refresh_fields(self, names: frozenset[str]) -> None:
+        for name in names:
+            if name not in self._widgets:
+                continue
+            self._specs[name].set_value(self._widgets[name], getattr(self._obj(name), name))
+            self._indicators[name].set_dirty(False)
 
     def on_apply(self) -> None:
         self._svc.set_config()

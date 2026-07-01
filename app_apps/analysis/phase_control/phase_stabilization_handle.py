@@ -18,7 +18,7 @@ from app_apps.io.spectrometer.events import SpectrumAck
 from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
 
 
-class PhaseTrackingHandle(BaseWorkerHandle):
+class PhaseStabilizationHandle(BaseWorkerHandle):
     WORKER_ID = "phase_tracking"
     CONSUMER_ID = "phase_tracking"
 

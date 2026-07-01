@@ -4,7 +4,7 @@ from base_core.framework.events import EventBus
 from base_qt.app.dispatcher import QtDispatcher
 from base_qt.ui.panel_vm import PanelVM
 
-from app_apps.analysis.phase_control.phase_tracking_handle import PhaseTrackingHandle
+from app_apps.analysis.phase_control.phase_stabilization_handle import PhaseStabilizationHandle
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.routines.cfg_calibration.cfg_range import CfgRange
 from app_apps.routines.cfg_calibration.routine import CfgCalibrationRoutine
@@ -16,7 +16,7 @@ class CfgCalibrationVM(PanelVM):
         self,
         bus: EventBus,
         dispatcher: QtDispatcher,
-        handle: PhaseTrackingHandle,
+        handle: PhaseStabilizationHandle,
         config: StabilizationConfig,
         cfg_range: CfgRange,
     ) -> None:

@@ -13,7 +13,7 @@ from app_apps.analysis.phase_control.events import PhaseTrackingStateChanged, St
 
 if TYPE_CHECKING:
     from PySide6.QtCharts import QChart
-    from app_apps.analysis.phase_control.phase_tracking_handle import PhaseTrackingHandle
+    from app_apps.analysis.phase_control.phase_stabilization_handle import PhaseStabilizationHandle
     from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 
 
@@ -25,7 +25,7 @@ class StabilizationControlVM(QObject):
         self,
         bus: EventBus,
         dispatcher: QtDispatcher,
-        handle: PhaseTrackingHandle,
+        handle: PhaseStabilizationHandle,
         config: StabilizationConfig,
     ) -> None:
         super().__init__()

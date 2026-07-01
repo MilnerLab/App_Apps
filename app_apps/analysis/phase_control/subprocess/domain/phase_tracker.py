@@ -21,7 +21,7 @@ class PhaseTracker:
 
     Mode is controlled by config.fit_all_params:
       - True:  fit_full() each spectrum; commit all fit params when batch residual is below threshold
-      - False: fit_phase_only() each spectrum; commit only dphi0 when batch residual is below threshold
+      - False: fit_phase_only() each spectrum; commit only theta0 when batch residual is below threshold
 
     current_phase is None until the first successful batch commit.
     """
@@ -36,25 +36,24 @@ class PhaseTracker:
         """Return True if the config was mutated (fit params updated)."""
         wl, inten = self._prepare(wavelengths_nm, intensities)
 
-        fit = self._config.fit_full if self._config.fit_all_params else self._config.fit_phase_only
-        self._fits.append(fit(wl, inten))
+        self._fits.append(self._config.fit(wl, inten))
 
         if len(self._fits) < self._config.avg_spectra:
             return False
 
-        averaged = SpectralFitParams.mean(self._fits)
+        averaged = type(self._config.params).mean(self._fits)
         self._fits.clear()
 
         if averaged.residual >= self._config.residuals_threshold:
             return False
 
         if self._config.fit_all_params:
-            self._config.copy_from(averaged)
+            self._config.params.copy_from(averaged)
         else:
-            self._config.dphi0 = averaged.dphi0
-            self._config.residual = averaged.residual
+            self._config.params.theta0 = averaged.theta0
+            self._config.params.residual = averaged.residual
 
-        self.current_phase = self._config.dphi0
+        self.current_phase = self._config.params.theta0
         return True
 
     def _prepare(

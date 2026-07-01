@@ -6,7 +6,7 @@ from base_core.framework.modules import BaseModule
 from base_core.quantities.models import Frequency, Time
 
 from app_apps.analysis.phase_control.module import PhaseControlModule
-from app_apps.analysis.phase_control.phase_tracking_handle import PhaseTrackingHandle
+from app_apps.analysis.phase_control.phase_stabilization_handle import PhaseStabilizationHandle
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.routines.cfg_calibration.cfg_range import CfgRange
 
@@ -28,7 +28,7 @@ class RoutinesModule(BaseModule):
         c.register_factory(CfgCalibrationVM, lambda c: CfgCalibrationVM(
             bus=ctx.event_bus,
             dispatcher=c.get(QtDispatcher),
-            handle=c.get(PhaseTrackingHandle),
+            handle=c.get(PhaseStabilizationHandle),
             config=c.get(StabilizationConfig),
             cfg_range=c.get(CfgRange),
         ))

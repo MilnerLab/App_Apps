@@ -11,7 +11,7 @@ from app_apps.analysis.phase_control.subprocess.messages import ProcessSpectrum
 from app_apps.io.spectrometer.events import SpectrumAvailable
 
 if TYPE_CHECKING:
-    from app_apps.analysis.phase_control.phase_tracking_handle import PhaseTrackingHandle
+    from app_apps.analysis.phase_control.phase_stabilization_handle import PhaseStabilizationHandle
     from app_apps.analysis.phase_control.envelope_handle import EnvelopeHandle
 
 
@@ -28,7 +28,7 @@ class PhaseControlService(SubprocessService):
         self,
         bus: EventBus,
         spec: SpectrumMemorySpec,
-        phase_tracking_handle: PhaseTrackingHandle,
+        phase_tracking_handle: PhaseStabilizationHandle,
         envelope_handle: EnvelopeHandle,
         config: StabilizationConfig,
     ) -> None:
