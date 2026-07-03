@@ -3,4 +3,5 @@
 -e ../Base_Qt
 opencv-python
 pyserial
+lmfit
 # spinnaker: install manually on Windows from the .whl in C:\pyspinfiles\
