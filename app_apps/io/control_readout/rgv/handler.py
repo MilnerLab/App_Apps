@@ -4,7 +4,7 @@ from base_core.framework.events.event_bus import EventBus
 from base_core.ipc.message import OKReply
 from base_core.ipc.worker_handle import BaseWorkerHandle
 from base_core.math.models import Angle
-from control_readout.newport_xps.rgv100bl.messages import GetCurrentRGVAngle, HomeHwp, RGVAngleUpdate, RotateHwpTo, RotateRGVTo
+from control_readout.newport_xps.rgv100bl.messages import GetCurrentRGVAngle, HomeHwp, RGVAngleReply, RotateHwpTo, RotateRGVTo
 
 from app_apps.io.control_readout.rgv.events import NewRGVAngle, RequestCurrentRGVAngle, RequestRotateRGV
 
@@ -30,5 +30,5 @@ class RgvHandle(BaseWorkerHandle):
     def _on_rotate_reply(self, reply: OKReply) -> None:
         pass
 
-    def _on_angle_reply(self, reply: RGVAngleUpdate) -> None:
+    def _on_angle_reply(self, reply: RGVAngleReply) -> None:
         self._bus.publish(NewRGVAngle(angle=reply.angle))
