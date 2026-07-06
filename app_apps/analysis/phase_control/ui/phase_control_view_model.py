@@ -10,13 +10,13 @@ from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWor
 from base_core.framework.events import EventBus
 from base_qt.app.dispatcher import QtDispatcher
 from base_qt.ui.app_message import MessageLevel
-from base_qt.ui.panel_vm import PanelVM, ui_thread
+from base_qt.ui.panel_view_model import PanelViewModel, ui_thread
 from app_apps.analysis.phase_control.service import PhaseControlService
-from app_apps.analysis.phase_control.ui.stabilization_control_vm import StabilizationControlVM
-from app_apps.analysis.phase_control.ui.envelope_control_vm import EnvelopeControlVM
+from app_apps.analysis.phase_control.ui.stabilization_control_view_model import StabilizationControlViewModel
+from app_apps.analysis.phase_control.ui.envelope_control_view_model import EnvelopeControlViewModel
 
 
-class PhaseControlVM(PanelVM):
+class PhaseControlViewModel(PanelViewModel):
     CONSUMER_ID: ClassVar[str] = "phase_control_vm"
 
     spectrum_updated = Signal(object, object)  # (wavelengths: ndarray, intensities: ndarray)
@@ -27,8 +27,8 @@ class PhaseControlVM(PanelVM):
         dispatcher: QtDispatcher,
         phase_control_svc: PhaseControlService,
         spec_handle: SpectrometerWorkerHandle,
-        stabilization_vm: StabilizationControlVM,
-        envelope_vm: EnvelopeControlVM,
+        stabilization_vm: StabilizationControlViewModel,
+        envelope_vm: EnvelopeControlViewModel,
     ) -> None:
         super().__init__(bus, dispatcher)
         self._spec_handle = spec_handle
@@ -43,11 +43,11 @@ class PhaseControlVM(PanelVM):
         return self._svc
 
     @property
-    def stabilization_vm(self) -> StabilizationControlVM:
+    def stabilization_vm(self) -> StabilizationControlViewModel:
         return self._stabilization_vm
 
     @property
-    def envelope_vm(self) -> EnvelopeControlVM:
+    def envelope_vm(self) -> EnvelopeControlViewModel:
         return self._envelope_vm
 
     def set_mode(self, mode: ControlMode) -> None:

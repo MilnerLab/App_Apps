@@ -6,10 +6,10 @@ from base_core.quantities.enums import Prefix
 from base_qt.ui.form import DirtyForm, FloatSpec, IntSpec, TimeSpec
 from base_qt.ui.worker_control_widget import WorkerControlWidget
 
-from app_apps.io.spectrometer.ui.spectrometer_vm import SpectrometerVM
+from app_apps.io.spectrometer.ui.spectrometer_view_model import SpectrometerViewModel
 
 
-class SpectrometerPopout(DirtyForm):
+class SpectrometerView(DirtyForm):
     _specs = {
         "exposure_time":      TimeSpec("Exposure", Prefix.MILLI),
         "average":          IntSpec("Averages", 1, 100),
@@ -23,9 +23,9 @@ class SpectrometerPopout(DirtyForm):
         ("Hardware",    ["device_index", "dark_subtraction", "mode", "scan_delay"]),
     ]
 
-    def __init__(self, vm: SpectrometerVM, parent: QWidget) -> None:
+    def __init__(self, vm: SpectrometerViewModel, parent: QWidget) -> None:
         self._vm = vm
-        super().__init__("Spectrometer", vm.config, parent)
+        super().__init__("Spectrometer", vm.config, parent, vm=vm)
 
         ctrl = WorkerControlWidget(vm.start, vm.pause, vm.reset, parent=self)
         ctrl.set_status(vm.worker_status)

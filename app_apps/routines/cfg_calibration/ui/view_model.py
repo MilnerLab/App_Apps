@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from base_core.framework.events import EventBus
 from base_qt.app.dispatcher import QtDispatcher
-from base_qt.ui.panel_vm import PanelVM
+from base_qt.ui.panel_view_model import PanelViewModel
 
 from app_apps.analysis.phase_control.phase_stabilization_handle import PhaseStabilizationHandle
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
@@ -10,7 +10,7 @@ from app_apps.routines.cfg_calibration.cfg_range import CfgRange
 from app_apps.routines.cfg_calibration.routine import CfgCalibrationRoutine
 
 
-class CfgCalibrationVM(PanelVM):
+class CfgCalibrationViewModel(PanelViewModel):
 
     def __init__(
         self,

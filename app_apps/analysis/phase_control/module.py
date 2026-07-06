@@ -30,7 +30,7 @@ class PhaseControlModule(BaseModule):
         service = PhaseControlService(
             bus=ctx.event_bus,
             spec=spec,
-            phase_tracking_handle=phase_tracking_handle,
+            phase_stabilization_handle=phase_tracking_handle,
             envelope_handle=envelope_handle,
             config=config,
         )
@@ -41,32 +41,32 @@ class PhaseControlModule(BaseModule):
         c.register_instance(PhaseStabilizationHandle, phase_tracking_handle)
         c.register_instance(EnvelopeHandle, envelope_handle)
 
-        from app_apps.analysis.phase_control.ui.stabilization_control_vm import StabilizationControlVM
-        from app_apps.analysis.phase_control.ui.envelope_control_vm import EnvelopeControlVM
-        from app_apps.analysis.phase_control.ui.phase_control_vm import PhaseControlVM
+        from app_apps.analysis.phase_control.ui.stabilization_control_view_model import StabilizationControlViewModel
+        from app_apps.analysis.phase_control.ui.envelope_control_view_model import EnvelopeControlViewModel
+        from app_apps.analysis.phase_control.ui.phase_control_view_model import PhaseControlViewModel
         from app_apps.analysis.phase_control.ui.phase_control_panel import PhaseControlPanel
         from base_qt.app.dispatcher import QtDispatcher
 
-        c.register_factory(StabilizationControlVM, lambda c: StabilizationControlVM(
+        c.register_factory(StabilizationControlViewModel, lambda c: StabilizationControlViewModel(
             ctx.event_bus,
             c.get(QtDispatcher),
             c.get(PhaseStabilizationHandle),
             c.get(StabilizationConfig),
         ))
-        c.register_factory(EnvelopeControlVM, lambda c: EnvelopeControlVM(
+        c.register_factory(EnvelopeControlViewModel, lambda c: EnvelopeControlViewModel(
             ctx.event_bus,
             c.get(QtDispatcher),
             c.get(EnvelopeHandle),
         ))
-        c.register_factory(PhaseControlVM, lambda c: PhaseControlVM(
+        c.register_factory(PhaseControlViewModel, lambda c: PhaseControlViewModel(
             ctx.event_bus,
             c.get(QtDispatcher),
             c.get(PhaseControlService),
             c.get(SpectrometerWorkerHandle),
-            c.get(StabilizationControlVM),
-            c.get(EnvelopeControlVM),
+            c.get(StabilizationControlViewModel),
+            c.get(EnvelopeControlViewModel),
         ))
-        c.register_factory(PhaseControlPanel, lambda c: PhaseControlPanel(c.get(PhaseControlVM)))
+        c.register_factory(PhaseControlPanel, lambda c: PhaseControlPanel(c.get(PhaseControlViewModel)))
 
     def on_startup(self, c: Container, ctx: AppContext) -> None:
         service = c.get(PhaseControlService)

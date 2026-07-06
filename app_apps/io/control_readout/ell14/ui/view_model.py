@@ -7,7 +7,7 @@ from base_core.ipc.worker_handle import WorkerStatus
 from base_core.math.models import Angle
 from base_qt.app.dispatcher import QtDispatcher
 from base_qt.ui.app_message import MessageLevel
-from base_qt.ui.panel_vm import PanelVM, ui_thread
+from base_qt.ui.panel_view_model import PanelViewModel, ui_thread
 
 from app_apps.io.control_readout.ell14.handler import ELL14RotatorHandle
 from app_apps.io.control_readout.ell14.events import (
@@ -18,7 +18,7 @@ from app_apps.io.control_readout.ell14.events import (
 )
 
 
-class ELL14RotatorVM(PanelVM):
+class ELL14RotatorViewModel(PanelViewModel):
     angle_updated = Signal(float)          # degrees
     worker_state_changed = Signal(object)  # emits WorkerStatus
 

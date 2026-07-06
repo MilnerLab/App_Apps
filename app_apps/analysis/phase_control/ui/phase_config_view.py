@@ -10,12 +10,12 @@ from base_qt.ui.form import AngleSpec, BoolSpec, DirtyForm, FloatSpec, IntSpec, 
 if TYPE_CHECKING:
     from PySide6.QtWidgets import QWidget
     from app_apps.analysis.phase_control.service import PhaseControlService
-    from app_apps.analysis.phase_control.ui.stabilization_control_vm import StabilizationControlVM
+    from app_apps.analysis.phase_control.ui.stabilization_control_view_model import StabilizationControlViewModel
 
 _STOPPED = (WorkerStatus.NEW, WorkerStatus.PAUSED)
 
 
-class PhaseConfigDialog(DirtyForm):
+class PhaseConfigView(DirtyForm):
     _PARAMS_FIELDS: ClassVar[frozenset[str]] = frozenset({
         "lambda0", "delta_lambda_fwhm", "A",
         "theta0", "theta1", "theta2", "V", "offset",
@@ -54,7 +54,7 @@ class PhaseConfigDialog(DirtyForm):
     def __init__(
         self,
         svc: PhaseControlService,
-        vm: StabilizationControlVM,
+        vm: StabilizationControlViewModel,
         parent: QWidget,
     ) -> None:
         self._params = svc._config.params   # set before super().__init__ calls _populate

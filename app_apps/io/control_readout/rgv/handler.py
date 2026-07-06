@@ -4,9 +4,14 @@ from base_core.framework.events.event_bus import EventBus
 from base_core.ipc.message import OKReply
 from base_core.ipc.worker_handle import BaseWorkerHandle
 from base_core.math.models import Angle
-from control_readout.newport_xps.rgv100bl.messages import GetCurrentRGVAngle, HomeHwp, RGVAngleReply, RotateHwpTo, RotateRGVTo
+from control_readout.newport_xps.rgv100bl.messages import GetCurrentRGVAngle, HomeRGV, RGVAngleReply, RotateRGVTo
 
-from app_apps.io.control_readout.rgv.events import NewRGVAngle, RequestCurrentRGVAngle, RequestRotateRGV
+from app_apps.io.control_readout.rgv.events import (
+    NewRGVAngle,
+    RequestCurrentRGVAngle,
+    RequestRotateRGV,
+    RgvWorkerStateChanged,
+)
 
 
 class RgvHandle(BaseWorkerHandle):
@@ -15,11 +20,14 @@ class RgvHandle(BaseWorkerHandle):
     WORKER_ID = "rgv100bl"
 
     def __init__(self, bus: EventBus) -> None:
-        super().__init__(self.WORKER_ID, bus)
+        super().__init__(self.WORKER_ID, bus, state_event=RgvWorkerStateChanged)
 
     def subscribe(self) -> None:
         self._subscribe(RequestRotateRGV, self._on_request_rotate)
         self._subscribe(RequestCurrentRGVAngle, self._on_request_current_angle)
+
+    def home(self) -> None:
+        self._request(HomeRGV(), self._on_rotate_reply)
 
     def _on_request_rotate(self, event: RequestRotateRGV) -> None:
         self._request(RotateRGVTo(angle=event.angle), self._on_rotate_reply)

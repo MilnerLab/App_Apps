@@ -45,47 +45,37 @@ class AppShell(LabMainWindow):
         self._panel_window.show()
 
     def _build_devices_menu(self, container: Container) -> None:
-        from app_apps.io.spectrometer.ui.spectrometer_popout import SpectrometerPopout
-        from app_apps.io.spectrometer.ui.spectrometer_vm import SpectrometerVM
-        from app_apps.io.control_readout.ell14.ui.popout import ELL14RotatorPopout
-        from app_apps.io.control_readout.ell14.ui.vm import ELL14RotatorVM
+        from base_qt.ui.view_host import ViewHost
+        from app_apps.io.spectrometer.ui.spectrometer_view import SpectrometerView
+        from app_apps.io.control_readout.ell14.ui.view import ELL14RotatorView
+        from app_apps.io.control_readout.fms300pp.ui.view import Fms300ppView
+        from app_apps.io.control_readout.mfa_cc.ui.view import MfaccView
+        from app_apps.io.control_readout.uts150cc.ui.view import Uts150ccView
+        from app_apps.io.control_readout.rgv.ui.view import RgvView
 
         menu = self.menuBar().addMenu("Devices")
-        self._spectrometer_popout: SpectrometerPopout | None = None
-        self._ell14_popout: ELL14RotatorPopout | None = None
+        self._spectrometer_host = ViewHost(container, SpectrometerView, parent=self)
+        self._ell14_host = ViewHost(container, ELL14RotatorView, parent=self)
+        self._fms300pp_host = ViewHost(container, Fms300ppView, parent=self)
+        self._mfa_cc_host = ViewHost(container, MfaccView, parent=self)
+        self._uts150cc_host = ViewHost(container, Uts150ccView, parent=self)
+        self._rgv_host = ViewHost(container, RgvView, parent=self)
 
-        def _open_spectrometer() -> None:
-            if self._spectrometer_popout is None:
-                self._spectrometer_popout = SpectrometerPopout(
-                    container.get(SpectrometerVM), parent=self
-                )
-            self._spectrometer_popout.open()
-
-        def _open_ell14() -> None:
-            if self._ell14_popout is None:
-                self._ell14_popout = ELL14RotatorPopout(
-                    container.get(ELL14RotatorVM), parent=self
-                )
-            self._ell14_popout.open()
-
-        menu.addAction("Spectrometer", _open_spectrometer)
-        menu.addAction("ELL14 Rotator", _open_ell14)
+        menu.addAction("Spectrometer", self._spectrometer_host.open)
+        menu.addAction("ELL14 Rotator", self._ell14_host.open)
+        menu.addAction("FMS300PP Stage", self._fms300pp_host.open)
+        menu.addAction("MFA-CC Stage", self._mfa_cc_host.open)
+        menu.addAction("UTS150CC Stage", self._uts150cc_host.open)
+        menu.addAction("RGV100BL HWP", self._rgv_host.open)
 
     def _build_routines_menu(self, container: Container) -> None:
-        from app_apps.routines.cfg_calibration.ui.popout import CfgCalibrationPopout
-        from app_apps.routines.cfg_calibration.ui.vm import CfgCalibrationVM
+        from base_qt.ui.view_host import ViewHost
+        from app_apps.routines.cfg_calibration.ui.view import CfgCalibrationView
 
         menu = self.menuBar().addMenu("Routines")
-        self._cfg_calibration_popout: CfgCalibrationPopout | None = None
+        self._cfg_calibration_host = ViewHost(container, CfgCalibrationView, parent=self)
 
-        def _open_cfg_calibration() -> None:
-            if self._cfg_calibration_popout is None:
-                self._cfg_calibration_popout = CfgCalibrationPopout(
-                    container.get(CfgCalibrationVM), parent=self
-                )
-            self._cfg_calibration_popout.open()
-
-        menu.addAction("CFG Calibration", _open_cfg_calibration)
+        menu.addAction("CFG Calibration", self._cfg_calibration_host.open)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         # Bypass PanelWindow.closeEvent (which ignores) and destroy it directly.

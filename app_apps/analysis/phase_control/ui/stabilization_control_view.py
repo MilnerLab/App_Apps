@@ -18,17 +18,17 @@ from base_qt.ui.dirty_indicator import DirtyIndicator
 from base_qt.ui.field_draft import FieldDraft
 from base_qt.ui.form.specs import AngleSpec
 from base_qt.ui.worker_control_widget import WorkerControlWidget
-from app_apps.analysis.phase_control.ui.stabilization_control_vm import StabilizationControlVM
+from app_apps.analysis.phase_control.ui.stabilization_control_view_model import StabilizationControlViewModel
 
 if TYPE_CHECKING:
-    from app_apps.analysis.phase_control.ui.phase_config_dialog import PhaseConfigDialog
+    from app_apps.analysis.phase_control.ui.phase_config_view import PhaseConfigView
 
 
 class StabilizationControlView(QWidget):
     def __init__(
         self,
-        vm: StabilizationControlVM,
-        config_dialog: PhaseConfigDialog,
+        vm: StabilizationControlViewModel,
+        config_dialog: PhaseConfigView,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)

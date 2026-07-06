@@ -32,11 +32,13 @@ class SpectrometerModule(BaseModule):
         c.register_instance(SpectrometerService, service)
         c.register_instance(SpectrometerWorkerHandle, handle)
 
-        from app_apps.io.spectrometer.ui.spectrometer_vm import SpectrometerVM
+        from app_apps.io.spectrometer.ui.spectrometer_view_model import SpectrometerViewModel
+        from app_apps.io.spectrometer.ui.spectrometer_view import SpectrometerView
         from base_qt.app.dispatcher import QtDispatcher
-        c.register_factory(SpectrometerVM, lambda c: SpectrometerVM(
+        c.register_factory(SpectrometerViewModel, lambda c: SpectrometerViewModel(
             ctx.event_bus, c.get(QtDispatcher), c.get(SpectrometerWorkerHandle), c.get(SpectrometerConfig)
         ))
+        c.register_factory(SpectrometerView, lambda c: SpectrometerView(c.get(SpectrometerViewModel), parent=None))
 
     def on_startup(self, c: Container, ctx: AppContext) -> None:
         service = c.get(SpectrometerService)

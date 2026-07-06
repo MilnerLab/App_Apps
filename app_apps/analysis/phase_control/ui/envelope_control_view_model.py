@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from app_apps.analysis.phase_control.envelope_handle import EnvelopeHandle
 
 
-class EnvelopeControlVM(QObject):
+class EnvelopeControlViewModel(QObject):
     worker_state_changed = Signal(object)  # WorkerStatus
 
     def __init__(

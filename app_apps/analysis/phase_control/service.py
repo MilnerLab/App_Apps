@@ -28,15 +28,15 @@ class PhaseControlService(SubprocessService):
         self,
         bus: EventBus,
         spec: SpectrumMemorySpec,
-        phase_tracking_handle: PhaseStabilizationHandle,
+        phase_stabilization_handle: PhaseStabilizationHandle,
         envelope_handle: EnvelopeHandle,
         config: StabilizationConfig,
     ) -> None:
         super().__init__(bus)
         self.add_buffer(SpectrumBuffer, spec)
-        self._phase_tracking_handle = phase_tracking_handle
+        self._phase_stabilization_handle = phase_stabilization_handle
         self._envelope_handle = envelope_handle
-        self.add_handle(phase_tracking_handle)
+        self.add_handle(phase_stabilization_handle)
         self.add_handle(envelope_handle)
         self._mode = ControlMode.PHASE_TRACKING
         self._config = config
@@ -47,17 +47,17 @@ class PhaseControlService(SubprocessService):
         return self._mode
 
     def set_config(self) -> None:
-        self._phase_tracking_handle.set_config(self._config)
+        self._phase_stabilization_handle.set_config(self._config)
 
     def set_worker_paused(self, paused: bool) -> None:
         if self._mode == ControlMode.PHASE_TRACKING:
-            self._phase_tracking_handle.set_paused(paused)
+            self._phase_stabilization_handle.set_paused(paused)
         else:
             self._envelope_handle.set_paused(paused)
 
     def reset_worker(self) -> None:
         if self._mode == ControlMode.PHASE_TRACKING:
-            self._phase_tracking_handle.reset()
+            self._phase_stabilization_handle.reset()
         else:
             self._envelope_handle.reset()
 
@@ -67,10 +67,8 @@ class PhaseControlService(SubprocessService):
         self._mode = mode
         if mode == ControlMode.PHASE_TRACKING:
             self._envelope_handle.set_paused(True)
-            self._phase_tracking_handle.set_paused(False)
         else:
-            self._phase_tracking_handle.set_paused(True)
-            self._envelope_handle.set_paused(False)
+            self._phase_stabilization_handle.set_paused(True)
 
     @property
     def _entry_module(self) -> str:

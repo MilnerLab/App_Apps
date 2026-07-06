@@ -4,11 +4,11 @@ from PySide6.QtWidgets import QHBoxLayout, QWidget
 
 from base_core.ipc.worker_handle import WorkerStatus
 from base_qt.ui.worker_control_widget import WorkerControlWidget
-from app_apps.analysis.phase_control.ui.envelope_control_vm import EnvelopeControlVM
+from app_apps.analysis.phase_control.ui.envelope_control_view_model import EnvelopeControlViewModel
 
 
 class EnvelopeControlView(QWidget):
-    def __init__(self, vm: EnvelopeControlVM, parent: QWidget | None = None) -> None:
+    def __init__(self, vm: EnvelopeControlViewModel, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
         row = QHBoxLayout(self)

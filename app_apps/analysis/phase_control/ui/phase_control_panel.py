@@ -8,13 +8,13 @@ from PySide6.QtWidgets import QComboBox, QHBoxLayout, QSizePolicy, QStackedWidge
 from base_qt.ui.panel import Panel
 from app_apps.analysis.phase_control.subprocess.domain.mode import ControlMode
 from app_apps.analysis.phase_control.ui.envelope_control_view import EnvelopeControlView
-from app_apps.analysis.phase_control.ui.phase_config_dialog import PhaseConfigDialog
-from app_apps.analysis.phase_control.ui.phase_control_vm import PhaseControlVM
+from app_apps.analysis.phase_control.ui.phase_config_view import PhaseConfigView
+from app_apps.analysis.phase_control.ui.phase_control_view_model import PhaseControlViewModel
 from app_apps.analysis.phase_control.ui.stabilization_control_view import StabilizationControlView
 
 
 class PhaseControlPanel(Panel):
-    def __init__(self, vm: PhaseControlVM, parent: QWidget | None = None) -> None:
+    def __init__(self, vm: PhaseControlViewModel, parent: QWidget | None = None) -> None:
         super().__init__("Phase Control", vm, parent)
 
     def setup(self) -> None:
@@ -43,8 +43,8 @@ class PhaseControlPanel(Panel):
         view = QChartView(chart)
         view.setMinimumHeight(220)
 
-        # Config popout — parented to this panel so it floats within it
-        config_dialog = PhaseConfigDialog(self.vm.svc, self.vm.stabilization_vm, parent=self)
+        # Config view — parented to this panel so it floats within it
+        config_dialog = PhaseConfigView(self.vm.svc, self.vm.stabilization_vm, parent=self)
 
         # --- Controls row ---
         controls = QWidget()

@@ -16,4 +16,9 @@ class RequestCurrentRGVAngle:
 @dataclass(frozen=True)
 class NewRGVAngle:
     angle: Angle
-    
+
+
+@dataclass(frozen=True)
+class RgvWorkerStateChanged:
+    pass
+

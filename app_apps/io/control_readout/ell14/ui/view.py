@@ -9,7 +9,7 @@ from base_core.math.models import Angle
 from base_qt.ui.form import AngleSpec, ConfigForm
 from base_qt.ui.worker_control_widget import WorkerControlWidget
 
-from app_apps.io.control_readout.ell14.ui.vm import ELL14RotatorVM
+from app_apps.io.control_readout.ell14.ui.view_model import ELL14RotatorViewModel
 
 
 @dataclass
@@ -17,14 +17,14 @@ class _RotateCommand:
     angle: Angle = Angle(0, AngleUnit.DEG, wrap=False)
 
 
-class ELL14RotatorPopout(ConfigForm):
+class ELL14RotatorView(ConfigForm):
     _specs = {
         "angle": AngleSpec("Rotate by"),
     }
 
-    def __init__(self, vm: ELL14RotatorVM, parent: QWidget) -> None:
+    def __init__(self, vm: ELL14RotatorViewModel, parent: QWidget) -> None:
         self._vm = vm
-        super().__init__("ELL14 Rotator", _RotateCommand(), parent)
+        super().__init__("ELL14 Rotator", _RotateCommand(), parent, vm=vm)
 
         ctrl = WorkerControlWidget(vm.start, vm.pause, vm.reset, parent=self)
         ctrl.set_status(vm.worker_status)

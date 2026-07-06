@@ -23,12 +23,14 @@ class RoutinesModule(BaseModule):
         ))
 
         from base_qt.app.dispatcher import QtDispatcher
-        from app_apps.routines.cfg_calibration.ui.vm import CfgCalibrationVM
+        from app_apps.routines.cfg_calibration.ui.view_model import CfgCalibrationViewModel
+        from app_apps.routines.cfg_calibration.ui.view import CfgCalibrationView
 
-        c.register_factory(CfgCalibrationVM, lambda c: CfgCalibrationVM(
+        c.register_factory(CfgCalibrationViewModel, lambda c: CfgCalibrationViewModel(
             bus=ctx.event_bus,
             dispatcher=c.get(QtDispatcher),
             handle=c.get(PhaseStabilizationHandle),
             config=c.get(StabilizationConfig),
             cfg_range=c.get(CfgRange),
         ))
+        c.register_factory(CfgCalibrationView, lambda c: CfgCalibrationView(c.get(CfgCalibrationViewModel), parent=None))

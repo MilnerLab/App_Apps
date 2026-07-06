@@ -29,6 +29,9 @@ class CFG:
     beta_GA: AngularChirp = None    # second (L / grating) arm chirp, rad/ns^2
 
     def update(self, params: SpectralFitParams) -> None:
+        if self.T_DA_fwhm is None:
+            raise Exception("Should not be null: T_DA")
+        
         lambda0_nm = params.lambda0.value(Prefix.NANO)
         delta_lambda_nm = params.delta_lambda_fwhm.value(Prefix.NANO)
 

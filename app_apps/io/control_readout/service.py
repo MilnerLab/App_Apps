@@ -8,8 +8,9 @@ class ControlReadoutService(SubprocessService):
     """
     Main-process service for the control readout subprocess.
 
-    Hosts the rotator (ELL14 HWP), ESP301 stages, RGV100BL HWP, picomotors,
-    and servo shutters. A pressure-sensor WriterWorkerHandle will be added here
+    Hosts the rotator (ELL14 HWP), the three ESP301 linear stages (FMS300PP,
+    MFA-CC, UTS150CC), and the RGV100BL HWP. Picomotors and servo shutters are
+    still pending; a pressure-sensor WriterWorkerHandle will be added here
     when the sensor worker is implemented.
     """
 

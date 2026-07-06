@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 
 
-class StabilizationControlVM(QObject):
+class StabilizationControlViewModel(QObject):
     worker_state_changed = Signal(object)  # WorkerStatus
     config_updated = Signal()              # subprocess synced new fit params
 
