@@ -4,7 +4,7 @@ from typing import Any, ClassVar, TYPE_CHECKING
 
 from base_core.ipc.worker_handle import WorkerStatus
 from base_core.quantities.enums import Prefix
-from base_qt.ui.form import AngleSpec, BoolSpec, DirtyForm, FloatSpec, IntSpec, LengthSpec, RangeSpec
+from base_qt.ui.form import AngleSpec, BoolSpec, DirtyForm, FloatSpec, GDDSpec, IntSpec, LengthSpec, RangeSpec, TimeSpec
 
 
 if TYPE_CHECKING:
@@ -26,8 +26,8 @@ class PhaseConfigView(DirtyForm):
         "delta_lambda_fwhm":   LengthSpec("FWHM bandwidth", Prefix.NANO, min=0.1,  max=50),
         "A":                   FloatSpec("Amplitude",        0.0,  10.0),
         "theta0":              AngleSpec("Phase θ₀"),
-        "theta1":              FloatSpec("θ₁ [ps]",         -10.0, 10.0),
-        "theta2":              FloatSpec("θ₂ [ps²]",        -10.0, 10.0),
+        "theta1":              TimeSpec("θ₁", Prefix.PICO, min=-10.0, max=10.0),
+        "theta2":              GDDSpec("θ₂", Prefix.PICO, min=-10.0, max=10.0),
         "V":                   FloatSpec("Visibility",        0.0,   1.0),
         "offset":              FloatSpec("Offset",            0.0,   1.0),
         "wavelength_range":    RangeSpec(

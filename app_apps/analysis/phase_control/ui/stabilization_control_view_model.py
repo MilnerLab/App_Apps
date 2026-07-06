@@ -102,9 +102,11 @@ class StabilizationControlViewModel(QObject):
         )
         lambda0 = p.lambda0.value(Prefix.NANO)
         delta_lambda_fwhm = p.delta_lambda_fwhm.value(Prefix.NANO)
+        theta1_ps = p.theta1.value(Prefix.PICO)
+        theta2_ps2 = p.theta2.value(Prefix.PICO)
 
         def curve(theta0_rad: float) -> np.ndarray:
-            return spectrum_fit(wl, p.A, theta0_rad, p.theta1, p.theta2, p.V, p.offset, lambda0, delta_lambda_fwhm)
+            return spectrum_fit(wl, p.A, theta0_rad, theta1_ps, theta2_ps2, p.V, p.offset, lambda0, delta_lambda_fwhm)
 
         set_phase_curve = curve(self._config.set_phase.Rad)
         current_phase_curve = curve(p.theta0.Rad)

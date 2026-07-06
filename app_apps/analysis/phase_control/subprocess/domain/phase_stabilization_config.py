@@ -17,7 +17,8 @@ from base_core.framework.serialization.serde import Primitive, PrimitiveSerde
 from base_core.math.functions import spectrum_fit
 from base_core.math.models import Angle, Range
 from base_core.quantities.enums import Prefix
-from base_core.quantities.models import Length
+from base_core.quantities.models import Length, Time
+from base_core.quantities.specific_models import GDD
 
 
 def _first_param(func: Callable) -> str:
@@ -35,9 +36,9 @@ class SpectralFitParams(PrimitiveSerde):
     lambda0: Length = Length(802.38, Prefix.NANO)
     delta_lambda_fwhm: Length = Length(7.4728, Prefix.NANO)
     A: float = 0.5
-    theta0: Angle = Angle(0.0)      # constant phase offset [rad]
-    theta1: float = -0.3            # linear phase coeff [ps]  (approx -tau)
-    theta2: float = 0.0             # quadratic phase coeff [ps^2]
+    theta0: Angle = Angle(0.0)                    # constant phase offset [rad]
+    theta1: Time = Time(-0.3, Prefix.PICO)        # linear phase coeff [ps]  (approx -tau)
+    theta2: GDD = GDD(0.0, Prefix.PICO)           # quadratic phase coeff [ps^2]
     V: float = 1.0                  # fringe visibility [0, 1]
     offset: float = 0.0
     residual: float = 0.0
@@ -141,7 +142,7 @@ class SpectralFitParams(PrimitiveSerde):
         out: dict[str, Any] = {"kind": self.KIND}
         for f in fields(self):
             val = getattr(self, f.name)
-            out[f.name] = val.to_primitive() if isinstance(val, (Length, Angle)) else val
+            out[f.name] = val.to_primitive() if isinstance(val, (Length, Angle, Time, GDD)) else val
         return out
 
     @classmethod
@@ -156,6 +157,10 @@ class SpectralFitParams(PrimitiveSerde):
                 kwargs[f.name] = Length.from_primitive(v[f.name])
             elif ft is Angle:
                 kwargs[f.name] = Angle.from_primitive(v[f.name])
+            elif ft is Time:
+                kwargs[f.name] = Time.from_primitive(v[f.name])
+            elif ft is GDD:
+                kwargs[f.name] = GDD.from_primitive(v[f.name])
             elif ft in (float, int):
                 kwargs[f.name] = ft(v[f.name])
             else:
@@ -166,11 +171,15 @@ class SpectralFitParams(PrimitiveSerde):
     _TO_FLOAT: ClassVar[dict[type[Any], Callable[[Any], float]]] = {
         Length: lambda l: float(l.value(Prefix.NANO)),
         Angle: lambda a: float(a.Rad),
+        Time: lambda t: float(t.value(Prefix.PICO)),
+        GDD: lambda g: float(g.value(Prefix.PICO)),
         float: float,
     }
     _FROM_FLOAT: ClassVar[dict[type[Any], Callable[[float], Any]]] = {
         Length: lambda v: Length(float(v), Prefix.NANO),
         Angle: lambda v: Angle(float(v)),
+        Time: lambda v: Time(float(v), Prefix.PICO),
+        GDD: lambda v: GDD(float(v), Prefix.PICO),
         float: float,
     }
 
