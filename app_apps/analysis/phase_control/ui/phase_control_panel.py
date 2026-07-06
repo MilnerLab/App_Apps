@@ -39,6 +39,7 @@ class PhaseControlPanel(Panel):
 
         self.vm.stabilization_vm.set_chart(chart)
         self.vm.envelope_vm.set_chart(chart)
+        self.vm.stabilization_vm.set_active(True)
 
         view = QChartView(chart)
         view.setMinimumHeight(220)
@@ -77,6 +78,7 @@ class PhaseControlPanel(Panel):
     def _on_mode_changed(self, index: int) -> None:
         self._stacked.setCurrentIndex(index)
         mode = self._mode_combo.itemData(index)
+        self.vm.stabilization_vm.set_active(mode == ControlMode.PHASE_TRACKING)
         self.vm.set_mode(mode)
 
     def _on_spectrum_updated(self, wavelengths: np.ndarray, intensities: np.ndarray) -> None:
