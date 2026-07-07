@@ -4,6 +4,8 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QSizePolicy, QStackedWidget, QWidget
 
+from app_apps.io.spectrometer.domain.helpers import normalize_spectrum
+from base_core.quantities.enums import Prefix
 from base_qt.ui.panel import Panel
 from app_apps.analysis.phase_control.subprocess.domain.mode import ControlMode
 from app_apps.analysis.phase_control.ui.envelope_control_view import EnvelopeControlView
@@ -68,4 +70,9 @@ class PhaseControlView(Panel):
         self.vm.set_mode(mode)
 
     def _on_spectrum_updated(self, wavelengths: np.ndarray, intensities: np.ndarray) -> None:
+        if self.vm.svc.mode == ControlMode.PHASE_TRACKING:
+            cfg = self.vm.stabilization_vm.config
+            wl_min = cfg.wavelength_range.min.value(Prefix.NANO)
+            wl_max = cfg.wavelength_range.max.value(Prefix.NANO)
+            wavelengths, intensities = normalize_spectrum(wavelengths, intensities, wl_min, wl_max)
         self._live_curve.setData(wavelengths, intensities)

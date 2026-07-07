@@ -5,12 +5,15 @@ from typing import Deque
 
 import numpy as np
 
+from app_apps.io.spectrometer.domain.helpers import normalize_spectrum
 from base_core.math.models import Angle
 from base_core.quantities.enums import Prefix
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import (
     SpectralFitParams,
     StabilizationConfig,
 )
+
+
 
 
 class PhaseTracker:
@@ -61,11 +64,4 @@ class PhaseTracker:
     ) -> tuple[np.ndarray, np.ndarray]:
         wl_min = self._config.wavelength_range.min.value(Prefix.NANO)
         wl_max = self._config.wavelength_range.max.value(Prefix.NANO)
-        mask = (wavelengths_nm >= wl_min) & (wavelengths_nm <= wl_max)
-        wl = wavelengths_nm[mask]
-        inten = intensities[mask].astype(float)
-        inten -= inten.min()
-        max_val = inten.max()
-        if max_val > 0:
-            inten /= max_val
-        return wl, inten
+        return normalize_spectrum(wavelengths_nm, intensities, wl_min, wl_max)
