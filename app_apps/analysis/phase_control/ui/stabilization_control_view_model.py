@@ -47,12 +47,17 @@ class StabilizationControlViewModel(QObject):
     def set_chart(self, plot_item: pg.PlotItem) -> None:
         self._plot_item = plot_item
 
+        # Cosmetic so dash lengths are in screen pixels, not data units — without it,
+        # the wavelength (nm) vs intensity (0-1) axes' mismatched scale stretches each
+        # dash into a long diagonal streak, making the curve look like jagged noise.
         set_phase_pen = QPen(QColor("red"))
         set_phase_pen.setStyle(Qt.PenStyle.DashLine)
+        set_phase_pen.setCosmetic(True)
         self._set_phase_series = pg.PlotDataItem(pen=set_phase_pen)
 
         current_phase_pen = QPen(QColor("green"))
         current_phase_pen.setStyle(Qt.PenStyle.DashDotLine)
+        current_phase_pen.setCosmetic(True)
         self._current_phase_series = pg.PlotDataItem(pen=current_phase_pen)
 
     def set_active(self, active: bool) -> None:
