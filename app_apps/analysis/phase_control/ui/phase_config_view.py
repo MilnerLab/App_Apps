@@ -31,7 +31,7 @@ class PhaseConfigView(DirtyForm):
         "theta1":              TimeSpec("θ₁", Prefix.PICO, min=-10.0, max=10.0),
         "theta2":              GDDSpec("θ₂", Prefix.PICO, min=-10.0, max=10.0),
         "V":                   FloatSpec("Visibility",        0.0,   1.0),
-        "offset":              FloatSpec("Offset",            0.0,   1.0),
+        "offset":              FloatSpec("Offset",            0.0,   float("inf")),
         "wavelength_range":    RangeSpec(
             "Wavelength range",
             LengthSpec("", Prefix.NANO, min=700, max=1000),
