@@ -20,11 +20,11 @@ class AppPanelWindow(PanelWindow):
         self._build_panels(container)
 
     def _build_panels(self, container: Container) -> None:
-        from app_apps.analysis.phase_control.ui.phase_control_panel import PhaseControlPanel
+        from app_apps.analysis.phase_control.ui.phase_control_view import PhaseControlView
 
         c = container
         self.register_panel(
             "Phase Control",
-            lambda: c.get(PhaseControlPanel),
+            lambda: c.get(PhaseControlView),
             Qt.DockWidgetArea.LeftDockWidgetArea,
         )
