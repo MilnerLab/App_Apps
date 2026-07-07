@@ -44,7 +44,7 @@ class PhaseControlModule(BaseModule):
         from app_apps.analysis.phase_control.ui.stabilization_control_view_model import StabilizationControlViewModel
         from app_apps.analysis.phase_control.ui.envelope_control_view_model import EnvelopeControlViewModel
         from app_apps.analysis.phase_control.ui.phase_control_view_model import PhaseControlViewModel
-        from app_apps.analysis.phase_control.ui.phase_control_panel import PhaseControlPanel
+        from app_apps.analysis.phase_control.ui.phase_control_view import PhaseControlView
         from base_qt.app.dispatcher import QtDispatcher
 
         c.register_factory(StabilizationControlViewModel, lambda c: StabilizationControlViewModel(
@@ -66,7 +66,7 @@ class PhaseControlModule(BaseModule):
             c.get(StabilizationControlViewModel),
             c.get(EnvelopeControlViewModel),
         ))
-        c.register_factory(PhaseControlPanel, lambda c: PhaseControlPanel(c.get(PhaseControlViewModel)))
+        c.register_factory(PhaseControlView, lambda c: PhaseControlView(c.get(PhaseControlViewModel)))
 
     def on_startup(self, c: Container, ctx: AppContext) -> None:
         service = c.get(PhaseControlService)

@@ -12,7 +12,7 @@ from app_apps.analysis.phase_control.ui.phase_control_view_model import PhaseCon
 from app_apps.analysis.phase_control.ui.stabilization_control_view import StabilizationControlView
 
 
-class PhaseControlPanel(Panel):
+class PhaseControlView(Panel):
     def __init__(self, vm: PhaseControlViewModel, parent: QWidget | None = None) -> None:
         super().__init__("Phase Control", vm, parent)
 

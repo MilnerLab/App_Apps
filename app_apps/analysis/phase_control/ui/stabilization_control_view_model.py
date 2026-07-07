@@ -70,7 +70,9 @@ class StabilizationControlViewModel(QObject):
         if self._plot_item is None or self._set_phase_series is None or self._current_phase_series is None:
             return
         for series in (self._set_phase_series, self._current_phase_series):
-            self._plot_item.addItem(series)
+            # Excluded from auto-range so the view stays driven by the live spectrum,
+            # not by whatever the fit curves happen to be before a config is applied.
+            self._plot_item.addItem(series, ignoreBounds=True)
 
     def _detach_curves(self) -> None:
         if self._plot_item is None:
@@ -79,7 +81,7 @@ class StabilizationControlViewModel(QObject):
             if series is not None:
                 self._plot_item.removeItem(series)
 
-    def _update_curves(self) -> None:
+    def _update_curves(self, rescale: bool = False) -> None:
         if not self._active:
             return
         if self._set_phase_series is None or self._current_phase_series is None:
@@ -104,6 +106,14 @@ class StabilizationControlViewModel(QObject):
 
         self._set_phase_series.setData(wl, set_phase_curve)
         self._current_phase_series.setData(wl, current_phase_curve)
+
+        if rescale and self._plot_item is not None:
+            x_pad = (wl[-1] - wl[0]) * 0.1
+            y_lo = float(min(set_phase_curve.min(), current_phase_curve.min()))
+            y_hi = float(max(set_phase_curve.max(), current_phase_curve.max()))
+            y_pad = (y_hi - y_lo) * 0.1 or 1.0
+            self._plot_item.setXRange(float(wl[0]) - x_pad, float(wl[-1]) + x_pad, padding=0)
+            self._plot_item.setYRange(y_lo - y_pad, y_hi + y_pad, padding=0)
 
     @property
     def worker_state(self) -> WorkerStatus:
@@ -130,6 +140,7 @@ class StabilizationControlViewModel(QObject):
         self._config.set_phase = Angle(set_phase_deg, AngleUnit.DEG)
         self._config.fit_all_params = fit_all_params
         self._handle.set_config(self._config)
+        self._update_curves(rescale=True)
 
     def _on_state_changed(self, _: PhaseTrackingStateChanged) -> None:
         state = self._handle.state
