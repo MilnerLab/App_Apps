@@ -50,10 +50,3 @@ class SetStabilizationConfig(Request[OKReply]):
 @dataclass(frozen=True)
 class SetEnvelopeConfig(Request[OKReply]):
     config: EnvelopeConfig = None  # type: ignore[assignment]
-
-
-@register
-@dataclass(frozen=True)
-class SetPaused(Request[OKReply]):
-    worker_id: str = ""
-    paused: bool = False

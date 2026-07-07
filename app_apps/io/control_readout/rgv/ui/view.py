@@ -13,7 +13,7 @@ class RgvView(PanelView):
         super().__init__("RGV100BL HWP", parent, vm=vm)
         self._vm = vm
 
-        ctrl = WorkerControlWidget(vm.start, vm.pause, vm.reset, parent=self)
+        ctrl = WorkerControlWidget(vm.start, vm.pause, vm.resume, vm.stop, parent=self)
         ctrl.set_status(vm.worker_status)
         vm.worker_state_changed.connect(ctrl.set_status)
         self.body_layout.addWidget(ctrl)

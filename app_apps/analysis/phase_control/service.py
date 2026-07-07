@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Callable
 
 from base_core.framework.events.event_bus import EventBus
 from base_core.ipc.subprocess_service import SubprocessService
+from base_core.ipc.worker_handle import WorkerStatus
 from spm_002.buffer import SpectrumBuffer, SpectrumMemorySpec
 from app_apps.analysis.phase_control.subprocess.domain.mode import ControlMode
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
@@ -49,26 +50,25 @@ class PhaseControlService(SubprocessService):
     def set_config(self) -> None:
         self._phase_stabilization_handle.set_config(self._config)
 
-    def set_worker_paused(self, paused: bool) -> None:
-        if self._mode == ControlMode.PHASE_TRACKING:
-            self._phase_stabilization_handle.set_paused(paused)
-        else:
-            self._envelope_handle.set_paused(paused)
+    def _active_handle(self) -> PhaseStabilizationHandle | EnvelopeHandle:
+        return self._phase_stabilization_handle if self._mode == ControlMode.PHASE_TRACKING else self._envelope_handle
 
-    def reset_worker(self) -> None:
-        if self._mode == ControlMode.PHASE_TRACKING:
-            self._phase_stabilization_handle.reset()
-        else:
-            self._envelope_handle.reset()
+    def set_worker_paused(self, paused: bool) -> None:
+        handle = self._active_handle()
+        handle.pause() if paused else handle.resume()
+
+    def stop_worker(self) -> None:
+        self._active_handle().stop()
 
     def set_mode(self, mode: ControlMode) -> None:
         if mode == self._mode:
             return
+        old_active = self._active_handle()
         self._mode = mode
-        if mode == ControlMode.PHASE_TRACKING:
-            self._envelope_handle.set_paused(True)
-        else:
-            self._phase_stabilization_handle.set_paused(True)
+        new_active = self._active_handle()
+        old_active.pause()
+        if new_active.state == WorkerStatus.PAUSED:
+            new_active.resume()
 
     @property
     def _entry_module(self) -> str:

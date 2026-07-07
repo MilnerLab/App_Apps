@@ -17,7 +17,7 @@ class EnvelopeControlView(QWidget):
 
         row.addStretch()
 
-        self._worker_ctrl = WorkerControlWidget(vm.start, vm.pause, vm.reset)
+        self._worker_ctrl = WorkerControlWidget(vm.start, vm.pause, vm.resume, vm.stop)
         self._worker_ctrl.set_status(vm.worker_state)
         row.addWidget(self._worker_ctrl)
 

@@ -57,8 +57,11 @@ class ELL14RotatorViewModel(PanelViewModel):
     def pause(self) -> None:
         self._handle.pause()
 
-    def reset(self) -> None:
-        self._handle.reset()
+    def resume(self) -> None:
+        self._handle.resume()
+
+    def stop(self) -> None:
+        self._handle.stop()
 
     def rotate(self, angle: Angle) -> None:
         self._bus.publish(RequestRotate(angle=angle, sign=1))

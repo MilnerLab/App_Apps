@@ -148,8 +148,11 @@ class StabilizationControlViewModel(QObject):
     def pause(self) -> None:
         self._handle.pause()
 
-    def reset(self) -> None:
-        self._handle.reset()
+    def resume(self) -> None:
+        self._handle.resume()
+
+    def stop(self) -> None:
+        self._handle.stop()
 
     def apply(self, set_phase_deg: float, fit_all_params: bool) -> None:
         """Commit pending values into the shared config and send to the subprocess."""

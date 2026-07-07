@@ -27,7 +27,7 @@ class SpectrometerView(DirtyForm):
         self._vm = vm
         super().__init__("Spectrometer", vm.config, parent, vm=vm)
 
-        ctrl = WorkerControlWidget(vm.start, vm.pause, vm.reset, parent=self)
+        ctrl = WorkerControlWidget(vm.start, vm.pause, vm.resume, vm.stop, parent=self)
         ctrl.set_status(vm.worker_status)
         vm.worker_state_changed.connect(ctrl.set_status)
         self.body_layout.insertWidget(0, ctrl)

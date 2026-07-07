@@ -38,5 +38,8 @@ class Fms300ppViewModel(PanelViewModel):
     def pause(self) -> None:
         self._handle.pause()
 
-    def reset(self) -> None:
-        self._handle.reset()
+    def resume(self) -> None:
+        self._handle.resume()
+
+    def stop(self) -> None:
+        self._handle.stop()

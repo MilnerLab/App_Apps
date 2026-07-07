@@ -11,7 +11,6 @@ from app_apps.analysis.phase_control.subprocess.messages import (
     ProcessSpectrum,
     SpectrumProcessed,
     SetEnvelopeConfig,
-    SetPaused,
 )
 
 if TYPE_CHECKING:
@@ -41,18 +40,19 @@ class EnvelopeWorker(ThreadedWorker):
 
     def _setup(self) -> None:
         self._unsubs.append(self._bus.subscribe(SetEnvelopeConfig, self._on_set_config))
-        self._unsubs.append(self._bus.subscribe(SetPaused, self._on_set_paused))
         self._unsubs.append(self._bus.subscribe(ProcessSpectrum, self._on_spectrum))
 
     def _start(self) -> None:
         self._optimizer = EnvelopeOptimizer(self._config)
-        self._paused = True  # envelope mode must be explicitly unpaused via SetPaused
+        self._paused = False
 
     def _pause(self) -> None:
-        self._optimizer = None
         self._paused = True
 
-    def _reset(self) -> None:
+    def _resume(self) -> None:
+        self._paused = False
+
+    def _stop(self) -> None:
         if self._optimizer is not None:
             self._optimizer.reset()
 
@@ -76,11 +76,4 @@ class EnvelopeWorker(ThreadedWorker):
     def _on_set_config(self, msg: SetEnvelopeConfig) -> None:
         self._config = msg.config
         self._optimizer = EnvelopeOptimizer(self._config)
-        self._reply_ok(msg)
-
-    @worker_thread
-    def _on_set_paused(self, msg: SetPaused) -> None:
-        if msg.worker_id != self._worker_id:
-            return
-        self._paused = msg.paused
         self._reply_ok(msg)

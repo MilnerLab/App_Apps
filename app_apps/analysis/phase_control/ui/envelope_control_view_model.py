@@ -43,8 +43,11 @@ class EnvelopeControlViewModel(QObject):
     def pause(self) -> None:
         self._handle.pause()
 
-    def reset(self) -> None:
-        self._handle.reset()
+    def resume(self) -> None:
+        self._handle.resume()
+
+    def stop(self) -> None:
+        self._handle.stop()
 
     def _on_state_changed(self, _: EnvelopeStateChanged) -> None:
         state = self._handle.state

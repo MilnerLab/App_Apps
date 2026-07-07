@@ -81,7 +81,7 @@ class StabilizationControlView(QWidget):
 
         # --- Push worker controls to the far right ---
         row.addStretch()
-        self._worker_ctrl = WorkerControlWidget(vm.start, vm.pause, vm.reset)
+        self._worker_ctrl = WorkerControlWidget(vm.start, vm.pause, vm.resume, vm.stop)
         row.addWidget(self._worker_ctrl)
 
         self._worker_ctrl.set_status(vm.worker_state)

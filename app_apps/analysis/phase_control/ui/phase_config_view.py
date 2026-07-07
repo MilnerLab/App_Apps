@@ -12,7 +12,9 @@ if TYPE_CHECKING:
     from app_apps.analysis.phase_control.service import PhaseControlService
     from app_apps.analysis.phase_control.ui.stabilization_control_view_model import StabilizationControlViewModel
 
-_STOPPED = (WorkerStatus.NEW, WorkerStatus.PAUSED)
+# Fields are read-only while RUNNING; editable in NEW (not yet started) and PAUSED
+# (temporarily halted — distinct from the post-Stop() NEW state, but still editable).
+_EDITABLE_STATES = (WorkerStatus.NEW, WorkerStatus.PAUSED)
 
 
 class PhaseConfigView(DirtyForm):
@@ -61,9 +63,9 @@ class PhaseConfigView(DirtyForm):
         super().__init__("Phase Tracking Configuration", svc._config, parent)
         self._svc = svc
 
-        self.set_running(vm.worker_state not in _STOPPED)
+        self.set_running(vm.worker_state not in _EDITABLE_STATES)
         vm.worker_state_changed.connect(
-            lambda status: self.set_running(status not in _STOPPED)
+            lambda status: self.set_running(status not in _EDITABLE_STATES)
         )
         vm.config_updated.connect(
             lambda: self.refresh_fields(self._readonly_when_running)

@@ -9,7 +9,6 @@ from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_confi
 from app_apps.analysis.phase_control.subprocess.messages import (
     ConfigSynced,
     CorrectionAvailable,
-    SetPaused,
     SetStabilizationConfig,
     SpectrumProcessed,
 )
@@ -33,9 +32,9 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
         self._subscribe_service(ConfigSynced, self._on_config_synced)
         self._spectrum_writer.register_consumer(self.CONSUMER_ID)
 
-    def _unbind(self) -> None:
+    def unsubscribe(self) -> None:
+        super().unsubscribe()
         self._spectrum_writer.unregister_consumer(self.CONSUMER_ID)
-        super()._unbind()
 
     def _on_correction_available(self, msg: CorrectionAvailable) -> None:
         self._bus.publish(RequestRotate(angle=msg.angle, sign=msg.sign))
@@ -54,15 +53,5 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
     def set_config(self, config: StabilizationConfig) -> None:
         self._request(SetStabilizationConfig(config=config), self._on_set_config_reply)
 
-    def set_paused(self, paused: bool) -> None:
-        if paused:
-            self._spectrum_writer.unregister_consumer(self.CONSUMER_ID)
-        else:
-            self._spectrum_writer.register_consumer(self.CONSUMER_ID)
-        self._request(SetPaused(worker_id=self.WORKER_ID, paused=paused), self._on_set_paused_reply)
-
     def _on_set_config_reply(self, reply: OKReply) -> None:
-        pass
-
-    def _on_set_paused_reply(self, reply: OKReply) -> None:
         pass

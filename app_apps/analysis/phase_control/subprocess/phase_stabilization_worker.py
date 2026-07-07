@@ -12,7 +12,6 @@ from app_apps.analysis.phase_control.subprocess.messages import (
     ConfigSynced,
     ProcessSpectrum,
     SpectrumProcessed,
-    SetPaused,
     SetStabilizationConfig,
 )
 
@@ -44,7 +43,6 @@ class PhaseStabilizationWorker(ThreadedWorker):
 
     def _setup(self) -> None:
         self._unsubs.append(self._bus.subscribe(SetStabilizationConfig, self._on_set_config))
-        self._unsubs.append(self._bus.subscribe(SetPaused, self._on_set_paused))
         self._unsubs.append(self._bus.subscribe(ProcessSpectrum, self._on_spectrum))
 
     def _start(self) -> None:
@@ -54,11 +52,12 @@ class PhaseStabilizationWorker(ThreadedWorker):
         self._paused = False
 
     def _pause(self) -> None:
-        self._tracker = None
-        self._corrector = None
         self._paused = True
 
-    def _reset(self) -> None:
+    def _resume(self) -> None:
+        self._paused = False
+
+    def _stop(self) -> None:
         self._tracker = PhaseTracker(self._config)
         self._corrector = PhaseCorrector()
         self._corrector.target_phase = self._config.set_phase
@@ -92,11 +91,4 @@ class PhaseStabilizationWorker(ThreadedWorker):
         if self._corrector is not None:
             self._corrector.target_phase = self._config.set_phase
         self._notify(ConfigSynced(config=self._config))
-        self._reply_ok(msg)
-
-    @worker_thread
-    def _on_set_paused(self, msg: SetPaused) -> None:
-        if msg.worker_id != self._worker_id:
-            return
-        self._paused = msg.paused
         self._reply_ok(msg)

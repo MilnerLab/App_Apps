@@ -26,7 +26,7 @@ class ELL14RotatorView(ConfigForm):
         self._vm = vm
         super().__init__("ELL14 Rotator", _RotateCommand(), parent, vm=vm)
 
-        ctrl = WorkerControlWidget(vm.start, vm.pause, vm.reset, parent=self)
+        ctrl = WorkerControlWidget(vm.start, vm.pause, vm.resume, vm.stop, parent=self)
         ctrl.set_status(vm.worker_status)
         vm.worker_state_changed.connect(ctrl.set_status)
         self.body_layout.insertWidget(0, ctrl)
