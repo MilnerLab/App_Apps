@@ -8,3 +8,4 @@ xps = NewportXPS(IP, username='PyControl', password='labview2python',port=5001)
 
 
 print(xps.status_report())
+xps.disconnect()
