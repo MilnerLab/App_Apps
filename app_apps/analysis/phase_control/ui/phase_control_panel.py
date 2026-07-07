@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
-from PySide6.QtCore import QPointF, Qt
+import pyqtgraph as pg
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QSizePolicy, QStackedWidget, QWidget
 
 from base_qt.ui.panel import Panel
@@ -18,31 +17,18 @@ class PhaseControlPanel(Panel):
         super().__init__("Phase Control", vm, parent)
 
     def setup(self) -> None:
-        # --- Chart ---
-        self._series = QLineSeries()
+        # --- Plot ---
+        self._plot = pg.PlotWidget()
+        self._plot.showGrid(x=True, y=True, alpha=0.3)
+        self._plot.setLabel("bottom", "Wavelength (nm)")
+        self._plot.setLabel("left", "Intensity")
+        self._plot.setMinimumHeight(220)
+        self._live_curve = self._plot.plot()
 
-        self._x_axis = QValueAxis()
-        self._x_axis.setTitleText("Wavelength (nm)")
-        self._x_axis.setLabelFormat("%.0f")
-
-        self._y_axis = QValueAxis()
-        self._y_axis.setTitleText("Intensity")
-        self._y_axis.setRange(0, 1)
-
-        chart = QChart()
-        chart.addSeries(self._series)
-        chart.addAxis(self._x_axis, Qt.AlignmentFlag.AlignBottom)
-        chart.addAxis(self._y_axis, Qt.AlignmentFlag.AlignLeft)
-        self._series.attachAxis(self._x_axis)
-        self._series.attachAxis(self._y_axis)
-        chart.legend().hide()
-
-        self.vm.stabilization_vm.set_chart(chart)
-        self.vm.envelope_vm.set_chart(chart)
+        plot_item = self._plot.getPlotItem()
+        self.vm.stabilization_vm.set_chart(plot_item)
+        self.vm.envelope_vm.set_chart(plot_item)
         self.vm.stabilization_vm.set_active(True)
-
-        view = QChartView(chart)
-        view.setMinimumHeight(220)
 
         # Config view — parented to this panel so it floats within it
         config_dialog = PhaseConfigView(self.vm.svc, self.vm.stabilization_vm, parent=self)
@@ -70,7 +56,7 @@ class PhaseControlPanel(Panel):
 
         # chart takes all remaining vertical space; controls bar stays compact
         self.body_layout.addWidget(controls)
-        self.body_layout.addWidget(view, stretch=1)
+        self.body_layout.addWidget(self._plot, stretch=1)
 
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         self._connect(self.vm.spectrum_updated, self._on_spectrum_updated)
@@ -82,11 +68,4 @@ class PhaseControlPanel(Panel):
         self.vm.set_mode(mode)
 
     def _on_spectrum_updated(self, wavelengths: np.ndarray, intensities: np.ndarray) -> None:
-        points = [QPointF(float(w), float(i)) for w, i in zip(wavelengths, intensities)]
-        self._series.replace(points)
-        if len(wavelengths):
-            self._x_axis.setRange(float(wavelengths[0]), float(wavelengths[-1]))
-        if len(intensities):
-            lo, hi = float(intensities.min()), float(intensities.max())
-            pad = (hi - lo) * 0.05 or 1.0
-            self._y_axis.setRange(lo - pad, hi + pad)
+        self._live_curve.setData(wavelengths, intensities)
