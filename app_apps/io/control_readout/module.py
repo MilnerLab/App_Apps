@@ -68,8 +68,8 @@ class ControlReadoutModule(BaseModule):
         c.register_factory(RgvView, lambda c: RgvView(c.get(RgvViewModel), parent=None))
 
     def on_startup(self, c: Container, ctx: AppContext) -> None:
+        c.get(ControlReadoutService).start()
         if ctx.status == AppStatus.CONNECTED:
-            c.get(ControlReadoutService).start()
             
             for handle_type in _HANDLE_TYPES:
                 c.get(handle_type).start()

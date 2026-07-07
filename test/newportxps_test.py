@@ -8,4 +8,6 @@ xps = NewportXPS(IP, username='PyControl', password='labview2python',port=5001)
 
 
 print(xps.status_report())
+xps.read_systemini()   # or however the wrapper exposes it
+print(xps.groups)      # lists valid group names
 xps.disconnect()
