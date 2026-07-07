@@ -10,7 +10,7 @@ from base_qt.app.dispatcher import QtDispatcher
 from app_apps.analysis.phase_control.events import EnvelopeStateChanged
 
 if TYPE_CHECKING:
-    from PySide6.QtCharts import QChart
+    import pyqtgraph as pg
     from app_apps.analysis.phase_control.envelope_handle import EnvelopeHandle
 
 
@@ -27,11 +27,11 @@ class EnvelopeControlViewModel(QObject):
         self._bus = bus
         self._dispatcher = dispatcher
         self._handle = handle
-        self._chart: QChart | None = None
+        self._plot_item: pg.PlotItem | None = None
         self._unsub = bus.subscribe(EnvelopeStateChanged, self._on_state_changed)
 
-    def set_chart(self, chart: QChart) -> None:
-        self._chart = chart
+    def set_chart(self, plot_item: pg.PlotItem) -> None:
+        self._plot_item = plot_item
 
     @property
     def worker_state(self) -> WorkerStatus:
