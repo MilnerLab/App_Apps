@@ -71,6 +71,14 @@ class StabilizationControlView(QWidget):
         fitall_row.addStretch()
         fbox.addLayout(fitall_row)
 
+        freq_row = QHBoxLayout()
+        freq_row.setSpacing(4)
+        self._freq_cb = QCheckBox("Plot in frequency")
+        self._freq_cb.setChecked(vm.plot_frequency)
+        freq_row.addWidget(self._freq_cb)
+        freq_row.addStretch()
+        fbox.addLayout(freq_row)
+
         row.addWidget(frame)
 
         # --- Apply and Config buttons ---
@@ -93,6 +101,9 @@ class StabilizationControlView(QWidget):
         )
         self._fit_all_cb.checkStateChanged.connect(
             lambda state: self._fitall_draft.set(state == Qt.CheckState.Checked)
+        )
+        self._freq_cb.checkStateChanged.connect(
+            lambda state: self._vm.set_plot_frequency(state == Qt.CheckState.Checked)
         )
         self._phase_draft.dirty_changed.connect(self._phase_ind.set_dirty)
         self._fitall_draft.dirty_changed.connect(self._fitall_ind.set_dirty)

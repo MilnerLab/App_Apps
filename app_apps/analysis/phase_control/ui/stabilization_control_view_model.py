@@ -12,6 +12,7 @@ from base_core.ipc.worker_handle import WorkerStatus
 from base_core.math.enums import AngleUnit
 from base_core.math.functions import spectrum_fit
 from base_core.math.models import Angle
+from base_core.quantities.constants import SPEED_OF_LIGHT
 from base_core.quantities.enums import Prefix
 from base_qt.app.dispatcher import QtDispatcher
 from app_apps.analysis.phase_control.events import PhaseTrackingStateChanged, StabilizationConfigChanged
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 class StabilizationControlViewModel(QObject):
     worker_state_changed = Signal(object)  # WorkerStatus
     config_updated = Signal()              # subprocess synced new fit params
+    plot_mode_changed = Signal(bool)       # plot-in-frequency toggled
 
     def __init__(
         self,
@@ -41,6 +43,7 @@ class StabilizationControlViewModel(QObject):
         self._set_phase_series: pg.PlotDataItem | None = None
         self._current_phase_series: pg.PlotDataItem | None = None
         self._active = False
+        self._plot_frequency = False
         self._unsub = bus.subscribe(PhaseTrackingStateChanged, self._on_state_changed)
         self._unsub_cfg = bus.subscribe(StabilizationConfigChanged, self._on_config_updated)
 
@@ -70,6 +73,17 @@ class StabilizationControlViewModel(QObject):
             self._update_curves()
         else:
             self._detach_curves()
+
+    @property
+    def plot_frequency(self) -> bool:
+        return self._plot_frequency
+
+    def set_plot_frequency(self, enabled: bool) -> None:
+        if enabled == self._plot_frequency:
+            return
+        self._plot_frequency = enabled
+        self._update_curves()
+        self.plot_mode_changed.emit(enabled)
 
     def _attach_curves(self) -> None:
         if self._plot_item is None or self._set_phase_series is None or self._current_phase_series is None:
@@ -109,15 +123,24 @@ class StabilizationControlViewModel(QObject):
         set_phase_curve = curve(self._config.set_phase.Rad)
         current_phase_curve = curve(p.theta0.Rad)
 
-        self._set_phase_series.setData(wl, set_phase_curve)
-        self._current_phase_series.setData(wl, current_phase_curve)
+        if self._plot_frequency:
+            # Ω(λ) = 2π·c/λ − 2π·c/λ0, same mapping as spectrum_fit (Base_Core/base_core/math/functions.py:45-49)
+            omega = 2.0 * np.pi * SPEED_OF_LIGHT / wl * 1e-3
+            omega0 = 2.0 * np.pi * SPEED_OF_LIGHT / lambda0 * 1e-3
+            x = omega - omega0
+        else:
+            x = wl
+
+        self._set_phase_series.setData(x, set_phase_curve)
+        self._current_phase_series.setData(x, current_phase_curve)
 
         if rescale and self._plot_item is not None:
-            x_pad = (wl[-1] - wl[0]) * 0.1
+            x_lo, x_hi = float(x.min()), float(x.max())
+            x_pad = (x_hi - x_lo) * 0.1
             y_lo = float(min(set_phase_curve.min(), current_phase_curve.min()))
             y_hi = float(max(set_phase_curve.max(), current_phase_curve.max()))
             y_pad = (y_hi - y_lo) * 0.1 or 1.0
-            self._plot_item.setXRange(float(wl[0]) - x_pad, float(wl[-1]) + x_pad, padding=0)
+            self._plot_item.setXRange(x_lo - x_pad, x_hi + x_pad, padding=0)
             self._plot_item.setYRange(y_lo - y_pad, y_hi + y_pad, padding=0)
 
     @property
