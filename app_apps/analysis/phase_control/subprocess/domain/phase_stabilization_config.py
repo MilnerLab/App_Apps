@@ -27,13 +27,12 @@ def _first_param(func: Callable) -> str:
 
 @dataclass
 class SpectralFitParams(PrimitiveSerde):
-    """Fit parameters for a two-arm interference spectrum with a skewed second arm.
+    """Fit parameters for a two-arm interference spectrum with independently skewed arms.
 
     Theta(Omega) = theta0 + theta1*Omega + theta2*Omega^2
-    Ghat(Omega)   = plain Gaussian envelope of the R (reference) arm
-    Shat_a(Omega) = peak-normalized skew-normal envelope of the L (grating) arm (eq:skewnorm)
-    B(Omega)      = R*Ghat(Omega) + L*Shat_a(Omega)
-    V(Omega)      = 2*sqrt(R*L*Ghat(Omega)*Shat_a(Omega)) / B(Omega)   (eq:V_skew)
+    Shat_a(Omega) = peak-normalized skew-normal envelope, alpha=0 reduces to a Gaussian (eq:skewnorm)
+    B(Omega)      = R*Shat_{alpha_R}(Omega) + L*Shat_{alpha_L}(Omega)
+    V(Omega)      = 2*sqrt(R*L*Shat_{alpha_R}(Omega)*Shat_{alpha_L}(Omega)) / B(Omega)   (eq:V_skew)
     I             = B(Omega) * (1 + V(Omega) * cos(Theta(Omega))) + offset
     """
 
@@ -43,9 +42,12 @@ class SpectralFitParams(PrimitiveSerde):
     theta0: Angle = Angle(0.0)                    # constant phase offset [rad]
     theta1: Time = Time(-0.3, Prefix.PICO)        # linear phase coeff [ps]  (approx -tau)
     theta2: GDD = GDD(0.0, Prefix.PICO)           # quadratic phase coeff [ps^2]
-    alpha: float = 0.0              # L-arm skewness (0 = Gaussian shape)
-    epsilon: float = 0.0            # L-arm skew location [rad/ps]
-    s: float = 9.2847               # L-arm skew scale [rad/ps]
+    alpha_R: float = 0.0            # R-arm skewness (0 = Gaussian shape)
+    epsilon_R: float = 0.0          # R-arm skew location [rad/ps]
+    s_R: float = 9.2847             # R-arm skew scale [rad/ps]
+    alpha_L: float = 0.0            # L-arm skewness (0 = Gaussian shape)
+    epsilon_L: float = 0.0          # L-arm skew location [rad/ps]
+    s_L: float = 9.2847             # L-arm skew scale [rad/ps]
     L: float = 0.25                 # L-arm (grating) amplitude
     offset: float = 0.0
     residual: float = 0.0
@@ -59,7 +61,8 @@ class SpectralFitParams(PrimitiveSerde):
     def _apply_bounds(self, params: lmfit.Parameters) -> None:
         params["R"].set(min=0.0)
         params["L"].set(min=0.0)
-        params["s"].set(min=1e-6)
+        params["s_R"].set(min=1e-6)
+        params["s_L"].set(min=1e-6)
 
     def fit_full(self, wavelengths_nm: np.ndarray,
                  intensities: np.ndarray) -> "SpectralFitParams":
@@ -74,8 +77,10 @@ class SpectralFitParams(PrimitiveSerde):
         half_pp = float((intensities.max() - intensities.min()) / 2)
         params["R"].set(value=half_pp / 2, min=0.0)
         params["L"].set(value=half_pp / 2, min=0.0)
-        params["alpha"].set(value=0.0)
-        params["epsilon"].set(value=0.0)
+        params["alpha_R"].set(value=0.0)
+        params["epsilon_R"].set(value=0.0)
+        params["alpha_L"].set(value=0.0)
+        params["epsilon_L"].set(value=0.0)
         params["offset"].set(value=float(intensities.min()))
         self._apply_bounds(params)
         result = model.fit(

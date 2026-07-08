@@ -16,4 +16,5 @@ class Uts150ccView(PanelView):
         ctrl = WorkerControlWidget(vm.start, vm.pause, vm.resume, vm.stop, parent=self)
         ctrl.set_status(vm.worker_status)
         vm.worker_state_changed.connect(ctrl.set_status)
-        self.body_layout.addWidget(ctrl)
+        self.header_layout.addWidget(ctrl)
+        self.header_widget.setVisible(True)

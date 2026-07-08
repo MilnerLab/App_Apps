@@ -20,7 +20,8 @@ _EDITABLE_STATES = (WorkerStatus.NEW, WorkerStatus.PAUSED)
 class PhaseConfigView(DirtyForm):
     _PARAMS_FIELDS: ClassVar[frozenset[str]] = frozenset({
         "lambda0", "delta_lambda_fwhm", "R", "L",
-        "theta0", "theta1", "theta2", "alpha", "epsilon", "s", "offset",
+        "theta0", "theta1", "theta2",
+        "alpha_R", "epsilon_R", "s_R", "alpha_L", "epsilon_L", "s_L", "offset",
     })
 
     _specs = {
@@ -31,9 +32,12 @@ class PhaseConfigView(DirtyForm):
         "theta0":              AngleSpec("Phase θ₀"),
         "theta1":              TimeSpec("θ₁", Prefix.PICO, min=-10.0, max=10.0),
         "theta2":              GDDSpec("θ₂", Prefix.PICO, min=-10.0, max=10.0),
-        "alpha":               FloatSpec("Skewness α",      -50.0,   50.0,   decimals=3, step=0.1),
-        "epsilon":             FloatSpec("Skew location ε", -100.0,  100.0,  decimals=3, step=0.1),
-        "s":                   FloatSpec("Skew scale s",      0.0001, 200.0, decimals=3, step=0.1),
+        "alpha_R":             FloatSpec("Skewness α (R)",      -50.0,   50.0,   decimals=3, step=0.1),
+        "epsilon_R":           FloatSpec("Skew location ε (R)", -100.0,  100.0,  decimals=3, step=0.1),
+        "s_R":                 FloatSpec("Skew scale s (R)",      0.0001, 200.0, decimals=3, step=0.1),
+        "alpha_L":             FloatSpec("Skewness α (L)",      -50.0,   50.0,   decimals=3, step=0.1),
+        "epsilon_L":           FloatSpec("Skew location ε (L)", -100.0,  100.0,  decimals=3, step=0.1),
+        "s_L":                 FloatSpec("Skew scale s (L)",      0.0001, 200.0, decimals=3, step=0.1),
         "offset":              FloatSpec("Offset",            0.0,   float("inf")),
         "wavelength_range":    RangeSpec(
             "Wavelength range",
@@ -45,7 +49,8 @@ class PhaseConfigView(DirtyForm):
     _groups = [
         ("Spectral Fit", [
             "lambda0", "delta_lambda_fwhm", "R", "L",
-            "theta0", "theta1", "theta2", "alpha", "epsilon", "s", "offset",
+            "theta0", "theta1", "theta2",
+            "alpha_R", "epsilon_R", "s_R", "alpha_L", "epsilon_L", "s_L", "offset",
         ]),
         ("Tracking", [
             "wavelength_range", "residuals_threshold", "avg_spectra",
@@ -53,7 +58,8 @@ class PhaseConfigView(DirtyForm):
     ]
     _readonly_when_running = frozenset({
         "lambda0", "delta_lambda_fwhm", "R", "L",
-        "theta0", "theta1", "theta2", "alpha", "epsilon", "s", "offset",
+        "theta0", "theta1", "theta2",
+        "alpha_R", "epsilon_R", "s_R", "alpha_L", "epsilon_L", "s_L", "offset",
     })
 
     def __init__(

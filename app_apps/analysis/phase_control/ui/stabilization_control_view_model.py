@@ -119,7 +119,9 @@ class StabilizationControlViewModel(QObject):
 
         def curve(theta0_rad: float) -> np.ndarray:
             return spectrum_fit_skew(wl, p.R, p.L, theta0_rad, theta1_ps, theta2_ps2,
-                                     p.alpha, p.epsilon, p.s, p.offset, lambda0, delta_lambda_fwhm)
+                                     p.alpha_R, p.epsilon_R, p.s_R,
+                                     p.alpha_L, p.epsilon_L, p.s_L,
+                                     p.offset, lambda0, delta_lambda_fwhm)
 
         set_phase_curve = curve(self._config.set_phase.Rad)
         current_phase_curve = curve(p.theta0.Rad)
