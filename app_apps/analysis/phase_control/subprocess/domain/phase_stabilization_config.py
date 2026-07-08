@@ -14,7 +14,7 @@ import lmfit
 import numpy as np
 
 from base_core.framework.serialization.serde import Primitive, PrimitiveSerde
-from base_core.math.functions import spectrum_fit
+from base_core.math.functions import spectrum_fit_skew
 from base_core.math.models import Angle, Range
 from base_core.quantities.enums import Prefix
 from base_core.quantities.models import Length, Time
@@ -27,42 +27,55 @@ def _first_param(func: Callable) -> str:
 
 @dataclass
 class SpectralFitParams(PrimitiveSerde):
-    """Fit parameters for a direct-polynomial interference spectrum.
+    """Fit parameters for a two-arm interference spectrum with a skewed second arm.
 
     Theta(Omega) = theta0 + theta1*Omega + theta2*Omega^2
-    I = A * env * (1 + V * cos(Theta)) + offset
+    Ghat(Omega)   = plain Gaussian envelope of the R (reference) arm
+    Shat_a(Omega) = peak-normalized skew-normal envelope of the L (grating) arm (eq:skewnorm)
+    B(Omega)      = R*Ghat(Omega) + L*Shat_a(Omega)
+    V(Omega)      = 2*sqrt(R*L*Ghat(Omega)*Shat_a(Omega)) / B(Omega)   (eq:V_skew)
+    I             = B(Omega) * (1 + V(Omega) * cos(Theta(Omega))) + offset
     """
 
     lambda0: Length = Length(802.38, Prefix.NANO)
     delta_lambda_fwhm: Length = Length(7.4728, Prefix.NANO)
-    A: float = 0.5
+    R: float = 0.25                 # R-arm (reference) amplitude
     theta0: Angle = Angle(0.0)                    # constant phase offset [rad]
     theta1: Time = Time(-0.3, Prefix.PICO)        # linear phase coeff [ps]  (approx -tau)
     theta2: GDD = GDD(0.0, Prefix.PICO)           # quadratic phase coeff [ps^2]
-    V: float = 1.0                  # fringe visibility [0, 1]
+    alpha: float = 0.0              # L-arm skewness (0 = Gaussian shape)
+    epsilon: float = 0.0            # L-arm skew location [rad/ps]
+    s: float = 9.2847               # L-arm skew scale [rad/ps]
+    L: float = 0.25                 # L-arm (grating) amplitude
     offset: float = 0.0
     residual: float = 0.0
 
-    KIND: ClassVar[str] = "direct"
+    KIND: ClassVar[str] = "skew"
 
     # --- fitting -----------------------------------------------------------
     def _fit_func(self) -> Callable:
-        return spectrum_fit
+        return spectrum_fit_skew
 
     def _apply_bounds(self, params: lmfit.Parameters) -> None:
-        params["V"].set(min=0.0, max=1.0)
+        params["R"].set(min=0.0)
+        params["L"].set(min=0.0)
+        params["s"].set(min=1e-6)
 
     def fit_full(self, wavelengths_nm: np.ndarray,
                  intensities: np.ndarray) -> "SpectralFitParams":
-        """Multi-parameter fit. lambda0/delta_lambda_fwhm fixed; A/offset seeded from data."""
+        """Multi-parameter fit. lambda0/delta_lambda_fwhm fixed; R/L/offset seeded from data."""
         func = self._fit_func()
         first_arg = _first_param(func)
         model = lmfit.Model(func, independent_vars=[first_arg])
         params = model.make_params(**self.to_fit_kwargs(func))
         params["lambda0"].set(vary=False)
         params["delta_lambda_fwhm"].set(vary=False)
-        # A is the mean amplitude; seed as half the peak-to-peak range
-        params["A"].set(value=float((intensities.max() - intensities.min()) / 2), min=0.0)
+        # R/L together play the old A's role; split evenly with no assumed skew
+        half_pp = float((intensities.max() - intensities.min()) / 2)
+        params["R"].set(value=half_pp / 2, min=0.0)
+        params["L"].set(value=half_pp / 2, min=0.0)
+        params["alpha"].set(value=0.0)
+        params["epsilon"].set(value=0.0)
         params["offset"].set(value=float(intensities.min()))
         self._apply_bounds(params)
         result = model.fit(

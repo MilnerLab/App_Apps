@@ -19,18 +19,21 @@ _EDITABLE_STATES = (WorkerStatus.NEW, WorkerStatus.PAUSED)
 
 class PhaseConfigView(DirtyForm):
     _PARAMS_FIELDS: ClassVar[frozenset[str]] = frozenset({
-        "lambda0", "delta_lambda_fwhm", "A",
-        "theta0", "theta1", "theta2", "V", "offset",
+        "lambda0", "delta_lambda_fwhm", "R", "L",
+        "theta0", "theta1", "theta2", "alpha", "epsilon", "s", "offset",
     })
 
     _specs = {
         "lambda0":             LengthSpec("λ₀",             Prefix.NANO, min=700,  max=1000),
         "delta_lambda_fwhm":   LengthSpec("FWHM bandwidth", Prefix.NANO, min=0.1,  max=50),
-        "A":                   FloatSpec("Amplitude",        0.0,  10.0),
+        "R":                   FloatSpec("Amplitude R (reference arm)", 0.0, 10.0),
+        "L":                   FloatSpec("Amplitude L (grating arm)",   0.0, 10.0),
         "theta0":              AngleSpec("Phase θ₀"),
         "theta1":              TimeSpec("θ₁", Prefix.PICO, min=-10.0, max=10.0),
         "theta2":              GDDSpec("θ₂", Prefix.PICO, min=-10.0, max=10.0),
-        "V":                   FloatSpec("Visibility",        0.0,   1.0),
+        "alpha":               FloatSpec("Skewness α",      -50.0,   50.0,   decimals=3, step=0.1),
+        "epsilon":             FloatSpec("Skew location ε", -100.0,  100.0,  decimals=3, step=0.1),
+        "s":                   FloatSpec("Skew scale s",      0.0001, 200.0, decimals=3, step=0.1),
         "offset":              FloatSpec("Offset",            0.0,   float("inf")),
         "wavelength_range":    RangeSpec(
             "Wavelength range",
@@ -41,16 +44,16 @@ class PhaseConfigView(DirtyForm):
     }
     _groups = [
         ("Spectral Fit", [
-            "lambda0", "delta_lambda_fwhm", "A",
-            "theta0", "theta1", "theta2", "V", "offset",
+            "lambda0", "delta_lambda_fwhm", "R", "L",
+            "theta0", "theta1", "theta2", "alpha", "epsilon", "s", "offset",
         ]),
         ("Tracking", [
             "wavelength_range", "residuals_threshold", "avg_spectra",
         ]),
     ]
     _readonly_when_running = frozenset({
-        "lambda0", "delta_lambda_fwhm", "A",
-        "theta0", "theta1", "theta2", "V", "offset",
+        "lambda0", "delta_lambda_fwhm", "R", "L",
+        "theta0", "theta1", "theta2", "alpha", "epsilon", "s", "offset",
     })
 
     def __init__(

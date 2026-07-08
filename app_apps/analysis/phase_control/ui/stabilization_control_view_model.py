@@ -10,7 +10,7 @@ from PySide6.QtGui import QColor, QPen
 from base_core.framework.events import EventBus
 from base_core.ipc.worker_handle import WorkerStatus
 from base_core.math.enums import AngleUnit
-from base_core.math.functions import spectrum_fit
+from base_core.math.functions import spectrum_fit_skew
 from base_core.math.models import Angle
 from base_core.quantities.constants import SPEED_OF_LIGHT
 from base_core.quantities.enums import Prefix
@@ -118,7 +118,8 @@ class StabilizationControlViewModel(QObject):
         theta2_ps2 = p.theta2.value(Prefix.PICO)
 
         def curve(theta0_rad: float) -> np.ndarray:
-            return spectrum_fit(wl, p.A, theta0_rad, theta1_ps, theta2_ps2, p.V, p.offset, lambda0, delta_lambda_fwhm)
+            return spectrum_fit_skew(wl, p.R, p.L, theta0_rad, theta1_ps, theta2_ps2,
+                                     p.alpha, p.epsilon, p.s, p.offset, lambda0, delta_lambda_fwhm)
 
         set_phase_curve = curve(self._config.set_phase.Rad)
         current_phase_curve = curve(p.theta0.Rad)
