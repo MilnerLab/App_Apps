@@ -15,7 +15,7 @@ from app_apps.analysis.phase_control.subprocess.messages import (
     SetStabilizationConfig,
     SpectrumProcessed,
 )
-from app_apps.io.control_readout.ell14.events import RequestRotate
+from app_apps.io.control_readout.rgv.events import RequestRotateRGV
 from app_apps.io.spectrometer.events import SpectrumAck
 from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
 
@@ -60,7 +60,7 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
         super()._on_disconnect()
 
     def _on_correction_available(self, msg: CorrectionAvailable) -> None:
-        self._bus.publish(RequestRotate(angle=msg.angle, sign=msg.sign))
+        self._bus.publish(RequestRotateRGV(angle=msg.angle, sign=msg.sign))
 
     def _on_spectrum_processed(self, msg: SpectrumProcessed) -> None:
         self._bus.publish(SpectrumAck(slot=msg.slot, item_id=msg.item_id, consumer_id=msg.consumer_id))
