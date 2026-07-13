@@ -61,9 +61,8 @@ class PhaseCorrector:
         self._correction_angle = self._convert_phase_to_hwp(phase_error)
         sign = 1 if float(self._correction_angle) >= 0 else -1
         log.info(
-            "PhaseCorrector: error %.3f deg exceeds tolerance -> HWP correction=%.4f deg (sign=%+d). "
-            "NOTE: this is a RELATIVE correction; RgvHandle currently applies it via RotateRGVTo "
-            "(absolute move_to), which may be the reason the plate does not keep tracking.",
+            "PhaseCorrector: error %.3f deg exceeds tolerance -> HWP correction=%.4f deg (sign=%+d) "
+            "[relative nudge, applied via RotateRGVBy/move_by]",
             phase_error.Deg, self._correction_angle.Deg, sign,
         )
         return CorrectionResult(angle=self._correction_angle, sign=sign)
