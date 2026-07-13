@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Callable
 
 from base_core.framework.events.event_bus import EventBus
@@ -18,6 +19,8 @@ from app_apps.analysis.phase_control.subprocess.messages import (
 from app_apps.io.control_readout.rgv.events import RequestRotateRGV
 from app_apps.io.spectrometer.events import SpectrumAck
 from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
+
+log = logging.getLogger(__name__)
 
 
 class PhaseStabilizationHandle(BaseWorkerHandle):
@@ -60,7 +63,10 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
         super()._on_disconnect()
 
     def _on_correction_available(self, msg: CorrectionAvailable) -> None:
-        self._bus.publish(RequestRotateRGV(angle=msg.angle, sign=msg.sign))
+        # msg.angle is already signed (PhaseCorrector bakes the direction into the angle);
+        # RequestRotateRGV only carries angle, so msg.sign is not forwarded.
+        log.info("Phase correction -> RGV rotate: angle=%s sign=%s", msg.angle, msg.sign)
+        self._bus.publish(RequestRotateRGV(angle=msg.angle))
 
     def _on_spectrum_processed(self, msg: SpectrumProcessed) -> None:
         self._bus.publish(SpectrumAck(slot=msg.slot, item_id=msg.item_id, consumer_id=msg.consumer_id))
