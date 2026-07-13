@@ -89,10 +89,9 @@ class PhaseStabilizationWorker(ThreadedWorker):
                 self._notify(ConfigSynced(config=self._config))
             phase = self._tracker.current_phase
             log.info(
-                "spectrum slot=%d: fit done, batch_committed=%s, residual=%.4g (threshold=%s), "
-                "current_phase=%s",
-                msg.slot, config_changed, self._config.params.residual,
-                self._config.residuals_threshold,
+                "spectrum slot=%d: batch_committed=%s, current_phase=%s "
+                "(per-fit/batch residual logged by PhaseTracker above)",
+                msg.slot, config_changed,
                 f"{phase.Deg:.3f} deg" if phase is not None else "None (no committed batch yet)",
             )
             if phase is not None:

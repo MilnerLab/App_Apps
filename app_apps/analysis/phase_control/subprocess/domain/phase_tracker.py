@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections import deque
 from typing import Deque
 
@@ -12,6 +13,8 @@ from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_confi
     SpectralFitParams,
     StabilizationConfig,
 )
+
+log = logging.getLogger(__name__)
 
 
 
@@ -39,7 +42,12 @@ class PhaseTracker:
         """Return True if the config was mutated (fit params updated)."""
         wl, inten = self._prepare(wavelengths_nm, intensities)
 
-        self._fits.append(self._config.fit(wl, inten))
+        fit = self._config.fit(wl, inten)
+        self._fits.append(fit)
+        log.info(
+            "PhaseTracker: fit residual=%.4g, theta0=%.3f deg  (batch %d/%d)",
+            fit.residual, fit.theta0.Deg, len(self._fits), self._config.avg_spectra,
+        )
 
         if len(self._fits) < self._config.avg_spectra:
             return False
@@ -48,6 +56,13 @@ class PhaseTracker:
         self._fits.clear()
 
         if averaged.residual >= self._config.residuals_threshold:
+            log.info(
+                "PhaseTracker: batch full -> averaged residual=%.4g >= threshold %s "
+                "-> REJECT batch, current_phase stays %s (raise residuals_threshold or "
+                "improve the fit to let it commit)",
+                averaged.residual, self._config.residuals_threshold,
+                f"{self.current_phase.Deg:.3f} deg" if self.current_phase is not None else "None",
+            )
             return False
 
         if self._config.fit_all_params:
@@ -57,6 +72,11 @@ class PhaseTracker:
             self._config.params.residual = averaged.residual
 
         self.current_phase = self._config.params.theta0
+        log.info(
+            "PhaseTracker: batch full -> averaged residual=%.4g < threshold %s -> COMMIT, "
+            "current_phase=%.3f deg",
+            averaged.residual, self._config.residuals_threshold, self.current_phase.Deg,
+        )
         return True
 
     def _prepare(
