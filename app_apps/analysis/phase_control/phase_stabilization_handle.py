@@ -34,6 +34,10 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
         self._unsub_config_synced: Callable[[], None] | None = None
 
     def subscribe(self) -> None:
+        log.info(
+            "PhaseStabilizationHandle: subscribing to CorrectionAvailable/SpectrumProcessed "
+            "and registering buffer consumer %r", self.CONSUMER_ID,
+        )
         self._subscribe_service(CorrectionAvailable, self._on_correction_available)
         self._subscribe_service(SpectrumProcessed, self._on_spectrum_processed)
         self._spectrum_writer.register_consumer(self.CONSUMER_ID)
@@ -65,7 +69,11 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
     def _on_correction_available(self, msg: CorrectionAvailable) -> None:
         # msg.angle is already signed (PhaseCorrector bakes the direction into the angle);
         # RequestRotateRGV only carries angle, so msg.sign is not forwarded.
-        log.info("Phase correction -> RGV rotate: angle=%s sign=%s", msg.angle, msg.sign)
+        log.info(
+            "PhaseStabilizationHandle: CorrectionAvailable angle=%.4f deg sign=%+d "
+            "-> publishing RequestRotateRGV",
+            msg.angle.Deg, msg.sign,
+        )
         self._bus.publish(RequestRotateRGV(angle=msg.angle))
 
     def _on_spectrum_processed(self, msg: SpectrumProcessed) -> None:

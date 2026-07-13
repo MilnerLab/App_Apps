@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Callable
 
 from base_core.framework.events.event_bus import EventBus
@@ -14,6 +15,8 @@ from app_apps.io.spectrometer.events import SpectrumAvailable
 if TYPE_CHECKING:
     from app_apps.analysis.phase_control.phase_stabilization_handle import PhaseStabilizationHandle
     from app_apps.analysis.phase_control.envelope_handle import EnvelopeHandle
+
+log = logging.getLogger(__name__)
 
 
 class PhaseControlService(SubprocessService):
@@ -75,8 +78,10 @@ class PhaseControlService(SubprocessService):
         return "app_apps.analysis.phase_control.subprocess.phase_control_process"
 
     def start(self) -> None:
+        log.info("PhaseControlService.start: launching subprocess (mode=%s)", self._mode.name)
         super().start()
         self._spectrum_unsub = self._bus.subscribe(SpectrumAvailable, self._on_spectrum_available)
+        log.info("PhaseControlService.start: subscribed to SpectrumAvailable; ready to forward spectra")
 
     def stop(self) -> None:
         if self._spectrum_unsub is not None:
@@ -86,8 +91,17 @@ class PhaseControlService(SubprocessService):
 
     def _on_spectrum_available(self, event: SpectrumAvailable) -> None:
         if self._connector is not None:
+            log.debug(
+                "PhaseControlService: SpectrumAvailable slot=%d item=%d -> ProcessSpectrum (mode=%s)",
+                event.slot, event.item_id, self._mode.name,
+            )
             self._connector.send(ProcessSpectrum(
                 slot=event.slot,
                 item_id=event.item_id,
                 timestamp_ns=event.timestamp_ns,
             ))
+        else:
+            log.warning(
+                "PhaseControlService: SpectrumAvailable slot=%d dropped — subprocess connector is None",
+                event.slot,
+            )

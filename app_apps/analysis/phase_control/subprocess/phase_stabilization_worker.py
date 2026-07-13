@@ -50,22 +50,36 @@ class PhaseStabilizationWorker(ThreadedWorker):
         self._corrector = PhaseCorrector()
         self._corrector.target_phase = self._config.set_phase
         self._paused = False
+        log.info(
+            "PhaseStabilizationWorker START: target_phase=%.3f deg, avg_spectra=%d, "
+            "residuals_threshold=%s, fit_all_params=%s",
+            self._config.set_phase.Deg, self._config.avg_spectra,
+            self._config.residuals_threshold, self._config.fit_all_params,
+        )
 
     def _pause(self) -> None:
         self._paused = True
+        log.info("PhaseStabilizationWorker PAUSE (will ignore incoming spectra)")
 
     def _resume(self) -> None:
         self._paused = False
+        log.info("PhaseStabilizationWorker RESUME")
 
     def _stop(self) -> None:
         self._tracker = PhaseTracker(self._config)
         self._corrector = PhaseCorrector()
         self._corrector.target_phase = self._config.set_phase
+        log.info("PhaseStabilizationWorker STOP (tracker/corrector reset)")
 
     @worker_thread
     def _on_spectrum(self, msg: ProcessSpectrum) -> None:
         try:
             if self._paused or self._tracker is None or self._corrector is None:
+                log.info(
+                    "spectrum slot=%d: SKIP (paused=%s tracker=%s corrector=%s)",
+                    msg.slot, self._paused,
+                    self._tracker is not None, self._corrector is not None,
+                )
                 return
             buf = self._get_buffer()
             wl = buf.wavelengths(msg.slot)
@@ -74,12 +88,29 @@ class PhaseStabilizationWorker(ThreadedWorker):
             if config_changed:
                 self._notify(ConfigSynced(config=self._config))
             phase = self._tracker.current_phase
+            log.info(
+                "spectrum slot=%d: fit done, batch_committed=%s, residual=%.4g (threshold=%s), "
+                "current_phase=%s",
+                msg.slot, config_changed, self._config.params.residual,
+                self._config.residuals_threshold,
+                f"{phase.Deg:.3f} deg" if phase is not None else "None (no committed batch yet)",
+            )
             if phase is not None:
                 result = self._corrector.update(phase)
                 if result is not None:
+                    log.info(
+                        "spectrum slot=%d: CORRECTION -> notifying main: angle=%.4f deg sign=%+d",
+                        msg.slot, result.angle.Deg, result.sign,
+                    )
                     self._notify(CorrectionAvailable(angle=result.angle, sign=result.sign))
+                else:
+                    log.info(
+                        "spectrum slot=%d: no correction emitted (within tolerance or phase==0) — "
+                        "see PhaseCorrector logs for the exact reason",
+                        msg.slot,
+                    )
         except Exception:
-            log.exception("PhaseTrackingWorker: error processing spectrum slot %d", msg.slot)
+            log.exception("PhaseStabilizationWorker: error processing spectrum slot %d", msg.slot)
         finally:
             self._notify(SpectrumProcessed(slot=msg.slot, item_id=msg.item_id, consumer_id=CONSUMER_ID))
 

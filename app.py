@@ -17,12 +17,18 @@ from base_core.framework.app.enums import AppStatus
 from base_core.framework.di import Container
 from base_core.framework.events import EventBus
 from base_core.framework.lifecycle.cleanup_collection import CleanupCollection
-from base_core.framework.log import setup_logging
+from base_core.framework.log import enable_console_logging, setup_logging
 from base_core.framework.modules import ModuleManager
 from base_qt.app.dispatcher import QtDispatcher
 
 
 def build_context() -> AppContext:
+    # setup_logging only wires the single "phase_control_lab" logger (propagate=False).
+    # enable_console_logging wires the ROOT logger so every module logger created via
+    # logging.getLogger(__name__) — across app_apps, base_core and control_readout —
+    # also prints to this terminal. Without it, none of the pipeline's log.info calls
+    # (fit -> correction -> rotate) are ever visible.
+    enable_console_logging(logging.INFO)
     log = setup_logging("phase_control_lab", level=logging.INFO)
     lifecycle = CleanupCollection()
     bus = EventBus()
