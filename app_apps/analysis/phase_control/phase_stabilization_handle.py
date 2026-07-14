@@ -60,7 +60,7 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
         super()._on_disconnect()
 
     def _on_correction_available(self, msg: CorrectionAvailable) -> None:
-        self._bus.publish(RequestRotateRGV(angle=msg.angle, sign=msg.sign))
+        self._bus.publish(RequestRotateRGV(angle=msg.angle))
 
     def _on_spectrum_processed(self, msg: SpectrumProcessed) -> None:
         self._bus.publish(SpectrumAck(slot=msg.slot, item_id=msg.item_id, consumer_id=msg.consumer_id))
