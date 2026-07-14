@@ -1,67 +1,83 @@
 from __future__ import annotations
 
-from collections import deque
-from typing import Deque
+import logging
+import math
+import time
 
 import numpy as np
 
-from app_apps.io.spectrometer.domain.helpers import normalize_spectrum
 from base_core.math.models import Angle
 from base_core.quantities.enums import Prefix
+from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import (
+    SeedController,
+    analyze_trace,
+)
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import (
-    SpectralFitParams,
     StabilizationConfig,
 )
 
+log = logging.getLogger(__name__)
 
+_TWO_PI = 2.0 * math.pi
 
 
 class PhaseTracker:
-    """
-    Tracks the current phase by fitting a model to incoming spectra.
+    """Per-shot fringe-phase tracker.
 
-    Accepts raw numpy arrays (wavelengths in nm, intensities) directly.
+    Each spectrum is windowed and fit by ``fringe_fit.analyze_trace`` (warm-started
+    from the previous good fit via a ``SeedController``, cold when forced). A fit
+    that passes ``config.accepts`` commits its outputs into ``config.params`` (for
+    the overlay) and sets ``current_phase`` = cubic phase at ``lambda_ref`` mod 2pi.
 
-    Mode is controlled by config.fit_all_params:
-      - True:  fit_full() each spectrum; commit all fit params when batch residual is below threshold
-      - False: fit_phase_only() each spectrum; commit only theta0 when batch residual is below threshold
-
-    current_phase is None until the first successful batch commit.
+    ``current_phase`` is None until the first accepted fit, then holds the last
+    committed value. ``update`` returns True only when a fresh fit committed.
     """
 
     current_phase: Angle | None = None
 
-    def __init__(self, start_config: StabilizationConfig) -> None:
-        self._config: StabilizationConfig = start_config
-        self._fits: Deque[SpectralFitParams] = deque(maxlen=self._config.avg_spectra)
+    def __init__(self, config: StabilizationConfig) -> None:
+        self._config = config
+        self._seeds = SeedController(config.redo_after_bad)
 
-    def update(self, wavelengths_nm: np.ndarray, intensities: np.ndarray) -> bool:
-        """Return True if the config was mutated (fit params updated)."""
-        wl, inten = self._prepare(wavelengths_nm, intensities)
+    def update(self, wavelengths_nm: np.ndarray, intensities: np.ndarray,
+               skipped: int = 0) -> bool:
+        """Fit one spectrum. ``skipped`` = frames coalesced away since the last
+        fit (drop-stale), reported in the log line. Returns True on a fresh commit."""
+        wl, inten = self._window(wavelengths_nm, intensities)
 
-        self._fits.append(self._config.fit(wl, inten))
+        seed = self._seeds.next_seed()
+        cold = seed is None
+        was_forcing = self._seeds.forcing_cold
 
-        if len(self._fits) < self._config.avg_spectra:
-            return False
+        t0 = time.perf_counter()
+        result = analyze_trace(wl, inten, self._config.params.tunables(), seed=seed)
+        ms = (time.perf_counter() - t0) * 1e3
 
-        averaged = type(self._config.params).mean(self._fits)
-        self._fits.clear()
+        good = self._config.accepts(result)
+        self._seeds.record(result, good)
 
-        if averaged.residual >= self._config.residuals_threshold:
-            return False
+        if good:
+            lam_ref = self._config.params.lambda_ref.value(Prefix.NANO)
+            phase_ref = result.phase_at(lam_ref)
+            self._config.params.commit(result, phase_ref)
+            self.current_phase = Angle(phase_ref % _TWO_PI)
+            log.info("fit %s ok  phi=%.3frad rms=%.0f inl=%.0f%% skip=%d %.0fms",
+                     "cold" if cold else "warm", phase_ref % _TWO_PI,
+                     result.rms_sig, result.inlier_pct, skipped, ms)
+            return True
 
-        if self._config.fit_all_params:
-            self._config.params.copy_from(averaged)
-        else:
-            self._config.params.theta0 = averaged.theta0
-            self._config.params.residual = averaged.residual
+        rms = "inf" if not np.isfinite(result.rms_sig) else f"{result.rms_sig:.0f}"
+        newly_cold = self._seeds.forcing_cold and not was_forcing
+        log.info("fit %s REJECT rms=%s inl=%.0f%% skip=%d %.0fms%s",
+                 "cold" if cold else "warm", rms, result.inlier_pct, skipped, ms,
+                 f" -> cold ({self._seeds.consecutive_bad} bad in a row)" if newly_cold else "")
+        return False
 
-        self.current_phase = self._config.params.theta0
-        return True
-
-    def _prepare(
-        self, wavelengths_nm: np.ndarray, intensities: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray]:
-        wl_min = self._config.wavelength_range.min.value(Prefix.NANO)
-        wl_max = self._config.wavelength_range.max.value(Prefix.NANO)
-        return normalize_spectrum(wavelengths_nm, intensities, wl_min, wl_max)
+    def _window(self, wavelengths_nm: np.ndarray,
+                intensities: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        wl = np.asarray(wavelengths_nm, dtype=float)
+        inten = np.asarray(intensities, dtype=float)
+        lo = self._config.wavelength_range.min.value(Prefix.NANO)
+        hi = self._config.wavelength_range.max.value(Prefix.NANO)
+        mask = (wl >= lo) & (wl <= hi)
+        return wl[mask], inten[mask]
