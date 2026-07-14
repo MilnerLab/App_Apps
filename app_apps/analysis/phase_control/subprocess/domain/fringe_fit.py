@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # =============================================================================
-# VENDORED DIAGNOSTIC — DO NOT MERGE TO MAIN.
-# Verbatim copy of Data/20260709/spectrometer/fit_fringes.py, dropped in to
-# swap the lmfit spectrum fit for this known-good NumPy fringe fitter while we
-# diagnose whether the fit is what's stalling phase stabilization. Kept
-# byte-for-byte identical to the standalone tool so behaviour matches the
-# _fit.png outputs. This whole approach stays on the feature branch only.
+# Fringe fitter for phase stabilization — adapted from the standalone tool
+# Data/20260709/spectrometer/fit_fringes.py (a pure-NumPy, self-contained fit).
+#
+# Adaptation for the live loop: analyze_trace() gained a `seed=` argument giving
+# it two paths (the standalone tool's behaviour is preserved exactly when
+# seed=None):
+#   COLD (seed=None): from-scratch guess via envelope fits + STFT-ridge frequency
+#                     search. Expensive/fragile; run on Start and to re-seed.
+#   WARM (seed=prev): fixed-lam0 reference frame; envelope + full cubic phase are
+#                     re-fit warm-started from the seed, skipping the STFT search.
+#                     Fast + robust — this is the per-shot stabilization path.
+# PhaseTracker drives cold vs warm and re-seeds when the fit degrades.
 # =============================================================================
 """
 fit_fringes.py
@@ -172,7 +178,7 @@ def stft_spectrogram(x, r, dw, win=161, hop=6):
 
 
 # --------------------------------------------------------------- FAST core routine
-def analyze_trace(w, y, lam_ref=802.0):
+def analyze_trace(w, y, lam_ref=802.0, seed=None):
     """
     Extract fringe phase and quadratic frequency.  Runs in < 10 ms.
 
@@ -181,6 +187,19 @@ def analyze_trace(w, y, lam_ref=802.0):
               comparable trace-to-trace (do NOT tie it to a per-trace feature such
               as the moving band peak).  Choose a wavelength inside the high-
               contrast band; 802 nm suits this laser.
+
+    seed    : optional prior result dict (the ``_warm`` payload of an earlier
+              analyze_trace).  When given, this runs the WARM path used by the live
+              stabilization loop: the (expensive, fragile) sliding-window FFT
+              frequency search and null detection are SKIPPED; instead the band
+              centre lam0, the envelope shapes and the cubic phase are all
+              warm-started from the seed and merely re-fit (envelopes + full cubic
+              phase) against this trace.  lam0 is held FIXED to the seed's value so
+              the phase reference frame — and hence phase_ref — stays comparable
+              across traces.  When None (the default) the COLD path runs: a from-
+              scratch guess via envelope fits + STFT ridge, identical to the
+              standalone tool.  Seed with the previous GOOD result each shot and
+              re-seed cold (seed=None) whenever the fit degrades.
 
     Model:  y(lam) = M(lam) + V(lam) * A(lam) * cos(phi(lam))
       U (Gaussian) and L (skew-Gaussian) are the parametric upper/lower line
@@ -211,16 +230,23 @@ def analyze_trace(w, y, lam_ref=802.0):
     lo, hi = int(idx[0]), int(idx[-1])
     W = w[lo:hi + 1]; Y = y[lo:hi + 1]
     N = W.size
-    lam0 = float(W[np.argmax(sm[lo:hi + 1])])
+    warm = seed is not None
+    # WARM: hold the band centre FIXED to the seed so u = lam - lam0 (and every phase
+    # coefficient expressed in it) transfers directly trace-to-trace; COLD: the band peak.
+    lam0 = float(seed["lam0"]) if warm else float(W[np.argmax(sm[lo:hi + 1])])
     x = W - lam0
 
     # 2) PARAMETRIC envelopes (line profile): Gaussian upper U, skew-Gaussian lower L,
     #    fit robustly through the fringe maxima / minima (trimming null & noise points).
+    #    WARM: warm-start each envelope from the seed's parameters so the robust fit
+    #    converges in a couple of iterations and can't wander to a wrong shape.
     ys = np.convolve(Y, np.array([1., 2, 3, 2, 1]) / 9.0, mode="same")  # de-quantise a touch
     M0 = _smooth(Y, 31)
     pk_all = _local_maxima(ys); tr_all = _local_minima(ys)
-    gu, keep_u = _fit_upper(x[pk_all], Y[pk_all].astype(float), floor)
-    sl, keep_l = _fit_lower(x[tr_all], Y[tr_all].astype(float), floor, abs(gu[3]))
+    gu, keep_u = _fit_upper(x[pk_all], Y[pk_all].astype(float), floor,
+                            init=seed["gu"] if warm else None)
+    sl, keep_l = _fit_lower(x[tr_all], Y[tr_all].astype(float), floor, abs(gu[3]),
+                            init=seed["sl"] if warm else None)
     U = _gauss(gu, x); L = _skewgauss(sl, x)
     Aprof = np.maximum(0.5 * (U - L), 1e-6)        # smooth line-profile half-amplitude
 
@@ -257,57 +283,66 @@ def analyze_trace(w, y, lam_ref=802.0):
     #      the through-zero fit.)  Use spacings, sign-flipped across the null.
     #    - a trace with NO null (dense monotonic fringes, ~5-6 samples/period): maxima
     #      spacing UNDERCOUNTS badly; the STFT spectral ridge tracks |f| faithfully.
-    dw = float(np.median(np.diff(W)))
-    keep = (ys[pk_all] - M0[pk_all] > 0.35 * Aprof[pk_all]) & (Aeff[pk_all] > 0.25 * Amax)
-    pk = pk_all[keep]
-    if lam_z is not None:
-        # --- maxima-spacing frequency (null / sparse regime) ---
-        xp = x[pk]; prom = ys[pk] - M0[pk]
-        sp = np.diff(xp); mid = 0.5 * (xp[:-1] + xp[1:])
-        good = sp < 1.8 * np.median(sp)           # drop spacings that jump the null
-        ff = 1.0 / sp
-        ww = np.minimum(prom[:-1], prom[1:])      # weight by fringe strength
-        mm, ff, ww = mid[good], ff[good], ww[good]
-        ff = ff * np.where(mm + lam0 < lam_z, 1.0, -1.0)   # signed: + blue, - red
-    else:
-        # --- STFT spectral-ridge frequency (dense regime) ---
-        mid_r, fabs_r, wt_r, cen_r = _stft_ridge(x, r, dw, Aeff)
-        gate = (Aeff[cen_r] > 0.30 * Amax) & (fabs_r < 0.9 * (0.5 / dw))
-        mm, ff, ww = mid_r[gate], fabs_r[gate], wt_r[gate]
-    def _robust_polyfit(cols):
-        Vf = np.column_stack(cols)
-        s = np.linalg.lstsq(Vf * ww[:, None], ff * ww, rcond=None)[0]
-        for _ in range(2):                        # robust outlier rejection
-            rr = ff - Vf @ s
-            ok = np.abs(rr) < 2.0 * (np.std(rr) + 1e-9)
-            s = np.linalg.lstsq((Vf * ww[:, None])[ok], (ff * ww)[ok], rcond=None)[0]
-        return s
-    one = np.ones_like(mm)
-    q0, q1, q2 = _robust_polyfit([one, mm, mm * mm])
-    # honour the MONOTONIC prior: if f'(u)=q1+2 q2 u changes sign on the band the
-    # quadratic has turned over (noisy low-SNR ridge fit).  Re-fit a quadratic with
-    # its vertex CLAMPED to the nearer band edge -- monotonic on the band by
-    # construction, yet keeps quadratic curvature (better than dropping to a line).
-    xlo, xhi = float(x.min()), float(x.max())
-    if q2 != 0.0 and (q1 + 2 * q2 * xlo) * (q1 + 2 * q2 * xhi) < 0:
-        u_vertex = -q1 / (2 * q2)
-        ue = xlo if abs(u_vertex - xlo) < abs(u_vertex - xhi) else xhi
-        q0, q2 = _robust_polyfit([one, mm * mm - 2 * ue * mm])   # vertex fixed at ue
-        q1 = -2 * q2 * ue
-
-    # 4) phase: integrate f to the phase shape, seed the cubic, polish with LM.
-    fr = q0 + q1 * x + q2 * x * x
-    Phi = np.concatenate([[0.0], np.cumsum(0.5 * (fr[1:] + fr[:-1]) * np.diff(x))]) * 2 * np.pi
     c = np.clip(r / Aeff, -1.5, 1.5)
     band = Aeff > 0.30 * Amax
     Wt = (Aeff / Amax)
     Wb = Wt * band
-    #   cubic-phase seed:  phi = a0 + a1 u + a2 u^2 + a3 u^3   (separable in amplitude).
-    #   phi0 from a linear cos/sin projection of the normalised signal at the seed.
-    Bm = np.vstack([np.cos(Phi), np.sin(Phi)]).T * Wb[:, None]
-    P, Qc = np.linalg.lstsq(Bm, c * Wb, rcond=None)[0]
-    phi0 = np.arctan2(-Qc, P)
-    th = np.array([phi0, 2 * np.pi * q0, np.pi * q1, (2 * np.pi / 3.0) * q2])
+    if warm:
+        # WARM: skip the STFT/maxima frequency search entirely — warm-start the cubic
+        # phase (whose derivative IS the quadratic frequency) straight from the seed and
+        # let the LM below re-fit a0..a3 against this trace.
+        th = np.array(seed["phase_coef"], dtype=float)
+        n_peaks = -1                              # not measured on the warm path
+    else:
+        dw = float(np.median(np.diff(W)))
+        keep = (ys[pk_all] - M0[pk_all] > 0.35 * Aprof[pk_all]) & (Aeff[pk_all] > 0.25 * Amax)
+        pk = pk_all[keep]
+        if lam_z is not None:
+            # --- maxima-spacing frequency (null / sparse regime) ---
+            xp = x[pk]; prom = ys[pk] - M0[pk]
+            sp = np.diff(xp); mid = 0.5 * (xp[:-1] + xp[1:])
+            good = sp < 1.8 * np.median(sp)           # drop spacings that jump the null
+            ff = 1.0 / sp
+            ww = np.minimum(prom[:-1], prom[1:])      # weight by fringe strength
+            mm, ff, ww = mid[good], ff[good], ww[good]
+            ff = ff * np.where(mm + lam0 < lam_z, 1.0, -1.0)   # signed: + blue, - red
+        else:
+            # --- STFT spectral-ridge frequency (dense regime) ---
+            mid_r, fabs_r, wt_r, cen_r = _stft_ridge(x, r, dw, Aeff)
+            gate = (Aeff[cen_r] > 0.30 * Amax) & (fabs_r < 0.9 * (0.5 / dw))
+            mm, ff, ww = mid_r[gate], fabs_r[gate], wt_r[gate]
+
+        def _robust_polyfit(cols):
+            Vf = np.column_stack(cols)
+            s = np.linalg.lstsq(Vf * ww[:, None], ff * ww, rcond=None)[0]
+            for _ in range(2):                        # robust outlier rejection
+                rr = ff - Vf @ s
+                ok = np.abs(rr) < 2.0 * (np.std(rr) + 1e-9)
+                s = np.linalg.lstsq((Vf * ww[:, None])[ok], (ff * ww)[ok], rcond=None)[0]
+            return s
+        one = np.ones_like(mm)
+        n_peaks = int(pk.size)
+        q0, q1, q2 = _robust_polyfit([one, mm, mm * mm])
+        # honour the MONOTONIC prior: if f'(u)=q1+2 q2 u changes sign on the band the
+        # quadratic has turned over (noisy low-SNR ridge fit).  Re-fit a quadratic with
+        # its vertex CLAMPED to the nearer band edge -- monotonic on the band by
+        # construction, yet keeps quadratic curvature (better than dropping to a line).
+        xlo, xhi = float(x.min()), float(x.max())
+        if q2 != 0.0 and (q1 + 2 * q2 * xlo) * (q1 + 2 * q2 * xhi) < 0:
+            u_vertex = -q1 / (2 * q2)
+            ue = xlo if abs(u_vertex - xlo) < abs(u_vertex - xhi) else xhi
+            q0, q2 = _robust_polyfit([one, mm * mm - 2 * ue * mm])   # vertex fixed at ue
+            q1 = -2 * q2 * ue
+
+        # 4) phase: integrate f to the phase shape, seed the cubic, polish with LM.
+        #   cubic-phase seed:  phi = a0 + a1 u + a2 u^2 + a3 u^3   (separable in amplitude).
+        #   phi0 from a linear cos/sin projection of the normalised signal at the seed.
+        fr = q0 + q1 * x + q2 * x * x
+        Phi = np.concatenate([[0.0], np.cumsum(0.5 * (fr[1:] + fr[:-1]) * np.diff(x))]) * 2 * np.pi
+        Bm = np.vstack([np.cos(Phi), np.sin(Phi)]).T * Wb[:, None]
+        P, Qc = np.linalg.lstsq(Bm, c * Wb, rcond=None)[0]
+        phi0 = np.arctan2(-Qc, P)
+        th = np.array([phi0, 2 * np.pi * q0, np.pi * q1, (2 * np.pi / 3.0) * q2])
     x2 = x * x
     x3 = x2 * x
     W2 = Wb * Wb
@@ -414,12 +449,42 @@ def analyze_trace(w, y, lam_ref=802.0):
         "lower_skew": {"baseline": float(sl[0]), "amp": float(sl[1]),
                        "center_nm": lam0 + float(sl[2]), "sigma_nm": abs(float(sl[3])),
                        "alpha": float(sl[4])},
-        "quality": {"fringe_corr": fr_corr, "rms": rms, "n_peaks": int(pk.size)},
+        "quality": {"fringe_corr": fr_corr, "rms": rms, "n_peaks": n_peaks},
+        # WARM payload: everything analyze_trace(..., seed=THIS) needs to warm-start the
+        # next trace (fixed lam0 frame, envelope shapes, cubic phase). Pass the previous
+        # GOOD result's "_warm" back in as `seed` to run the fast per-shot path.
+        "_warm": {
+            "lam0": float(lam0),
+            "gu": np.asarray(gu, float).copy(),
+            "sl": np.asarray(sl, float).copy(),
+            "phase_coef": (float(a0), float(a1), float(a2), float(a3)),
+            "freq_coef": (float(q0f), float(q1f), float(q2f)),
+        },
         "_arrays": {"W": W, "Y": Y, "x": x, "U": U, "L": L, "Aprof": Aprof,
                     "Mmid": Mmid, "V": V, "Aeff": Aeff, "model": model, "band": band,
                     "pk_all": pk_all, "tr_all": tr_all, "keep_u": keep_u,
                     "keep_l": keep_l, "freq": freq},
     }
+
+
+def display_curve(res, n=300):
+    """Model components for the on-screen overlay, downsampled to n points over the band.
+
+    Returns (wavelengths_nm, baseline_M, amplitude, phase) as plain lists.  The fitted
+    fringe model at the tracked phase is  M + amplitude*cos(phase); shift `phase` by a
+    constant (set_phase - phase_ref) to draw the same fit at any target phase.  This lets
+    the UI reconstruct both the current-phase and set-phase curves from one payload — no
+    stale legacy guess, and the set-phase line stays responsive without a new spectrum.
+    """
+    a = res["_arrays"]
+    W = a["W"]; M = a["Mmid"]; x = a["x"]
+    a0, a1, a2, a3 = res["phase_coef"]
+    ph = a0 + a1 * x + a2 * x ** 2 + a3 * x ** 3
+    amp = float(res["visibility"]) * a["Aeff"]
+    if W.size > n:
+        idx = np.linspace(0, W.size - 1, n).round().astype(int)
+        W, M, amp, ph = W[idx], M[idx], amp[idx], ph[idx]
+    return W.tolist(), M.tolist(), amp.tolist(), ph.tolist()
 
 
 # ---------------------------------------------------- envelope fits (diagnostic)
@@ -440,10 +505,17 @@ def _skewgauss(p, xx):
     return b + A * np.exp(-t * t / 2.0) * (1.0 + _erf(al * t / np.sqrt(2.0)))
 
 
-def _fit_upper(xs, ys, floor):
-    """Robust Gaussian through fringe maxima (trims null-depressed / noise points)."""
-    m = xs[np.argmax(ys)]; A = ys.max() - floor
-    p = np.array([floor, A, m, 2.5]); keep = np.ones(xs.size, bool)
+def _fit_upper(xs, ys, floor, init=None):
+    """Robust Gaussian through fringe maxima (trims null-depressed / noise points).
+
+    init : optional (b, A, m, s) warm-start (previous trace's fit); falls back to a
+    data-driven cold seed when None."""
+    if init is not None:
+        p = np.asarray(init, float).copy()
+    else:
+        m = xs[np.argmax(ys)]; A = ys.max() - floor
+        p = np.array([floor, A, m, 2.5])
+    keep = np.ones(xs.size, bool)
     for _ in range(4):
         xk, yk = xs[keep], ys[keep]
         for _ in range(8):                        # Gauss-Newton on kept samples
@@ -483,12 +555,18 @@ def _skew_jac(p, xx):
     return g, np.vstack([np.ones_like(xx), E * F, dm, ds, dal]).T
 
 
-def _fit_lower(xs, ys, floor, sig):
+def _fit_lower(xs, ys, floor, sig, init=None):
     """Robust POSITIVE-bump skewed Gaussian through fringe minima (trims elevated).
 
-    Uses an analytic Jacobian so it stays inside the runtime budget."""
-    m = xs[np.argmax(ys)]; A = max(ys.max() - floor, 1.0)
-    p = np.array([floor, A, m, sig * 1.2, -1.0]); keep = np.ones(xs.size, bool)
+    Uses an analytic Jacobian so it stays inside the runtime budget.  init : optional
+    (b, A, m, s, alpha) warm-start (previous trace's fit); cold seed when None."""
+    A = max(ys.max() - floor, 1.0)
+    if init is not None:
+        p = np.asarray(init, float).copy()
+    else:
+        m = xs[np.argmax(ys)]
+        p = np.array([floor, A, m, sig * 1.2, -1.0])
+    keep = np.ones(xs.size, bool)
     lo = np.array([floor - 4, 0.3, xs.min() - 3, 0.5, -8.0])
     hi = np.array([floor + 4, 3 * A + 5, xs.max() + 3, 25.0, 8.0])
     for _ in range(3):

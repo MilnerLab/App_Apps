@@ -42,6 +42,21 @@ class ConfigSynced(Message):
 
 @register
 @dataclass(frozen=True)
+class FitCurveAvailable(Message):
+    """Subprocess → main: components of the latest fringe-fit model, for the chart overlay.
+
+    The model at the tracked phase is  baseline + amplitude*cos(phase).  Shift `phase` by
+    (set_phase - phase_ref) to draw the same fit at the target phase.  Sent per good fit.
+    """
+    wavelengths_nm: list = None  # type: ignore[assignment]  # list[float]
+    baseline: list = None        # type: ignore[assignment]  # list[float]
+    amplitude: list = None       # type: ignore[assignment]  # list[float]
+    phase: list = None           # type: ignore[assignment]  # list[float]
+    phase_ref_rad: float = 0.0
+
+
+@register
+@dataclass(frozen=True)
 class SetStabilizationConfig(Request[OKReply]):
     config: StabilizationConfig = None  # type: ignore[assignment]
 

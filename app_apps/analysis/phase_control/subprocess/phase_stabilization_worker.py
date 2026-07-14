@@ -7,9 +7,11 @@ from base_core.ipc.threaded_worker import ThreadedWorker, worker_thread
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.analysis.phase_control.subprocess.domain.phase_tracker import PhaseTracker
 from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import PhaseCorrector
+from app_apps.analysis.phase_control.subprocess.domain import fringe_fit
 from app_apps.analysis.phase_control.subprocess.messages import (
     CorrectionAvailable,
     ConfigSynced,
+    FitCurveAvailable,
     ProcessSpectrum,
     SpectrumProcessed,
     SetStabilizationConfig,
@@ -87,6 +89,7 @@ class PhaseStabilizationWorker(ThreadedWorker):
             config_changed = self._tracker.update(wl, ins)
             if config_changed:
                 self._notify(ConfigSynced(config=self._config))
+                self._notify_fit_curve()
             phase = self._tracker.current_phase
             log.info(
                 "spectrum slot=%d: phase_updated=%s, current_phase=%s "
@@ -112,6 +115,21 @@ class PhaseStabilizationWorker(ThreadedWorker):
             log.exception("PhaseStabilizationWorker: error processing spectrum slot %d", msg.slot)
         finally:
             self._notify(SpectrumProcessed(slot=msg.slot, item_id=msg.item_id, consumer_id=CONSUMER_ID))
+
+    def _notify_fit_curve(self) -> None:
+        """Publish the components of the latest good fit for the chart overlay."""
+        res = self._tracker.last_result if self._tracker is not None else None
+        if res is None:
+            return
+        try:
+            wl, baseline, amplitude, phase = fringe_fit.display_curve(res)
+        except Exception:
+            log.exception("failed to build fit-curve overlay payload")
+            return
+        self._notify(FitCurveAvailable(
+            wavelengths_nm=wl, baseline=baseline, amplitude=amplitude, phase=phase,
+            phase_ref_rad=float(res["phase_ref"]),
+        ))
 
     @worker_thread
     def _on_set_config(self, msg: SetStabilizationConfig) -> None:

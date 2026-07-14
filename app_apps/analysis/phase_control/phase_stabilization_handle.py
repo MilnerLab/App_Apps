@@ -7,12 +7,17 @@ from base_core.framework.events.event_bus import EventBus
 from base_core.ipc.message import OKReply
 from base_core.ipc.service_connector import ServicePipelineConnector
 from base_core.ipc.worker_handle import BaseWorkerHandle
-from app_apps.analysis.phase_control.events import PhaseTrackingStateChanged, StabilizationConfigChanged
+from app_apps.analysis.phase_control.events import (
+    FitCurvesChanged,
+    PhaseTrackingStateChanged,
+    StabilizationConfigChanged,
+)
 
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.analysis.phase_control.subprocess.messages import (
     ConfigSynced,
     CorrectionAvailable,
+    FitCurveAvailable,
     SetStabilizationConfig,
     SpectrumProcessed,
 )
@@ -32,6 +37,7 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
         self._spectrum_writer = spectrum_writer
         self._config = config
         self._unsub_config_synced: Callable[[], None] | None = None
+        self._unsub_fit_curve: Callable[[], None] | None = None
 
     def subscribe(self) -> None:
         log.info(
@@ -53,18 +59,22 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
         # even before the worker has ever been started, or while it's paused.
         super()._bind(connector, service_bus)
         self._unsub_config_synced = service_bus.subscribe(ConfigSynced, self._on_config_synced)
+        self._unsub_fit_curve = service_bus.subscribe(FitCurveAvailable, self._on_fit_curve)
 
     def _unbind(self) -> None:
-        if self._unsub_config_synced is not None:
-            self._unsub_config_synced()
-            self._unsub_config_synced = None
+        self._drop_independent_subs()
         super()._unbind()
 
     def _on_disconnect(self) -> None:
-        if self._unsub_config_synced is not None:
-            self._unsub_config_synced()
-            self._unsub_config_synced = None
+        self._drop_independent_subs()
         super()._on_disconnect()
+
+    def _drop_independent_subs(self) -> None:
+        for attr in ("_unsub_config_synced", "_unsub_fit_curve"):
+            unsub = getattr(self, attr)
+            if unsub is not None:
+                unsub()
+                setattr(self, attr, None)
 
     def _on_correction_available(self, msg: CorrectionAvailable) -> None:
         # msg.angle is already signed (PhaseCorrector bakes the direction into the angle);
@@ -82,6 +92,15 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
     def _on_config_synced(self, msg: ConfigSynced) -> None:
         self._config.copy_from(msg.config)
         self._bus.publish(StabilizationConfigChanged())
+
+    def _on_fit_curve(self, msg: FitCurveAvailable) -> None:
+        self._bus.publish(FitCurvesChanged(
+            wavelengths_nm=msg.wavelengths_nm,
+            baseline=msg.baseline,
+            amplitude=msg.amplitude,
+            phase=msg.phase,
+            phase_ref_rad=msg.phase_ref_rad,
+        ))
 
     @property
     def config(self) -> StabilizationConfig:

@@ -10,12 +10,15 @@ from PySide6.QtGui import QColor, QPen
 from base_core.framework.events import EventBus
 from base_core.ipc.worker_handle import WorkerStatus
 from base_core.math.enums import AngleUnit
-from base_core.math.functions import spectrum_fit_skew
 from base_core.math.models import Angle
 from base_core.quantities.constants import SPEED_OF_LIGHT
 from base_core.quantities.enums import Prefix
 from base_qt.app.dispatcher import QtDispatcher
-from app_apps.analysis.phase_control.events import PhaseTrackingStateChanged, StabilizationConfigChanged
+from app_apps.analysis.phase_control.events import (
+    FitCurvesChanged,
+    PhaseTrackingStateChanged,
+    StabilizationConfigChanged,
+)
 
 if TYPE_CHECKING:
     from app_apps.analysis.phase_control.phase_stabilization_handle import PhaseStabilizationHandle
@@ -44,8 +47,12 @@ class StabilizationControlViewModel(QObject):
         self._current_phase_series: pg.PlotDataItem | None = None
         self._active = False
         self._plot_frequency = False
+        # Latest fringe-fit model components (from the subprocess); None until the first
+        # good fit. The overlay is rebuilt from these, NOT from a legacy skew guess.
+        self._fit: FitCurvesChanged | None = None
         self._unsub = bus.subscribe(PhaseTrackingStateChanged, self._on_state_changed)
         self._unsub_cfg = bus.subscribe(StabilizationConfigChanged, self._on_config_updated)
+        self._unsub_fit = bus.subscribe(FitCurvesChanged, self._on_fit_curves)
 
     def set_chart(self, plot_item: pg.PlotItem) -> None:
         self._plot_item = plot_item
@@ -106,28 +113,27 @@ class StabilizationControlViewModel(QObject):
         if self._set_phase_series is None or self._current_phase_series is None:
             return
 
-        p = self._config.params
-        wl = np.linspace(
-            self._config.wavelength_range.min.value(Prefix.NANO),
-            self._config.wavelength_range.max.value(Prefix.NANO),
-            300,
-        )
-        lambda0 = p.lambda0.value(Prefix.NANO)
-        delta_lambda_fwhm = p.delta_lambda_fwhm.value(Prefix.NANO)
-        theta1_ps = p.theta1.value(Prefix.PICO)
-        theta2_ps2 = p.theta2.value(Prefix.PICO)
+        # No fit yet → nothing to draw (don't fall back to a legacy guess curve).
+        if self._fit is None or not self._fit.wavelengths_nm:
+            self._set_phase_series.clear()
+            self._current_phase_series.clear()
+            return
 
-        def curve(theta0_rad: float) -> np.ndarray:
-            return spectrum_fit_skew(wl, p.R, p.L, theta0_rad, theta1_ps, theta2_ps2,
-                                     p.alpha_R, p.epsilon_R, p.s_R,
-                                     p.alpha_L, p.epsilon_L, p.s_L,
-                                     p.offset, lambda0, delta_lambda_fwhm)
+        # Reconstruct both curves from the fitted model components:
+        #   current = baseline + amplitude·cos(phase)
+        #   set     = baseline + amplitude·cos(phase + (set_phase − phase_ref))
+        wl = np.asarray(self._fit.wavelengths_nm, dtype=float)
+        baseline = np.asarray(self._fit.baseline, dtype=float)
+        amplitude = np.asarray(self._fit.amplitude, dtype=float)
+        phase = np.asarray(self._fit.phase, dtype=float)
+        shift = self._config.set_phase.Rad - self._fit.phase_ref_rad
 
-        set_phase_curve = curve(self._config.set_phase.Rad)
-        current_phase_curve = curve(p.theta0.Rad)
+        current_phase_curve = baseline + amplitude * np.cos(phase)
+        set_phase_curve = baseline + amplitude * np.cos(phase + shift)
 
         if self._plot_frequency:
             # Ω(λ) = 2π·c/λ − 2π·c/λ0, same mapping as spectrum_fit (Base_Core/base_core/math/functions.py:45-49)
+            lambda0 = self._config.params.lambda0.value(Prefix.NANO)
             omega = 2.0 * np.pi * SPEED_OF_LIGHT / wl * 1e-3
             omega0 = 2.0 * np.pi * SPEED_OF_LIGHT / lambda0 * 1e-3
             x = omega - omega0
@@ -181,5 +187,12 @@ class StabilizationControlViewModel(QObject):
         def _apply() -> None:
             self._update_curves()
             self.config_updated.emit()
+
+        self._dispatcher.post(_apply)
+
+    def _on_fit_curves(self, event: FitCurvesChanged) -> None:
+        def _apply() -> None:
+            self._fit = event
+            self._update_curves()
 
         self._dispatcher.post(_apply)
