@@ -4,7 +4,6 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QSizePolicy, QStackedWidget, QWidget
 
-from app_apps.io.spectrometer.domain.helpers import normalize_spectrum
 from base_core.quantities.constants import SPEED_OF_LIGHT
 from base_core.quantities.enums import Prefix
 from base_qt.ui.panel import Panel
@@ -82,11 +81,14 @@ class PhaseControlView(Panel):
             cfg = self.vm.stabilization_vm.config
             wl_min = cfg.wavelength_range.min.value(Prefix.NANO)
             wl_max = cfg.wavelength_range.max.value(Prefix.NANO)
-            x, intensities = normalize_spectrum(x, intensities, wl_min, wl_max)
+            # Window to the analysis band but keep RAW counts — the cubic-phase
+            # overlay (mid+half·cos) is drawn in raw counts, so they share a scale.
+            mask = (x >= wl_min) & (x <= wl_max)
+            x, intensities = x[mask], intensities[mask]
             if self.vm.stabilization_vm.plot_frequency:
-                lambda0_nm = cfg.params.lambda0.value(Prefix.NANO)
-                # Ω(λ) = 2π·c/λ − 2π·c/λ0, same mapping as spectrum_fit (Base_Core/base_core/math/functions.py:45-49)
+                lambda_ref_nm = cfg.params.lambda_ref.value(Prefix.NANO)
+                # Ω(λ) = 2π·c/λ − 2π·c/λ_ref (detuning axis, referenced to λ_ref).
                 omega = 2.0 * np.pi * SPEED_OF_LIGHT / x * 1e-3
-                omega0 = 2.0 * np.pi * SPEED_OF_LIGHT / lambda0_nm * 1e-3
+                omega0 = 2.0 * np.pi * SPEED_OF_LIGHT / lambda_ref_nm * 1e-3
                 x = omega - omega0
         self._live_curve.setData(x, intensities)

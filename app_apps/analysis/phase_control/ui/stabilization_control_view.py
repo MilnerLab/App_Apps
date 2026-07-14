@@ -35,7 +35,6 @@ class StabilizationControlView(QWidget):
         self._vm = vm
 
         self._phase_draft: FieldDraft[float] = FieldDraft(vm.config.set_phase.Deg)
-        self._fitall_draft: FieldDraft[bool] = FieldDraft(vm.config.fit_all_params)
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
@@ -60,16 +59,6 @@ class StabilizationControlView(QWidget):
         phase_row.addWidget(QLabel("Set phase"))
         phase_row.addWidget(self._phase_widget)
         fbox.addLayout(phase_row)
-
-        fitall_row = QHBoxLayout()
-        fitall_row.setSpacing(4)
-        self._fitall_ind = DirtyIndicator()
-        fitall_row.addWidget(self._fitall_ind)
-        self._fit_all_cb = QCheckBox("Fit all params")
-        self._fit_all_cb.setChecked(vm.config.fit_all_params)
-        fitall_row.addWidget(self._fit_all_cb)
-        fitall_row.addStretch()
-        fbox.addLayout(fitall_row)
 
         freq_row = QHBoxLayout()
         freq_row.setSpacing(4)
@@ -99,21 +88,17 @@ class StabilizationControlView(QWidget):
             self._phase_widget,
             lambda: self._phase_draft.set(phase_spec.get_value(self._phase_widget).Deg),
         )
-        self._fit_all_cb.checkStateChanged.connect(
-            lambda state: self._fitall_draft.set(state == Qt.CheckState.Checked)
-        )
         self._freq_cb.checkStateChanged.connect(
             lambda state: self._vm.set_plot_frequency(state == Qt.CheckState.Checked)
         )
         self._phase_draft.dirty_changed.connect(self._phase_ind.set_dirty)
-        self._fitall_draft.dirty_changed.connect(self._fitall_ind.set_dirty)
 
         self._apply_btn.clicked.connect(self._on_apply)
         self._config_btn.clicked.connect(config_dialog.open)
         vm.worker_state_changed.connect(self._on_worker_state_changed)
 
     def _on_apply(self) -> None:
-        self._vm.apply(self._phase_draft.commit(), self._fitall_draft.commit())
+        self._vm.apply(self._phase_draft.commit())
 
     def _on_worker_state_changed(self, status: WorkerStatus) -> None:
         self._worker_ctrl.set_status(status)

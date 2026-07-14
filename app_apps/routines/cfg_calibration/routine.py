@@ -37,15 +37,15 @@ class CfgCalibrationRoutine(BaseRoutine):
         self._dispatch(self._start_calibration)
 
     def _start_calibration(self) -> None:
+        # The cubic-phase fit has no full/phase-only mode toggle (every shot is a
+        # full fit), so calibration just resyncs the config to the subprocess.
         if self._handle.state == WorkerStatus.RUNNING:
-            self._config.fit_all_params = True
             self._handle.set_config(self._config)
         if self._step_list:
             self._step_list[0].start()
 
     def stop(self) -> None:
         if self._handle.state == WorkerStatus.RUNNING:
-            self._config.fit_all_params = False
             self._handle.set_config(self._config)
         step = self.current_step
         if step is not None:

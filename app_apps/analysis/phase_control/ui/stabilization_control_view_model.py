@@ -10,12 +10,12 @@ from PySide6.QtGui import QColor, QPen
 from base_core.framework.events import EventBus
 from base_core.ipc.worker_handle import WorkerStatus
 from base_core.math.enums import AngleUnit
-from base_core.math.functions import spectrum_fit_skew
 from base_core.math.models import Angle
 from base_core.quantities.constants import SPEED_OF_LIGHT
 from base_core.quantities.enums import Prefix
 from base_qt.app.dispatcher import QtDispatcher
 from app_apps.analysis.phase_control.events import PhaseTrackingStateChanged, StabilizationConfigChanged
+from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import display_curve
 
 if TYPE_CHECKING:
     from app_apps.analysis.phase_control.phase_stabilization_handle import PhaseStabilizationHandle
@@ -107,29 +107,24 @@ class StabilizationControlViewModel(QObject):
             return
 
         p = self._config.params
+        lambda_ref = p.lambda_ref.value(Prefix.NANO)
         wl = np.linspace(
             self._config.wavelength_range.min.value(Prefix.NANO),
             self._config.wavelength_range.max.value(Prefix.NANO),
             300,
         )
-        lambda0 = p.lambda0.value(Prefix.NANO)
-        delta_lambda_fwhm = p.delta_lambda_fwhm.value(Prefix.NANO)
-        theta1_ps = p.theta1.value(Prefix.PICO)
-        theta2_ps2 = p.theta2.value(Prefix.PICO)
-
-        def curve(theta0_rad: float) -> np.ndarray:
-            return spectrum_fit_skew(wl, p.R, p.L, theta0_rad, theta1_ps, theta2_ps2,
-                                     p.alpha_R, p.epsilon_R, p.s_R,
-                                     p.alpha_L, p.epsilon_L, p.s_L,
-                                     p.offset, lambda0, delta_lambda_fwhm)
-
-        set_phase_curve = curve(self._config.set_phase.Rad)
-        current_phase_curve = curve(p.theta0.Rad)
+        # Reconstruct the committed cubic-phase fringe: current = mid+half·cos(Φ),
+        # set = same envelopes/chirp shifted so the phase at λ_ref equals set_phase.
+        mid, half, phase = display_curve(p.as_result(), wl)
+        current_phase_curve = mid + half * np.cos(phase)
+        set_shift = self._config.set_phase.Rad - p.phase_ref
+        set_phase_curve = mid + half * np.cos(phase + set_shift)
 
         if self._plot_frequency:
-            # Ω(λ) = 2π·c/λ − 2π·c/λ0, same mapping as spectrum_fit (Base_Core/base_core/math/functions.py:45-49)
+            # Ω(λ) = 2π·c/λ − 2π·c/λ_ref (same detuning mapping as before, now
+            # referenced to the fit's λ_ref instead of the old model's λ0).
             omega = 2.0 * np.pi * SPEED_OF_LIGHT / wl * 1e-3
-            omega0 = 2.0 * np.pi * SPEED_OF_LIGHT / lambda0 * 1e-3
+            omega0 = 2.0 * np.pi * SPEED_OF_LIGHT / lambda_ref * 1e-3
             x = omega - omega0
         else:
             x = wl
@@ -166,10 +161,9 @@ class StabilizationControlViewModel(QObject):
     def stop(self) -> None:
         self._handle.stop()
 
-    def apply(self, set_phase_deg: float, fit_all_params: bool) -> None:
+    def apply(self, set_phase_deg: float) -> None:
         """Commit pending values into the shared config and send to the subprocess."""
         self._config.set_phase = Angle(set_phase_deg, AngleUnit.DEG)
-        self._config.fit_all_params = fit_all_params
         self._handle.set_config(self._config)
         self._update_curves(rescale=True)
 

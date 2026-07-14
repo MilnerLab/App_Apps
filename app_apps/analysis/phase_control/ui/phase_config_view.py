@@ -4,7 +4,7 @@ from typing import Any, ClassVar, TYPE_CHECKING
 
 from base_core.ipc.worker_handle import WorkerStatus
 from base_core.quantities.enums import Prefix
-from base_qt.ui.form import AngleSpec, BoolSpec, DirtyForm, FloatSpec, GDDSpec, IntSpec, LengthSpec, RangeSpec, TimeSpec
+from base_qt.ui.form import DirtyForm, FloatSpec, IntSpec, LengthSpec, RangeSpec
 
 
 if TYPE_CHECKING:
@@ -19,47 +19,38 @@ _EDITABLE_STATES = (WorkerStatus.NEW, WorkerStatus.PAUSED)
 
 class PhaseConfigView(DirtyForm):
     _PARAMS_FIELDS: ClassVar[frozenset[str]] = frozenset({
-        "lambda0", "delta_lambda_fwhm", "R", "L",
-        "theta0", "theta1", "theta2",
-        "alpha_R", "epsilon_R", "s_R", "alpha_L", "epsilon_L", "s_L", "offset",
+        "ratio", "sigma_init", "trunc_threshold", "phase_loss_scale",
+        "signal_loss_frac", "init_smooth_div", "lambda_ref",
     })
 
     _specs = {
-        "lambda0":             LengthSpec("λ₀",             Prefix.NANO, min=700,  max=1000),
-        "delta_lambda_fwhm":   LengthSpec("FWHM bandwidth", Prefix.NANO, min=0.1,  max=50),
-        "R":                   FloatSpec("Amplitude R (reference arm)", 0.0, 10.0),
-        "L":                   FloatSpec("Amplitude L (grating arm)",   0.0, 10.0),
-        "theta0":              AngleSpec("Phase θ₀"),
-        "theta1":              TimeSpec("θ₁", Prefix.PICO, min=-10.0, max=10.0),
-        "theta2":              GDDSpec("θ₂", Prefix.PICO, min=-10.0, max=10.0),
-        "alpha_R":             FloatSpec("Skewness α (R)",      -50.0,   50.0,   decimals=3, step=0.1),
-        "epsilon_R":           FloatSpec("Skew location ε (R)", -100.0,  100.0,  decimals=3, step=0.1),
-        "s_R":                 FloatSpec("Skew scale s (R)",      0.0001, 200.0, decimals=3, step=0.1),
-        "alpha_L":             FloatSpec("Skewness α (L)",      -50.0,   50.0,   decimals=3, step=0.1),
-        "epsilon_L":           FloatSpec("Skew location ε (L)", -100.0,  100.0,  decimals=3, step=0.1),
-        "s_L":                 FloatSpec("Skew scale s (L)",      0.0001, 200.0, decimals=3, step=0.1),
-        "offset":              FloatSpec("Offset",            0.0,   float("inf")),
-        "wavelength_range":    RangeSpec(
+        "ratio":             FloatSpec("Envelope pinball ratio",   1.0,   100.0,  decimals=1, step=1.0),
+        "sigma_init":        FloatSpec("Init σ guess (nm)",        0.1,   50.0,   decimals=2, step=0.5),
+        "trunc_threshold":   FloatSpec("Truncation threshold",    0.0,   1.0,    decimals=2, step=0.05),
+        "phase_loss_scale":  FloatSpec("Phase loss scale (rad)",  0.01,  100.0,  decimals=2, step=0.1),
+        "signal_loss_frac":  FloatSpec("Signal loss fraction",    0.01,  10.0,   decimals=2, step=0.1),
+        "init_smooth_div":   IntSpec("Null-init smoothing div",   2,     500),
+        "lambda_ref":        LengthSpec("λ_ref", Prefix.NANO, min=700, max=1000),
+        "wavelength_range":  RangeSpec(
             "Wavelength range",
             LengthSpec("", Prefix.NANO, min=700, max=1000),
         ),
-        "residuals_threshold": FloatSpec("Residuals threshold", 0.0, 1000.0, decimals=1, step=1.0),
-        "avg_spectra":         IntSpec("Averaging window", 1, 100),
+        "rms_threshold":     FloatSpec("Accept RMS below (cts)",  0.0,   10000.0, decimals=1, step=1.0),
+        "inlier_threshold":  FloatSpec("Accept inliers above (%)", 0.0,  100.0,   decimals=0, step=1.0),
+        "redo_after_bad":    IntSpec("Force cold after N bad",    1,     1000),
     }
     _groups = [
-        ("Spectral Fit", [
-            "lambda0", "delta_lambda_fwhm", "R", "L",
-            "theta0", "theta1", "theta2",
-            "alpha_R", "epsilon_R", "s_R", "alpha_L", "epsilon_L", "s_L", "offset",
+        ("Fit tunables", [
+            "ratio", "sigma_init", "trunc_threshold", "phase_loss_scale",
+            "signal_loss_frac", "init_smooth_div", "lambda_ref",
         ]),
         ("Tracking", [
-            "wavelength_range", "residuals_threshold", "avg_spectra",
+            "wavelength_range", "rms_threshold", "inlier_threshold", "redo_after_bad",
         ]),
     ]
     _readonly_when_running = frozenset({
-        "lambda0", "delta_lambda_fwhm", "R", "L",
-        "theta0", "theta1", "theta2",
-        "alpha_R", "epsilon_R", "s_R", "alpha_L", "epsilon_L", "s_L", "offset",
+        "ratio", "sigma_init", "trunc_threshold", "phase_loss_scale",
+        "signal_loss_frac", "init_smooth_div", "lambda_ref",
     })
 
     def __init__(
