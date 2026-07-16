@@ -50,7 +50,21 @@ class PhaseTracker:
         was_forcing = self._seeds.forcing_cold
 
         t0 = time.perf_counter()
-        result = analyze_trace(wl, inten, self._config.params.tunables(), seed=seed)
+        try:
+            result = analyze_trace(wl, inten, self._config.params.tunables(), seed=seed)
+        except Exception:
+            # A poisoned seed (e.g. the stale warm seed still held after a pause, once the
+            # phase has drifted) can make the solver raise. Drop it so the NEXT frame refits
+            # cold immediately — no waiting out redo_after_bad. This also avoids the livelock
+            # the SeedController contract warns about: record() is never reached on this path,
+            # so the bad counter can't advance on its own; without dropping the seed, next_seed()
+            # would hand back the same crashing warm seed forever (spectrum live, nothing commits
+            # — the classic post-pause "no fit").
+            self._seeds.drop_seed()
+            ms = (time.perf_counter() - t0) * 1e3
+            log.exception("fit %s ERROR skip=%d %.0fms -> cold (seed dropped)",
+                          "cold" if cold else "warm", skipped, ms)
+            return False
         ms = (time.perf_counter() - t0) * 1e3
 
         good = self._config.accepts(result)

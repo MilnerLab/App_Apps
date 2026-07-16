@@ -281,6 +281,17 @@ class SeedController:
         self._consecutive_bad = 0
         self._force_cold = False
 
+    def drop_seed(self) -> None:
+        """Discard the warm seed (and any forced-cold latch) so the next fit is cold.
+
+        For when the current seed is proven harmful — e.g. it made the solver raise —
+        so the loop refits cold on the very next frame instead of waiting out
+        ``redo_after_bad``. Unlike a bad-gate verdict, a crash yields no result to
+        reason about, so the only safe recovery is to start over cold."""
+        self._seed = None
+        self._consecutive_bad = 0
+        self._force_cold = False
+
     @property
     def forcing_cold(self) -> bool:
         return self._force_cold
