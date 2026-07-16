@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QSizePolicy, QStackedWidget, QWidget
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFileDialog,
+    QHBoxLayout,
+    QPushButton,
+    QSizePolicy,
+    QStackedWidget,
+    QWidget,
+)
 
 from base_core.quantities.constants import SPEED_OF_LIGHT
 from base_core.quantities.enums import Prefix
@@ -56,13 +64,25 @@ class PhaseControlView(Panel):
         self._stacked.addWidget(EnvelopeControlView(self.vm.envelope_vm))
         row.addWidget(self._stacked)
 
+        self._save_csv_btn = QPushButton("Save CSV")
+        self._save_csv_btn.setToolTip("Save the current spectrum to a CSV file")
+        row.addWidget(self._save_csv_btn)
+
         # chart takes all remaining vertical space; controls bar stays compact
         self.body_layout.addWidget(controls)
         self.body_layout.addWidget(self._plot, stretch=1)
 
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        self._save_csv_btn.clicked.connect(self._on_save_csv)
         self._connect(self.vm.spectrum_updated, self._on_spectrum_updated)
         self._connect(self.vm.stabilization_vm.plot_mode_changed, self._update_axis_label)
+
+    def _on_save_csv(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Spectrum", "spectrum.csv", "CSV files (*.csv);;All files (*)"
+        )
+        if path:
+            self.vm.save_spectrum_csv(path)
 
     def _on_mode_changed(self, index: int) -> None:
         self._stacked.setCurrentIndex(index)
