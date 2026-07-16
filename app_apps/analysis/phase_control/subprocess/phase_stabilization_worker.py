@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Callable, TYPE_CHECKING
 
 from base_core.ipc.threaded_worker import ThreadedWorker, worker_thread
@@ -42,6 +43,12 @@ class PhaseStabilizationWorker(ThreadedWorker):
         self._paused = True
         self._latest_item_id = -1     # newest arrival (drop-stale coalescing)
         self._skipped_since_fit = 0   # frames coalesced away since the last real fit
+        # --- throughput diagnostics (periodic THROUGHPUT log) ---
+        self._tp_t0 = time.perf_counter()
+        self._tp_fit = 0              # frames actually fit in the window
+        self._tp_skip = 0            # frames coalesced/dropped in the window
+        self._tp_commit = 0          # fits that passed the gate in the window
+        self._tp_fit_ms = 0.0        # summed fit wall time in the window
 
     def _setup(self) -> None:
         self._unsubs.append(self._bus.subscribe(SetStabilizationConfig, self._on_set_config))
@@ -88,13 +95,31 @@ class PhaseStabilizationWorker(ThreadedWorker):
             # the fit (still acked below) so we only ever fit the freshest frame.
             if msg.item_id != self._latest_item_id:
                 self._skipped_since_fit += 1
+                self._tp_skip += 1
                 return
             buf = self._get_buffer()
             wl = buf.wavelengths(msg.slot)
             ins = buf.intensities(msg.slot)
             skipped = self._skipped_since_fit
             self._skipped_since_fit = 0
+            t_fit0 = time.perf_counter()
             committed = self._tracker.update(wl, ins, skipped=skipped)
+            # Throughput accounting: distinguishes "spectra arrive slowly" (upstream
+            # acquisition/IPC) from "fits are slow" (compute) from "nothing commits"
+            # (the accept gate). Summary emitted every ~2 s.
+            self._tp_fit += 1
+            self._tp_fit_ms += (time.perf_counter() - t_fit0) * 1e3
+            self._tp_commit += int(committed)
+            now = time.perf_counter()
+            if now - self._tp_t0 >= 2.0:
+                dt = now - self._tp_t0
+                log.info("THROUGHPUT: %.2f frames/s in (%d fit + %d coalesced over %.1fs) | "
+                         "%d committed | mean fit %.0f ms",
+                         (self._tp_fit + self._tp_skip) / dt, self._tp_fit, self._tp_skip,
+                         dt, self._tp_commit, self._tp_fit_ms / max(self._tp_fit, 1))
+                self._tp_t0 = now
+                self._tp_fit = self._tp_skip = self._tp_commit = 0
+                self._tp_fit_ms = 0.0
             if committed:
                 self._notify(ConfigSynced(config=self._config))
                 phase = self._tracker.current_phase
