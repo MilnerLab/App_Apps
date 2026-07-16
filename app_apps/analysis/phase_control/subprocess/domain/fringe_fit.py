@@ -159,7 +159,7 @@ def analyze_trace(
         x = np.asarray(wl, dtype=float)
         y = np.asarray(intensity, dtype=float)
         if x.size < 16:
-            log.info("FITDIAG rejected: only %d points in window", x.size)
+            log.warning("FITDIAG rejected: only %d points in window", x.size)
             return rejected()
 
         # --- Envelopes: upper, and the (upper-lower) gap from the negated residual.
@@ -189,9 +189,9 @@ def analyze_trace(
         keep = (x >= x_left) & (x <= x_right)
         xk, nk, midk, halfk, yk = x[keep], n[keep], mid[keep], half[keep], y[keep]
         if xk.size < 16:
-            log.info("FITDIAG rejected: core has only %d points after truncation "
-                     "(trunc_threshold=%.2f, window %.1f-%.1f nm)",
-                     xk.size, t.trunc_threshold, float(x[0]), float(x[-1]))
+            log.warning("FITDIAG rejected: core has only %d points after truncation "
+                        "(trunc_threshold=%.2f, window %.1f-%.1f nm)",
+                        xk.size, t.trunc_threshold, float(x[0]), float(x[-1]))
             return rejected()
 
         # --- Hilbert analytic signal -> phase & instantaneous frequency.
@@ -232,7 +232,7 @@ def analyze_trace(
         #     cyc/nm but the fit frequency is far from it (or ~0 near l0), the folded/zero-
         #     carrier seed has trapped the cos fit in a wrong basin -- the expected failure
         #     on a good, many-fringe, no-null trace. f_fit(u)=(c1+2 c2 u+3 c3 u^2)/2pi.
-        if log.isEnabledFor(logging.INFO):
+        if log.isEnabledFor(logging.WARNING):
             absf = np.abs(f_inst)
             d10, d50, d90 = (float(v) for v in np.percentile(absf, [10, 50, 90]))
             nfringe_data = float(d50 * (xk[-1] - xk[0]))     # ~ number of fringes in core
@@ -240,7 +240,7 @@ def analyze_trace(
             def _f_fit(uu: float) -> float:
                 return float((csig[1] + 2 * csig[2] * uu + 3 * csig[3] * uu ** 2) / (2 * np.pi))
 
-            log.info(
+            log.warning(
                 "FITDIAG N=%d core=%d dx=%.4fnm span=%.1fnm | data_f=%.2f cyc/nm "
                 "(p10-90 %.2f-%.2f, ~%.0f fringes) | l0=%.2f has_null=%s | "
                 "SEED carrier c1=0 c2=A=%.4g | FIT c=[%.4g,%.4g,%.4g,%.4g] "
@@ -265,7 +265,7 @@ def analyze_trace(
             has_null=has_null,
         )
     except (RuntimeError, ValueError, np.linalg.LinAlgError) as e:
-        log.info("FITDIAG rejected: %s: %s", type(e).__name__, e)
+        log.warning("FITDIAG rejected: %s: %s", type(e).__name__, e)
         return rejected()
 
 

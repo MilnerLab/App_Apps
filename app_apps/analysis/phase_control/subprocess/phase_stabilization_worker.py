@@ -113,8 +113,8 @@ class PhaseStabilizationWorker(ThreadedWorker):
             now = time.perf_counter()
             if now - self._tp_t0 >= 2.0:
                 dt = now - self._tp_t0
-                log.info("THROUGHPUT: %.2f frames/s in (%d fit + %d coalesced over %.1fs) | "
-                         "%d committed | mean fit %.0f ms",
+                log.warning("THROUGHPUT: %.2f frames/s in (%d fit + %d coalesced over %.1fs) | "
+                            "%d committed | mean fit %.0f ms",
                          (self._tp_fit + self._tp_skip) / dt, self._tp_fit, self._tp_skip,
                          dt, self._tp_commit, self._tp_fit_ms / max(self._tp_fit, 1))
                 self._tp_t0 = now
