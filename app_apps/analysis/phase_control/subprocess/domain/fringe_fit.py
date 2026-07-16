@@ -15,12 +15,15 @@ intermediate Hilbert/folded fit.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import curve_fit, least_squares, minimize
 from scipy.signal import hilbert
+
+log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -156,6 +159,7 @@ def analyze_trace(
         x = np.asarray(wl, dtype=float)
         y = np.asarray(intensity, dtype=float)
         if x.size < 16:
+            log.info("FITDIAG rejected: only %d points in window", x.size)
             return rejected()
 
         # --- Envelopes: upper, and the (upper-lower) gap from the negated residual.
@@ -185,6 +189,9 @@ def analyze_trace(
         keep = (x >= x_left) & (x <= x_right)
         xk, nk, midk, halfk, yk = x[keep], n[keep], mid[keep], half[keep], y[keep]
         if xk.size < 16:
+            log.info("FITDIAG rejected: core has only %d points after truncation "
+                     "(trunc_threshold=%.2f, window %.1f-%.1f nm)",
+                     xk.size, t.trunc_threshold, float(x[0]), float(x[-1]))
             return rejected()
 
         # --- Hilbert analytic signal -> phase & instantaneous frequency.
@@ -219,6 +226,32 @@ def analyze_trace(
         resid_sig = yk - signal_model(csig, u, midk, halfk)
         rms_sig = float(np.sqrt(np.mean(resid_sig ** 2)))
 
+        # --- Diagnostic logging (INFO): the single most useful comparison is the DATA
+        #     fringe frequency (from the Hilbert |f|) against the SEED carrier (which the
+        #     folded model forces to 0) and the FINAL fitted frequency. If data_f is a few
+        #     cyc/nm but the fit frequency is far from it (or ~0 near l0), the folded/zero-
+        #     carrier seed has trapped the cos fit in a wrong basin -- the expected failure
+        #     on a good, many-fringe, no-null trace. f_fit(u)=(c1+2 c2 u+3 c3 u^2)/2pi.
+        if log.isEnabledFor(logging.INFO):
+            absf = np.abs(f_inst)
+            d10, d50, d90 = (float(v) for v in np.percentile(absf, [10, 50, 90]))
+            nfringe_data = float(d50 * (xk[-1] - xk[0]))     # ~ number of fringes in core
+
+            def _f_fit(uu: float) -> float:
+                return float((csig[1] + 2 * csig[2] * uu + 3 * csig[3] * uu ** 2) / (2 * np.pi))
+
+            log.info(
+                "FITDIAG N=%d core=%d dx=%.4fnm span=%.1fnm | data_f=%.2f cyc/nm "
+                "(p10-90 %.2f-%.2f, ~%.0f fringes) | l0=%.2f has_null=%s | "
+                "SEED carrier c1=0 c2=A=%.4g | FIT c=[%.4g,%.4g,%.4g,%.4g] "
+                "fit_f L/C/R=%.2f/%.2f/%.2f cyc/nm | rms=%.1f inl=%.0f%%",
+                x.size, xk.size, dx, float(xk[-1] - xk[0]),
+                d50, d10, d90, nfringe_data, l0, has_null, A,
+                csig[0], csig[1], csig[2], csig[3],
+                _f_fit(float(u[0])), _f_fit(float(np.median(u))), _f_fit(float(u[-1])),
+                rms_sig, inlier_pct,
+            )
+
         c_tuple = (float(csig[0]), float(csig[1]), float(csig[2]), float(csig[3]))
         return FringeFitResult(
             accepted=True,
@@ -231,7 +264,8 @@ def analyze_trace(
             inlier_pct=inlier_pct,
             has_null=has_null,
         )
-    except (RuntimeError, ValueError, np.linalg.LinAlgError):
+    except (RuntimeError, ValueError, np.linalg.LinAlgError) as e:
+        log.info("FITDIAG rejected: %s: %s", type(e).__name__, e)
         return rejected()
 
 
