@@ -35,7 +35,7 @@ class PhaseConfigView(DirtyForm):
             "Wavelength range",
             LengthSpec("", Prefix.NANO, min=700, max=1000),
         ),
-        "rms_threshold":     FloatSpec("Accept RMS below (cts)",  0.0,   10000.0, decimals=1, step=1.0),
+        "rms_frac_threshold": FloatSpec("Accept rms/amp below",   0.0,   2.0,     decimals=3, step=0.02),
         "inlier_threshold":  FloatSpec("Accept inliers above (%)", 0.0,  100.0,   decimals=0, step=1.0),
     }
     _groups = [
@@ -44,7 +44,7 @@ class PhaseConfigView(DirtyForm):
             "signal_loss_frac", "init_smooth_div", "lambda_ref",
         ]),
         ("Tracking", [
-            "wavelength_range", "rms_threshold", "inlier_threshold",
+            "wavelength_range", "rms_frac_threshold", "inlier_threshold",
         ]),
     ]
     _readonly_when_running = frozenset({

@@ -41,6 +41,7 @@ class FringeFitParams(PrimitiveSerde):
     c3: float = 0.0
     phase_ref: float = 0.0             # unwrapped cubic phase at lambda_ref (rad)
     rms_sig: float = 0.0               # last raw-signal fit RMS (counts)
+    rms_frac: float = 0.0              # last scale-free fit residual (rms / median half-amp)
     inlier_pct: float = 0.0            # last folded-phase inlier fraction (%)
 
     # --- convenience ---
@@ -62,6 +63,7 @@ class FringeFitParams(PrimitiveSerde):
         self.c0, self.c1, self.c2, self.c3 = (float(v) for v in r.csig)
         self.phase_ref = float(phase_ref)
         self.rms_sig = float(r.rms_sig)
+        self.rms_frac = float(r.rms_frac)
         self.inlier_pct = float(r.inlier_pct)
 
     def as_result(self) -> FringeFitResult:
@@ -75,6 +77,7 @@ class FringeFitParams(PrimitiveSerde):
             csig=(self.c0, self.c1, self.c2, self.c3),
             phase_ref=self.phase_ref,
             rms_sig=self.rms_sig,
+            rms_frac=self.rms_frac,
             inlier_pct=self.inlier_pct,
             has_null=False,
         )
@@ -118,14 +121,20 @@ class StabilizationConfig(PrimitiveSerde):
     wavelength_range: Range[Length] = field(default_factory=lambda: Range(
         Length(790, Prefix.NANO), Length(814, Prefix.NANO)
     ))
-    rms_threshold: float = 5.0          # accept if raw-signal RMS below this (counts)
+    rms_frac_threshold: float = 0.30    # accept if scale-free fit residual below this
+                                        # (rms / median half-amp). Replaces the old absolute
+                                        # rms_threshold (counts), which rejected bright traces:
+                                        # a good fit's rms scales with fringe amplitude, so an
+                                        # absolute count gate tuned on dim traces (good ~1 ct)
+                                        # rejected bright ones (good ~10 ct). 0.30 is permissive;
+                                        # tighten from the logged rms_frac (good live fits ~0.1).
     inlier_threshold: float = 80.0      # accept if folded-phase inliers above this (%)
     set_phase: Angle = field(default_factory=lambda: Angle(0))
 
     def accepts(self, r: FringeFitResult) -> bool:
-        """Per-shot quality gate."""
+        """Per-shot quality gate (amplitude-relative; see rms_frac_threshold)."""
         return (r.accepted
-                and r.rms_sig < self.rms_threshold
+                and r.rms_frac < self.rms_frac_threshold
                 and r.inlier_pct > self.inlier_threshold)
 
     def copy_from(self, other: "StabilizationConfig") -> None:
@@ -141,7 +150,7 @@ class StabilizationConfig(PrimitiveSerde):
                 "min": self.wavelength_range.min.to_primitive(),
                 "max": self.wavelength_range.max.to_primitive(),
             },
-            "rms_threshold": self.rms_threshold,
+            "rms_frac_threshold": self.rms_frac_threshold,
             "inlier_threshold": self.inlier_threshold,
             "set_phase": self.set_phase.to_primitive(),
         }
@@ -155,7 +164,9 @@ class StabilizationConfig(PrimitiveSerde):
                 Length.from_primitive(wl_range["min"]),
                 Length.from_primitive(wl_range["max"]),
             ),
-            rms_threshold=float(v["rms_threshold"]),
+            # Backward-compat: a config persisted before the gate switch has
+            # "rms_threshold" (counts) and no "rms_frac_threshold" -> use the default.
+            rms_frac_threshold=float(v.get("rms_frac_threshold", 0.30)),
             inlier_threshold=float(v["inlier_threshold"]),
             set_phase=Angle.from_primitive(v["set_phase"]),
         )

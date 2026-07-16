@@ -53,7 +53,7 @@ class FitTunables:
 @dataclass(frozen=True)
 class FringeFitResult:
     """Outcome of one trace fit. ``accepted`` is a solver-success flag only; the
-    caller applies its own quality gate on ``rms_sig`` / ``inlier_pct``."""
+    caller applies its own quality gate on ``rms_frac`` / ``inlier_pct``."""
     accepted: bool
     pU: tuple[float, float, float, float]     # upper envelope Gaussian (a, mu, sigma, off)
     pLn: tuple[float, float, float, float]    # gap (U-L) Gaussian (a, mu, sigma, off)
@@ -61,6 +61,10 @@ class FringeFitResult:
     csig: tuple[float, float, float, float]   # cubic phase coeffs (c0, c1, c2, c3) in u=lambda-l0
     phase_ref: float                          # phase_poly(csig, lambda_ref - l0) [rad]
     rms_sig: float                            # raw-signal fit RMS (counts)
+    rms_frac: float                           # rms_sig / median(half-amplitude): scale-free fit
+                                              # residual (~0 perfect, ~0.7 = fit no better than
+                                              # a flat line). Amplitude-relative so the accept
+                                              # gate works on bright and dim traces alike.
     inlier_pct: float                         # folded-phase inlier fraction (%)
     has_null: bool                            # null lies inside the truncated window
 
@@ -73,7 +77,7 @@ def rejected() -> FringeFitResult:
     """A fit that failed to converge / had too little signal. NaN-filled."""
     nan4 = (float("nan"),) * 4
     return FringeFitResult(False, nan4, nan4, float("nan"), nan4,
-                           float("nan"), float("inf"), 0.0, False)
+                           float("nan"), float("inf"), float("inf"), 0.0, False)
 
 
 # --------------------------------------------------------------------------- #
@@ -225,6 +229,10 @@ def analyze_trace(
                              cubic_init, loss="soft_l1", f_scale=f_scale_sig).x
         resid_sig = yk - signal_model(csig, u, midk, halfk)
         rms_sig = float(np.sqrt(np.mean(resid_sig ** 2)))
+        # Scale-free residual: normalize by the fringe half-amplitude so the accept
+        # gate is independent of how bright the trace is. A perfect fit -> ~0; a fit
+        # no better than the envelope midline -> ~1/sqrt(2). This is the gate metric.
+        rms_frac = rms_sig / (float(np.median(halfk)) + 1e-9)
 
         # --- Diagnostic logging (INFO): the single most useful comparison is the DATA
         #     fringe frequency (from the Hilbert |f|) against the SEED carrier (which the
@@ -244,12 +252,12 @@ def analyze_trace(
                 "FITDIAG N=%d core=%d dx=%.4fnm span=%.1fnm | data_f=%.2f cyc/nm "
                 "(p10-90 %.2f-%.2f, ~%.0f fringes) | l0=%.2f has_null=%s | "
                 "SEED carrier c1=0 c2=A=%.4g | FIT c=[%.4g,%.4g,%.4g,%.4g] "
-                "fit_f L/C/R=%.2f/%.2f/%.2f cyc/nm | rms=%.1f inl=%.0f%%",
+                "fit_f L/C/R=%.2f/%.2f/%.2f cyc/nm | rms=%.1f rms_frac=%.3f inl=%.0f%%",
                 x.size, xk.size, dx, float(xk[-1] - xk[0]),
                 d50, d10, d90, nfringe_data, l0, has_null, A,
                 csig[0], csig[1], csig[2], csig[3],
                 _f_fit(float(u[0])), _f_fit(float(np.median(u))), _f_fit(float(u[-1])),
-                rms_sig, inlier_pct,
+                rms_sig, rms_frac, inlier_pct,
             )
 
         c_tuple = (float(csig[0]), float(csig[1]), float(csig[2]), float(csig[3]))
@@ -261,6 +269,7 @@ def analyze_trace(
             csig=c_tuple,
             phase_ref=float("nan"),                  # filled by caller via phase_at(lambda_ref)
             rms_sig=rms_sig,
+            rms_frac=rms_frac,
             inlier_pct=inlier_pct,
             has_null=has_null,
         )
