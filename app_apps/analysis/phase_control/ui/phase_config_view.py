@@ -37,7 +37,6 @@ class PhaseConfigView(DirtyForm):
         ),
         "rms_threshold":     FloatSpec("Accept RMS below (cts)",  0.0,   10000.0, decimals=1, step=1.0),
         "inlier_threshold":  FloatSpec("Accept inliers above (%)", 0.0,  100.0,   decimals=0, step=1.0),
-        "redo_after_bad":    IntSpec("Force cold after N bad",    1,     1000),
     }
     _groups = [
         ("Fit tunables", [
@@ -45,7 +44,7 @@ class PhaseConfigView(DirtyForm):
             "signal_loss_frac", "init_smooth_div", "lambda_ref",
         ]),
         ("Tracking", [
-            "wavelength_range", "rms_threshold", "inlier_threshold", "redo_after_bad",
+            "wavelength_range", "rms_threshold", "inlier_threshold",
         ]),
     ]
     _readonly_when_running = frozenset({

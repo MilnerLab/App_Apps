@@ -1,5 +1,6 @@
-"""PR2 tests: the warm path reproduces the cold fit on a stable trace, and the
-SeedController warm/cold latch behaves per contract.
+"""Cold-fit tests: every ``analyze_trace`` call is a fresh, seed-independent fit —
+there is NO warm-starting. Two independent fits of the same trace must be bit-identical
+(no hidden state carried between calls), and a cold fit must succeed on the real traces.
 
 Run directly:  python test/fringe_seed_test.py
 """
@@ -13,7 +14,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import (  # noqa: E402
-    FitTunables, FringeFitResult, SeedController, analyze_trace, rejected,
+    FitTunables, analyze_trace,
 )
 
 DATA_DIR = r"D:\Documents\University\UBC research\2026\Data\20260709\spectrometer"
@@ -32,76 +33,33 @@ def _load(name: str) -> tuple[np.ndarray, np.ndarray]:
     return d.Wavelength.values, d.Amplitude.values
 
 
-def test_warm_matches_cold() -> None:
-    """Warm-starting from a good fit of the same trace must land on the same
-    optimum (and skip the null search) — so the per-shot warm path is stable."""
+def test_cold_fit_is_seed_independent() -> None:
+    """Fitting the same trace twice, each from scratch, must give the SAME optimum to
+    the bit — the fit carries no state between calls, so no previous frame can bias it."""
     t = FitTunables()
     for name in FILES:
         x, y = _load(name)
-        cold = analyze_trace(x, y, t, seed=None)
-        assert cold.accepted
-        warm = analyze_trace(x, y, t, seed=cold)
-        assert warm.accepted
-        # Warm re-optimizes from the seed, so it lands on the same optimum to
-        # numerical noise (measured drift: l0 ~1e-5 nm, phase_ref ~1e-5 rad).
-        assert abs(warm.l0 - cold.l0) < 1e-3, f"{name}: warm l0 drifted"
+        a = analyze_trace(x, y, t)
+        b = analyze_trace(x, y, t)
+        assert a.accepted and b.accepted, f"{name}: cold fit rejected"
+        assert a.l0 == b.l0, f"{name}: l0 not reproducible ({a.l0} vs {b.l0})"
         for i in range(4):
-            assert abs(warm.csig[i] - cold.csig[i]) <= max(1e-6, 1e-2 * abs(cold.csig[i])), \
-                f"{name}: warm c{i} drifted"
-        assert abs(warm.phase_at(LAMBDA_REF) - cold.phase_at(LAMBDA_REF)) < 1e-3, \
-            f"{name}: warm phase_ref drifted"
-        print(f"OK  warm==cold  {name:24s} l0={warm.l0:.3f} "
-              f"phi_ref={warm.phase_at(LAMBDA_REF):.4f}")
+            assert a.csig[i] == b.csig[i], f"{name}: c{i} not reproducible"
+        assert a.phase_at(LAMBDA_REF) == b.phase_at(LAMBDA_REF), \
+            f"{name}: phase_ref not reproducible"
+        print(f"OK  cold==cold  {name:24s} l0={a.l0:.3f} "
+              f"phi_ref={a.phase_at(LAMBDA_REF):.4f}")
 
 
-def _good() -> FringeFitResult:
-    return FringeFitResult(True, (1, 0, 1, 0), (1, 0, 1, 0), 800.0,
-                           (0.1, 0.0, 0.0, 0.0), 0.1, 1.0, 99.0, False)
-
-
-def test_seed_controller_latch() -> None:
-    sc = SeedController(redo_after_bad=3)
-    # No seed yet -> cold.
-    assert sc.next_seed() is None
-
-    # A good fit becomes the warm seed.
-    g = _good()
-    sc.record(g, good=True)
-    assert sc.next_seed() is g and not sc.forcing_cold
-
-    # Bad fits accumulate but do NOT overwrite the seed until the latch trips.
-    sc.record(rejected(), good=False)
-    sc.record(rejected(), good=False)
-    assert sc.next_seed() is g and not sc.forcing_cold and sc.consecutive_bad == 2
-
-    # Third consecutive bad trips forced-cold.
-    sc.record(rejected(), good=False)
-    assert sc.forcing_cold and sc.next_seed() is None
-
-    # A good (necessarily cold) fit clears the latch and reseeds.
-    g2 = _good()
-    sc.record(g2, good=True)
-    assert not sc.forcing_cold and sc.next_seed() is g2 and sc.consecutive_bad == 0
-
-    # A single good fit resets a partial bad streak.
-    sc.record(rejected(), good=False)
-    assert sc.consecutive_bad == 1
-    sc.record(_good(), good=True)
-    assert sc.consecutive_bad == 0 and not sc.forcing_cold
-    print("OK  SeedController latch: forces cold after N bad, clears on good")
-
-
-def test_seed_controller_reset() -> None:
-    sc = SeedController(redo_after_bad=2)
-    sc.record(_good(), good=True)
-    sc.record(rejected(), good=False)
-    sc.reset()
-    assert sc.next_seed() is None and not sc.forcing_cold and sc.consecutive_bad == 0
-    print("OK  SeedController reset clears all state")
+def test_analyze_trace_takes_no_seed() -> None:
+    """The warm-start entry point is gone: analyze_trace must not accept a ``seed``."""
+    import inspect
+    params = inspect.signature(analyze_trace).parameters
+    assert "seed" not in params, "analyze_trace still exposes a warm-start seed parameter"
+    print("OK  analyze_trace has no seed parameter (warm-starting removed)")
 
 
 if __name__ == "__main__":
-    test_warm_matches_cold()
-    test_seed_controller_latch()
-    test_seed_controller_reset()
-    print("\nAll PR2 tests passed.")
+    test_cold_fit_is_seed_independent()
+    test_analyze_trace_takes_no_seed()
+    print("\nAll cold-fit tests passed.")

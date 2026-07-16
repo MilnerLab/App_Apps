@@ -24,7 +24,8 @@ class FringeFitParams(PrimitiveSerde):
     # --- tunables (user-editable inputs to fringe_fit.analyze_trace) ---
     ratio: float = 10.0                # pinball penalty ratio above:below
     sigma_init: float = 4.0            # initial envelope sigma guess (nm)
-    trunc_threshold: float = 0.25      # high-visibility core keep-level
+    trunc_threshold: float = 0.40      # high-visibility core keep-level (raised 0.25 -> 0.40;
+                                       # harness-tuned plateau centre -- see FitTunables)
     phase_loss_scale: float = 1.0      # folded-phase soft-L1 scale (rad)
     signal_loss_frac: float = 1.0      # raw-signal soft-L1 scale (fraction of half-amp)
     init_smooth_div: int = 50          # cold null-init smoothing divisor
@@ -119,7 +120,6 @@ class StabilizationConfig(PrimitiveSerde):
     ))
     rms_threshold: float = 5.0          # accept if raw-signal RMS below this (counts)
     inlier_threshold: float = 80.0      # accept if folded-phase inliers above this (%)
-    redo_after_bad: int = 10            # force a cold fit after this many consecutive rejects
     set_phase: Angle = field(default_factory=lambda: Angle(0))
 
     def accepts(self, r: FringeFitResult) -> bool:
@@ -143,7 +143,6 @@ class StabilizationConfig(PrimitiveSerde):
             },
             "rms_threshold": self.rms_threshold,
             "inlier_threshold": self.inlier_threshold,
-            "redo_after_bad": self.redo_after_bad,
             "set_phase": self.set_phase.to_primitive(),
         }
 
@@ -158,6 +157,5 @@ class StabilizationConfig(PrimitiveSerde):
             ),
             rms_threshold=float(v["rms_threshold"]),
             inlier_threshold=float(v["inlier_threshold"]),
-            redo_after_bad=int(v["redo_after_bad"]),
             set_phase=Angle.from_primitive(v["set_phase"]),
         )

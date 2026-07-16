@@ -30,7 +30,13 @@ from scipy.signal import hilbert
 class FitTunables:
     ratio: float = 10.0          # pinball penalty ratio above:below (higher hugs crests)
     sigma_init: float = 4.0      # initial Gaussian sigma guess (nm) for the L2 warm start
-    trunc_threshold: float = 0.25  # keep where gap >= min + THRESHOLD*(max-min)
+    trunc_threshold: float = 0.40  # keep where gap >= min + THRESHOLD*(max-min); higher =>
+                                   # tighter crop. Raised 0.25 -> 0.40 after a harness sweep:
+                                   # pass rate climbs monotonically as we crop tighter to a
+                                   # flat plateau at 0.35-0.45 (~98.6% vs 97.7% at 0.25) -- the
+                                   # low-SNR fringe wings hurt the phase fit more than their
+                                   # extra lever-arm helps. Held out on fresh seeds and on the
+                                   # three real traces (da17 null unmoved) it stays ahead.
     phase_loss_scale: float = 1.0  # soft-L1 scale (rad) for the folded-phase fit
     signal_loss_frac: float = 1.0  # soft-L1 scale as a fraction of local half-amplitude
     init_smooth_div: int = 50    # null-init smoothing sigma = max(N // this, 2)
@@ -137,19 +143,15 @@ def analyze_trace(
     wl: np.ndarray,
     intensity: np.ndarray,
     t: FitTunables,
-    seed: FringeFitResult | None = None,
 ) -> FringeFitResult:
-    """Fit one already-windowed trace. Returns a NaN-filled ``rejected()`` result
-    on any solver failure or degenerate input rather than raising.
+    """Fit one already-windowed trace, always from scratch. Returns a NaN-filled
+    ``rejected()`` result on any solver failure or degenerate input rather than raising.
 
-    ``seed`` selects the path:
-      - None  -> COLD: envelopes from the data argmax, and a from-scratch null
-        search (smoothed-|f| argmin) to seed the folded-chirp fit. Robust but the
-        null init is the expensive/fragile part.
-      - prior -> WARM: envelope + folded + final-cubic solvers are warm-started
-        from the seed and the null search is SKIPPED (l0 origin taken from the
-        seed). Same quality metrics as cold, so the caller's gate is uniform."""
-    warm = seed is not None and seed.accepted
+    Every call is an independent COLD fit: envelopes from the data argmax, and a
+    from-scratch null search (smoothed-|f| argmin) to seed the folded-chirp fit. There
+    is NO warm-starting -- a fit is never biased by a previous frame's result, so each
+    shot is reproducible in isolation. The null search is the expensive part; that cost
+    is accepted as the price of a fresh, seed-independent fit on every shot."""
     try:
         x = np.asarray(wl, dtype=float)
         y = np.asarray(intensity, dtype=float)
@@ -157,9 +159,9 @@ def analyze_trace(
             return rejected()
 
         # --- Envelopes: upper, and the (upper-lower) gap from the negated residual.
-        pU = fit_upper_envelope(x, y, t, p0=seed.pU if warm else None)
+        pU = fit_upper_envelope(x, y, t)
         resid_env = y - gauss(x, *pU)
-        pLn = fit_upper_envelope(x, -resid_env, t, p0=seed.pLn if warm else None)
+        pLn = fit_upper_envelope(x, -resid_env, t)
 
         # --- Closed-form truncation to the high-visibility core.
         aLn, muLn, sLn, offLn = pLn
@@ -191,17 +193,13 @@ def analyze_trace(
         phase = np.unwrap(np.angle(analytic))
         f_inst = np.gradient(phase, dx) / (2 * np.pi)
 
-        # --- Folded-chirp fit seed. COLD: from-scratch null search (smoothed-|f|
-        #     argmin). WARM: reuse the seed's (A=c2, l0, C=c0) and skip the search.
-        if warm:
-            folded_init = [seed.csig[2], seed.l0, seed.csig[0]]
-        else:
-            absf_s = gaussian_filter1d(np.abs(f_inst), sigma=max(xk.size // t.init_smooth_div, 2))
-            k0 = int(np.argmin(absf_s))
-            l0_0, C0 = float(xk[k0]), float(phase[k0])
-            denom = float(np.max((xk - l0_0) ** 2))
-            A0 = (phase.max() - phase.min()) / denom if denom > 0 else 1.0
-            folded_init = [A0, l0_0, C0]
+        # --- Folded-chirp fit seed: from-scratch null search (smoothed-|f| argmin).
+        absf_s = gaussian_filter1d(np.abs(f_inst), sigma=max(xk.size // t.init_smooth_div, 2))
+        k0 = int(np.argmin(absf_s))
+        l0_0, C0 = float(xk[k0]), float(phase[k0])
+        denom = float(np.max((xk - l0_0) ** 2))
+        A0 = (phase.max() - phase.min()) / denom if denom > 0 else 1.0
+        folded_init = [A0, l0_0, C0]
 
         sol = least_squares(lambda p: folded_phase(p, xk) - phase, folded_init,
                             loss="soft_l1", f_scale=t.phase_loss_scale)
@@ -215,7 +213,7 @@ def analyze_trace(
         #     folded quadratic (c2=A, c0=C, c1=c3=0). This is the authoritative fit.
         u = xk - l0
         f_scale_sig = t.signal_loss_frac * float(np.median(halfk)) + 1e-9
-        cubic_init = list(seed.csig) if warm else [C, 0.0, A, 0.0]
+        cubic_init = [C, 0.0, A, 0.0]
         csig = least_squares(lambda c: signal_model(c, u, midk, halfk) - yk,
                              cubic_init, loss="soft_l1", f_scale=f_scale_sig).x
         resid_sig = yk - signal_model(csig, u, midk, halfk)
@@ -235,70 +233,6 @@ def analyze_trace(
         )
     except (RuntimeError, ValueError, np.linalg.LinAlgError):
         return rejected()
-
-
-class SeedController:
-    """Warm/cold seed policy for the per-shot fit loop (pure; no I/O, no framework).
-
-    Holds the last *good* result as the warm seed. After ``redo_after_bad``
-    consecutive bad fits it latches into forced-cold mode; the latch clears only
-    on a subsequent good (necessarily cold) fit. A bad fit never overwrites the
-    seed.
-
-    Contract the caller must honour: call ``next_seed()`` once, run exactly one
-    ``analyze_trace`` with it, then call ``record()`` exactly once with the gate
-    verdict. That one-verdict-per-attempt rule is what guarantees the failure
-    counter always advances, so forced-cold can never livelock on cold attempts
-    that never reach a verdict.
-    """
-
-    def __init__(self, redo_after_bad: int) -> None:
-        self._redo_after_bad = int(redo_after_bad)
-        self._seed: FringeFitResult | None = None
-        self._consecutive_bad = 0
-        self._force_cold = False
-
-    def next_seed(self) -> FringeFitResult | None:
-        """Seed for the next fit: None (cold) if forced-cold or no seed yet."""
-        if self._force_cold or self._seed is None:
-            return None
-        return self._seed
-
-    def record(self, result: FringeFitResult, good: bool) -> None:
-        """Feed back the gate verdict for the attempt seeded by ``next_seed()``."""
-        if good:
-            self._seed = result
-            self._consecutive_bad = 0
-            self._force_cold = False
-        else:
-            self._consecutive_bad += 1
-            if self._consecutive_bad >= self._redo_after_bad:
-                self._force_cold = True   # cleared only by a later good (cold) fit
-
-    def reset(self) -> None:
-        """Drop all state (e.g. on worker Start/Stop) — next fit is cold."""
-        self._seed = None
-        self._consecutive_bad = 0
-        self._force_cold = False
-
-    def drop_seed(self) -> None:
-        """Discard the warm seed (and any forced-cold latch) so the next fit is cold.
-
-        For when the current seed is proven harmful — e.g. it made the solver raise —
-        so the loop refits cold on the very next frame instead of waiting out
-        ``redo_after_bad``. Unlike a bad-gate verdict, a crash yields no result to
-        reason about, so the only safe recovery is to start over cold."""
-        self._seed = None
-        self._consecutive_bad = 0
-        self._force_cold = False
-
-    @property
-    def forcing_cold(self) -> bool:
-        return self._force_cold
-
-    @property
-    def consecutive_bad(self) -> int:
-        return self._consecutive_bad
 
 
 def display_curve(

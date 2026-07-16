@@ -42,7 +42,11 @@ def _load(path: str) -> tuple[np.ndarray, np.ndarray]:
 def _check(name: str) -> None:
     mu_e, fwhm_e, l0_e, null_e, inl_e, rms_e, c3_e = EXPECTED[name]
     x, y = _load(os.path.join(DATA_DIR, name))
-    r = analyze_trace(x, y, FitTunables())
+    # Pin trunc_threshold to 0.25: EXPECTED was frozen from the standalone script's
+    # 2026-07-14 run at that value. The shipping DEFAULT is now 0.40 (harness-tuned), but
+    # this test is a port-parity regression guard against the historical reference numbers,
+    # so it must use the trunc they were generated at -- not whatever the default becomes.
+    r = analyze_trace(x, y, FitTunables(trunc_threshold=0.25))
     assert r.accepted, f"{name}: fit rejected"
 
     _, mu, sig, _ = r.pU
