@@ -1000,8 +1000,65 @@ def detect_truncation(x, y):
 
 
 
-def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold=None,
-            ref_primary=None):
+# ===================== TRUNCATION RECOVERY (cut scan) ========================
+# The detector's job -- "find the clip, then cut there" -- turned out to be the hard way
+# round. Every version of it had to measure something (contrast against a prediction, the
+# residue against noise, the residue against its own peak, the abruptness of the edge) and
+# each measurement was defeated by a different property of a real trace: the envelope is 2%
+# off a Gaussian and bump/noise is 411 so that 2% is 8 sigma; k = h/bump is not constant in
+# lambda (0.70 at f=1.2 cyc/nm -> 0.38 at f>3.5, the slit smearing fast chirped fringes);
+# the local period estimate reads 0.63 against a true 1.56 because a fringe-free band has no
+# crossings to count; and a clean trace's envelope RISE is steeper than a real clip's edge
+# (measured slope 3.44 vs 1.83), so even abruptness does not separate them.
+#
+# The fit does not need any of that. A wrong cut fits badly and the right cut fits at
+# r2_fringe = 0.990 -- so try a few and keep the one that works. It cannot be fooled by
+# envelope shape, contrast rolloff, DC model error or the period estimate, because it never
+# measures them.
+#
+# Cost: nothing on a good frame (it passes first time and never scans), and ~170 ms per
+# candidate only on frames that would otherwise have been DROPPED and produced nothing at
+# all. A drop becomes a diagnosis.
+TRUNCREC_TRIGGER = 0.20       # rms_frac above this => the model does not explain the trace,
+                              # so try cutting. Well clear of a good live fit (0.06-0.09
+                              # measured on all three real traces) and well below the app's
+                              # 0.30 accept gate, so the scan runs BEFORE a frame is lost,
+                              # not after.
+TRUNCREC_STEP_NM = 0.25       # cut grid. The real edge needed 0.10 nm resolution to land
+                              # between underdetermined (800.05) and COMMIT (800.15), but
+                              # the acceptable window is ~0.5 nm wide (800.15-800.55 all
+                              # commit) so 0.25 always has a candidate inside it.
+TRUNCREC_MIN_SPAN_NM = 5.0    # never accept a cut that leaves less than this. rms_frac
+                              # ALWAYS improves as you cut more -- you are deleting the
+                              # hardest data -- so a scan that just minimised it would
+                              # "explain" any bad frame by cutting down to three fringes
+                              # (measured: a 0.6 nm span scored a lovely rms_frac 0.070 with
+                              # c2=3.000, pure nonsense). Occam does the real work here: we
+                              # take the SMALLEST cut that explains the trace, not the best-
+                              # scoring one, so a needless cut is never reached.
+TRUNCREC_MAX_NM = 4.0         # how far into the core to scan from each side. Physical: the
+                              # operator's clips land near 802 (">803, <801"), and a clip
+                              # that does not reach the core is removed by the contrast cut
+                              # anyway, so there is nothing further out worth finding.
+
+
+def _rms_frac(R):
+    """Scale-free fit residual: rms / median half-amplitude. ~0.06-0.09 on a good live fit,
+    0.36 on a real trace fit through a fringe-free band."""
+    if R.get("csig") is None or R.get("half") is None:
+        return float("inf")
+    med = float(np.median(np.asarray(R["half"], float)))
+    return float(R["rms_sig"]) / (med + 1e-9)
+
+
+def _explains(R):
+    """Does this fit account for the trace, and can we vouch for it?"""
+    return (R.get("status") == "ok" and bool(R.get("trust_ok"))
+            and _rms_frac(R) < TRUNCREC_TRIGGER)
+
+
+def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
+                  trunc_threshold=None, ref_primary=None, force_trunc=None):
     """Run the full recovery pipeline on one in-window trace.
 
     `trust_nsig` / `trunc_threshold` override TRUST_NSIG / TRUNC_THRESHOLD for this call
@@ -1049,13 +1106,17 @@ def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold
         # In its own try/except: a detector failure degrades to "no truncation known"
         # and the fit proceeds exactly as it would without this feature.
         t_tr0 = time.perf_counter()
-        try:
-            trunc = detect_truncation(x, y)
-        except Exception as e:
-            trunc = {"side": "unknown", "detected": False, "v": None, "dead": None,
-                     "live": None, "x_lo": None, "x_hi": None, "left_nm": 0.0,
-                     "right_nm": 0.0, "cut_left": None, "cut_right": None,
-                     "msg": f"detector failed: {type(e).__name__}: {e}"}
+        if force_trunc is not None:
+            # The recovery scan supplies the cut directly; the detector is not consulted.
+            trunc = dict(force_trunc)
+        else:
+            try:
+                trunc = detect_truncation(x, y)
+            except Exception as e:
+                trunc = {"side": "unknown", "detected": False, "v": None, "dead": None,
+                         "live": None, "x_lo": None, "x_hi": None, "left_nm": 0.0,
+                         "right_nm": 0.0, "cut_left": None, "cut_right": None,
+                         "msg": f"detector failed: {type(e).__name__}: {e}"}
         t_trunc = (time.perf_counter() - t_tr0) * 1e3
 
         # --- Drop the fringe-free band BEFORE anything is fit --------------------
@@ -1303,3 +1364,103 @@ def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold
         trust_primary_ok=ok_primary, trust_fallback_ok=ok_fallback,
     ))
     return R
+
+
+def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold=None,
+            ref_primary=None, recover=True):
+    """Fit one trace, and if the model cannot explain it, find the cut that can.
+
+    Fit normally first. If that explains the trace (`_explains`), return it -- this is the
+    common case and costs nothing extra. Only if the fit FAILS do we scan candidate cuts,
+    i.e. we spend time only on frames that would otherwise have been dropped and produced
+    nothing at all.
+
+    Why a scan rather than a detector: every detector has to MEASURE the clip, and each
+    measurement is defeated by a different property of a real trace (see the TRUNCREC_*
+    block). The fit needs none of them -- a wrong cut fits badly, the right one fits at
+    r2_fringe = 0.990 -- so we ask the fit instead.
+
+    We take the SMALLEST cut that explains the trace, not the best-scoring one. rms_frac
+    always improves as you cut more, because you are deleting the hardest data, so a scan
+    that minimised it would happily "explain" any bad frame by cutting down to three
+    fringes. Stopping at the first success makes a needless cut unreachable.
+
+    R["recovered"] says a cut was found this way, and R["trunc"]["side"]/["cut_left"]/
+    ["cut_right"] carry it, so a caller cannot tell a scanned cut from a detected one and
+    does not need to.
+    """
+    R = _analyze_once(x, y, anchor=anchor, ref_policy=ref_policy, trust_nsig=trust_nsig,
+                      trunc_threshold=trunc_threshold, ref_primary=ref_primary)
+    R["recovered"] = False
+    R["rms_frac"] = _rms_frac(R)
+    if not recover or _explains(R):
+        return R
+
+    # ref_policy is STATEFUL ACROSS FRAMES (REF_HYST consecutive traces to switch), so the
+    # scan must not touch it: 32 candidates would drive the hysteresis counter 32x in one
+    # frame and switch the reference on the first bad trace instead of the fifth. Candidates
+    # run with ref_policy=None; only the winner is re-fit with the policy.
+
+    x = np.asarray(x, float)
+    # Anchor the grid to the FIT CORE, not to the ZOOM window. A clip only matters where it
+    # intrudes on the core (outside it the contrast cut removes it anyway), and the window
+    # edge can be ~10 nm from the core -- scanning from there wastes the whole budget out in
+    # the wings and never reaches the clip (measured: 32 candidates, none within 6 nm of a
+    # real 800.3 edge). R["x"] IS the core the first fit used.
+    if R.get("x") is None or len(R["x"]) < 2:
+        return R
+    lo, hi = float(R["x"][0]), float(R["x"][-1])
+    if (hi - lo) < TRUNCREC_MIN_SPAN_NM:
+        return R
+    best = None
+    # Smallest cut first, alternating sides, so the first success IS the minimal one.
+    steps = int(TRUNCREC_MAX_NM / TRUNCREC_STEP_NM)
+    for n in range(1, steps + 1):
+        d = n * TRUNCREC_STEP_NM
+        for side in ("left", "right"):
+            cut = lo + d if side == "left" else hi - d
+            if side == "left" and (hi - cut) < TRUNCREC_MIN_SPAN_NM:
+                continue
+            if side == "right" and (cut - lo) < TRUNCREC_MIN_SPAN_NM:
+                continue
+            ft = {"side": side, "detected": True, "v": None, "dead": None, "live": None,
+                  "x_lo": None, "x_hi": None, "left_nm": d if side == "left" else 0.0,
+                  "right_nm": d if side == "right" else 0.0,
+                  "cut_left": cut if side == "left" else None,
+                  "cut_right": cut if side == "right" else None,
+                  "msg": f"cut found by recovery scan ({side} at {cut:.2f} nm)"}
+            try:
+                R2 = _analyze_once(x, y, anchor=anchor, ref_policy=None,
+                                   trust_nsig=trust_nsig, trunc_threshold=trunc_threshold,
+                                   ref_primary=ref_primary, force_trunc=ft)
+            except Exception:
+                continue
+            R2["rms_frac"] = _rms_frac(R2)
+            if _explains(R2):
+                best = (R2, ft)
+                break
+        if best is not None:
+            break
+    if best is None:
+        return R                      # nothing explains it: report the honest failure
+
+    R2, ft = best
+    if ref_policy is not None:
+        # Re-fit the winner with the policy so its reference choice is hysteretic like any
+        # other frame. This is the frame's SECOND policy update (the first was R above), so
+        # a recovered frame counts double toward the REF_HYST streak -- switching after ~3
+        # effective frames rather than 5. Accepted deliberately: the alternative is either
+        # to fit every good frame twice (doubling the cost of the common case) or to let a
+        # recovered frame use the non-hysteretic rule, and a truncated frame is exactly when
+        # the reference is most likely to move, so it is the worst one to leave unguarded.
+        try:
+            R3 = _analyze_once(x, y, anchor=anchor, ref_policy=ref_policy,
+                               trust_nsig=trust_nsig, trunc_threshold=trunc_threshold,
+                               ref_primary=ref_primary, force_trunc=ft)
+            R3["rms_frac"] = _rms_frac(R3)
+            if _explains(R3):
+                R2 = R3
+        except Exception:
+            pass
+    R2["recovered"] = True
+    return R2

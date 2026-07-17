@@ -248,6 +248,68 @@ def test_config_view_field_routing() -> bool:
     return ok
 
 
+def test_truncation_recovery() -> bool:
+    """The instrument's own truncated frame must commit, and clean frames must not scan.
+
+    This is the ONLY ground truth we have for truncation, and it is the test every
+    synthetic harness failed to be. On 2026-07-17 the shipped detector scored 96.7%
+    detection / 1 false positive in 145 while finding ZERO dead samples in this trace --
+    the harness builds Gaussian envelopes at bump/noise ~20 and the instrument runs at
+    ~411, so a real trace's ordinary 2% envelope error is 8 sigma there and 0.4 sigma in
+    synth. The harness could not fail. These two files can.
+
+    truncated.csv        : clip at ~800.3 nm, INSIDE the fit core -> must be cut and commit
+    lightly_truncated.csv: clip outside the core -> the contrast cut already handles it,
+                           so the fit must pass first time and never scan
+    """
+    here = os.path.join(STANDALONE_DIR, "truncated.csv")
+    if not os.path.exists(here):
+        print("SKIP truncation recovery: truncated.csv missing")
+        return True
+    std, _ = _load_standalone()
+    if std is None:
+        print("SKIP truncation recovery: standalone not importable")
+        return True
+
+    ok_all = True
+    print(f"\n{'trace':24s} {'recovered':>10s} {'rms_frac':>9s} {'r2_fringe':>10s} "
+          f"{'c1':>9s}  verdict")
+    for name, want_recover in (("truncated.csv", True), ("lightly_truncated.csv", False)):
+        path = os.path.join(STANDALONE_DIR, name)
+        if not os.path.exists(path):
+            print(f"{name:24s}  (missing, skipped)")
+            continue
+        lam, amp = _read(path)
+        m = (lam >= ZOOM[0]) & (lam <= ZOOM[1])
+        anchor = std.baseline_anchor(lam, amp)
+        R = std.analyze(lam[m], amp[m], anchor=anchor, ref_primary=802.0)
+        rec = bool(R.get("recovered"))
+        rf = float(R.get("rms_frac", float("inf")))
+        r2f = float(R.get("r2_fringe", float("nan")))
+        committed = (R.get("status") == "ok" and bool(R.get("trust_ok")) and rf < 0.30)
+        ok = (rec == want_recover) and committed
+        ok_all &= ok
+        c1 = R["csig"][1] if R.get("csig") is not None else float("nan")
+        print(f"{name:24s} {str(rec):>10s} {rf:9.3f} {r2f:10.3f} {c1:9.3f}  "
+              f"{'COMMIT' if committed else R.get('status')}  {'PASS' if ok else 'FAIL'}"
+              + ("" if ok else f"  <- wanted recovered={want_recover} and a commit"))
+
+    # ...and the scan must be what makes the difference, not a coincidence.
+    lam, amp = _read(here)
+    m = (lam >= ZOOM[0]) & (lam <= ZOOM[1])
+    anchor = std.baseline_anchor(lam, amp)
+    off = std.analyze(lam[m], amp[m], anchor=anchor, ref_primary=802.0, recover=False)
+    rf_off = float(off.get("rms_frac", float("inf")))
+    ok = rf_off > 0.30                      # without the scan this frame IS dropped
+    ok_all &= ok
+    print(f"{'  (recover=False)':24s} {'-':>10s} {rf_off:9.3f} "
+          f"{float(off.get('r2_fringe', float('nan'))):10.3f} "
+          f"{off['csig'][1] if off.get('csig') is not None else float('nan'):9.3f}  "
+          f"{off.get('status')}  {'PASS' if ok else 'FAIL'}"
+          + ("" if ok else "  <- the scan is not what rescues this frame; test is vacuous"))
+    return ok_all
+
+
 if __name__ == "__main__":
     results = [
         test_core_files_identical(),
@@ -256,6 +318,7 @@ if __name__ == "__main__":
         test_no_hidden_state(),
         test_reference_policy_hysteresis(),
         test_config_view_field_routing(),
+        test_truncation_recovery(),
     ]
     print()
     if all(results):
