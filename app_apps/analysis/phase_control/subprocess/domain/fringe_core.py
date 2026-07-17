@@ -105,6 +105,25 @@ TRUNCDET_HYST_SIGMA = 2.0     # Schmitt-trigger rails (x sigma) for counting tho
                               # crossing into several and read 3x the true frequency
 TRUNCDET_DC_WIN_NM = 1.0      # rolling-median window that blunts the fringe before the
                               # stiff Gaussian DC fit (the fit is what does the work)
+TRUNCDET_DC_PASSES = 3        # times to RE-FIT that Gaussian DC with the fringe-free band
+                              # excluded. The docstring's "clip moves the DC by only
+                              # ~9%" is a LOW-VISIBILITY approximation: the step is
+                              # b^2/(a^2+b^2) of the bump, ~5% at contrast k=0.4 but ~28%
+                              # at k=0.9. A symmetric Gaussian fit through a coherent 28%
+                              # one-sided step slides its centre toward the surviving arm,
+                              # so bump under-predicts on the clipped side (clip MISSED)
+                              # and over-predicts opposite (clip reported on the WRONG
+                              # side) -- the measured bright-trace failure. soft_l1 absorbs
+                              # scattered outliers, not a coherent block, so we drop the
+                              # block and re-fit instead. Bootstraps from a MISSED clip
+                              # because the excluded set is read off h_meas (DC-free), not
+                              # off the possibly-empty dead mask.
+TRUNCDET_DCREFIT_SIGMA = 3.0  # a sample INSIDE the hump whose fringe amplitude h_meas is
+                              # below this*sigma carries no fringe -- it is the clipped
+                              # band (or a null) -- so it is excluded from the DC re-fit.
+                              # Wings (low bump) stay in to anchor the Gaussian offset.
+TRUNCDET_DCREFIT_TOL = 0.01   # re-fit has converged when the bump moves less than this
+                              # fraction of its peak between passes
 TRUNCDET_DEAD_FRAC = 0.35     # measured fringe amplitude < this * predicted => locally dead
 TRUNCDET_PIN = 0.75           # p90|y-DC| >= this * h_ref => the fringe still reaches its
                               # crest nearby, so it is ALIVE (a null parks at ~1*h; a
@@ -831,9 +850,11 @@ def detect_truncation(x, y):
     dx = float(np.mean(np.diff(x)))
 
     # Local DC: a rolling median to blunt the fringe, then a stiff robust Gaussian
-    # through it -- the intensity envelope BASE + (a^2+b^2)*env. Clipping changes it by
-    # only b^2*env (~9%), and neither a null's local bulge nor a fringe the median failed
-    # to remove can bend a 4-parameter Gaussian off the true trend. Because of that
+    # through it -- the intensity envelope BASE + (a^2+b^2)*env. Clipping steps it down by
+    # b^2*env, which is ~9% only at low visibility but reaches ~28% on a bright trace; the
+    # symmetric Gaussian is re-fit below with that fringe-free step excluded so it cannot
+    # slide (see TRUNCDET_DC_PASSES). Neither a null's local bulge nor a fringe the median
+    # failed to remove can bend a 4-parameter Gaussian off the true trend. Because of that
     # stiffness the median window need not match the fringe period, so it is fixed: the
     # global period estimate it used to be tied to was itself noise-chattered on exactly
     # the slow fringes where it mattered.
@@ -867,6 +888,33 @@ def detect_truncation(x, y):
                     TRUNCDET_WIN_MIN_NM, TRUNCDET_WIN_MAX_NM)
     T["f_est"] = float(np.median(f_loc))
     h_meas, p90_dev = _ladder_profiles(x, y, dc_fit, w_loc, dx, sigma)
+
+    # Re-fit the DC with the fringe-free band INSIDE the hump excluded, so a bright clip's
+    # coherent step cannot slide the symmetric Gaussian off centre (see TRUNCDET_DC_PASSES).
+    # The excluded set is (inside the hump) AND (no fringe: h_meas < a few sigma), read off
+    # h_meas -- which is DC-independent (each window is de-trended) -- so this corrects the
+    # bump even when the biased first fit found NO dead samples at all. A null is also
+    # excluded here (harmless: the DC is smooth and anchored by the rest; the null's
+    # interior/pinned nature still stops it being called a clip downstream). h_meas and the
+    # p90 veto are NOT recomputed: h_meas is DC-free, and the veto only acts inside the live
+    # band where the DC was already right, so both barely move under the re-fit.
+    for _ in range(TRUNCDET_DC_PASSES):
+        in_hump = bump >= TRUNCDET_K_BUMP_FRAC * float(np.max(bump))
+        exclude_dc = in_hump & (h_meas < TRUNCDET_DCREFIT_SIGMA * sigma)
+        if not exclude_dc.any() or np.count_nonzero(~exclude_dc) < 8:
+            break
+        try:
+            pDC2 = _fit_gauss_robust(x[~exclude_dc], dc_loc[~exclude_dc])
+        except Exception:
+            break
+        bump2 = gauss(x, *pDC2) - pDC2[3]
+        if not np.isfinite(bump2).all() or float(np.max(bump2)) <= 0:
+            break
+        moved = float(np.max(np.abs(bump2 - bump)))
+        pDC, bump = pDC2, bump2
+        if moved < TRUNCDET_DCREFIT_TOL * float(np.max(bump)):
+            break
+    dc_fit = gauss(x, *pDC)
 
     # Intrinsic contrast k = h/B, read where the bump is strong. A clipped band
     # contributes h/B ~ 0, so a plain median would be dragged down until it "predicted"
