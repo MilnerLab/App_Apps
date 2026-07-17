@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 
 import numpy as np
 
@@ -11,11 +10,18 @@ from base_core.math.models import Angle
 PHASE_TOLERANCE = Angle(10, AngleUnit.DEG)
 CONVERSION_CONST = 1 / 4
 CORRECTION_SIGN = -1
+# Fraction of the measured error corrected per frame. Corrections are relative, so the
+# loop integrates and this alone sets its bandwidth: ~1/LOOP_GAIN frames to pull in.
+# Deliberately slow. The phase noise is faster than the ~0.5 s measure-and-move cycle
+# and so cannot be tracked; chasing it just injects it into the stage. We correct
+# long-term drift and average the noise away. This also keeps the loop overdamped
+# despite the dead time, which a gain of 1 would not.
+LOOP_GAIN = 0.15
 
 
 @dataclass(frozen=True)
 class CorrectionResult:
-    angle: Angle  # signed HWP rotation angle
+    angle: Angle  # signed HWP rotation increment, applied *relative* to where the stage is
     sign: int     # +1 or -1, direction of rotation
 
 
@@ -24,6 +30,9 @@ class PhaseCorrector:
     """
     Convert a measured phase offset into a physical half-wave-plate
     rotation angle, with wrapping and tolerance logic.
+
+    The result is a relative increment, never an absolute position: the corrector
+    never knows where the stage is, only how far off the phase is.
     """
     _correction_angle: Angle = Angle(0, AngleUnit.DEG)
     _target_phase: Angle = Angle(0, AngleUnit.DEG)
@@ -40,7 +49,8 @@ class PhaseCorrector:
         if phase == 0.0:
             return None
 
-        phase_error = self._wrap_phase_pi(Angle(phase - self._target_phase))
+        # Angle() wraps to (-pi, pi], so this is already the shortest way round.
+        phase_error = Angle(phase - self._target_phase)
 
         if np.abs(phase_error) <= PHASE_TOLERANCE:
             return None
@@ -50,12 +60,7 @@ class PhaseCorrector:
         return CorrectionResult(angle=self._correction_angle, sign=sign)
 
     @staticmethod
-    def _wrap_phase_pi(phase: Angle) -> Angle:
-        step = math.pi
-        k = round(phase / step)
-        return Angle(phase - k * step)
-
-    @staticmethod
     def _convert_phase_to_hwp(phase: Angle) -> Angle:
-        hwp_deg = CORRECTION_SIGN * phase.Deg * CONVERSION_CONST
-        return Angle(hwp_deg, AngleUnit.DEG)
+        hwp_deg = CORRECTION_SIGN * phase.Deg * CONVERSION_CONST * LOOP_GAIN
+        # wrap=False: an increment is not a point on the circle.
+        return Angle(hwp_deg, AngleUnit.DEG, wrap=False)
