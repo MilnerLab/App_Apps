@@ -197,6 +197,57 @@ def test_reference_policy_hysteresis() -> bool:
     return ok
 
 
+def test_config_view_field_routing() -> bool:
+    """Every PhaseConfigView spec must resolve on exactly one of the two config
+    dataclasses.
+
+    PhaseConfigView._obj() routes a field name to either FringeFitParams or
+    StabilizationConfig, and a mis-route is invisible until _populate runs at app START --
+    which is how the v3 port shipped with `trust_nsig` routed to StabilizationConfig and
+    crashed the whole panel window on launch. The view now derives that routing from the
+    dataclass instead of hand-listing it; this test checks the assumption that derivation
+    rests on (the two classes share no field names) and that every spec lands somewhere.
+
+    Read via AST, not import: the view needs base_qt/PySide6 and the config needs
+    base_core, neither of which is present outside the instrument checkout. A test that
+    can only run in one place is a test that does not run.
+    """
+    import ast
+    import re
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    base = os.path.join(root, "app_apps", "analysis", "phase_control")
+    cfg_p = os.path.join(base, "subprocess", "domain", "phase_stabilization_config.py")
+    view_p = os.path.join(base, "ui", "phase_config_view.py")
+
+    tree = ast.parse(open(cfg_p, encoding="utf-8").read())
+
+    def flds(cls_name: str) -> set[str]:
+        for n in ast.walk(tree):
+            if isinstance(n, ast.ClassDef) and n.name == cls_name:
+                return {s.target.id for s in n.body
+                        if isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name)}
+        return set()
+
+    params, config = flds("FringeFitParams"), flds("StabilizationConfig")
+    overlap = params & config
+    ok = not overlap
+    print(f"\n{'PASS' if ok else 'FAIL'}  FringeFitParams/StabilizationConfig field names "
+          f"are disjoint{'' if ok else f' -- AMBIGUOUS: {sorted(overlap)}'}")
+
+    view = open(view_p, encoding="utf-8").read()
+    specs = set(re.findall(r'^\s{8}"(\w+)":\s', view, re.M))
+    ok &= bool(specs)
+    unroutable = specs - params - config
+    ok &= not unroutable
+    print(f"{'PASS' if not unroutable else 'FAIL'}  all {len(specs)} config-view specs "
+          f"resolve on a config object"
+          f"{'' if not unroutable else f' -- {sorted(unroutable)} would crash _populate'}")
+    for s in sorted(specs):
+        print(f"        {s:22s} -> {'params' if s in params else 'config'}")
+    return ok
+
+
 if __name__ == "__main__":
     results = [
         test_core_files_identical(),
@@ -204,6 +255,7 @@ if __name__ == "__main__":
         test_operator_lambda_ref_is_honoured(),
         test_no_hidden_state(),
         test_reference_policy_hysteresis(),
+        test_config_view_field_routing(),
     ]
     print()
     if all(results):

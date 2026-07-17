@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import fields
 from typing import Any, ClassVar, TYPE_CHECKING
 
 from base_core.ipc.worker_handle import WorkerStatus
 from base_core.quantities.enums import Prefix
 from base_qt.ui.form import DirtyForm, FloatSpec, LengthSpec, RangeSpec
+
+from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import (
+    FringeFitParams,
+)
 
 
 if TYPE_CHECKING:
@@ -18,10 +23,15 @@ _EDITABLE_STATES = (WorkerStatus.NEW, WorkerStatus.PAUSED)
 
 
 class PhaseConfigView(DirtyForm):
-    _PARAMS_FIELDS: ClassVar[frozenset[str]] = frozenset({
-        "ratio", "sigma_init", "trunc_threshold", "phase_loss_scale",
-        "signal_loss_frac", "init_smooth_div", "lambda_ref",
-    })
+    # Derived, not hand-listed: a spec name lives on FringeFitParams if and only if
+    # FringeFitParams declares it, and every other spec belongs to StabilizationConfig.
+    # Spelling this set out by hand made it a fourth list that had to agree with _specs,
+    # _groups and _readonly_when_running, and it silently fell out of step during the v3
+    # port -- a field routed to the wrong object only fails at _populate, i.e. on app
+    # start. The two dataclasses share no field names, so this stays unambiguous.
+    _PARAMS_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        f.name for f in fields(FringeFitParams)
+    )
 
     # The folded-chirp knobs (ratio, sigma_init, phase_loss_scale, signal_loss_frac,
     # init_smooth_div) went away with that pipeline: the v3 analysis owns those as
