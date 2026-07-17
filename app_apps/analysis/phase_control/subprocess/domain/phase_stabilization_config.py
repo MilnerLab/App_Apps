@@ -12,6 +12,7 @@ from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import (
     FitTunables,
     FringeFitResult,
 )
+from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import LOOP_GAIN
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +143,11 @@ class StabilizationConfig(PrimitiveSerde):
                                         # tighten from the logged rms_frac (good live fits ~0.1).
     inlier_threshold: float = 80.0      # accept if folded-phase inliers above this (%)
     set_phase: Angle = field(default_factory=lambda: Angle(0))
+    loop_gain: float = LOOP_GAIN        # fraction of the measured phase error corrected per
+                                        # committed frame; see PhaseCorrector. Lives here and
+                                        # not on FringeFitParams because it is a control-loop
+                                        # property, not a fit property -- the fit is identical
+                                        # whatever this is set to.
 
     def accepts(self, r: FringeFitResult) -> bool:
         """Per-shot quality gate.
@@ -174,6 +180,7 @@ class StabilizationConfig(PrimitiveSerde):
             "rms_frac_threshold": self.rms_frac_threshold,
             "inlier_threshold": self.inlier_threshold,
             "set_phase": self.set_phase.to_primitive(),
+            "loop_gain": self.loop_gain,
         }
 
     @classmethod
@@ -190,4 +197,6 @@ class StabilizationConfig(PrimitiveSerde):
             rms_frac_threshold=float(v.get("rms_frac_threshold", 0.30)),
             inlier_threshold=float(v["inlier_threshold"]),
             set_phase=Angle.from_primitive(v["set_phase"]),
+            # Pre-tunable-gain configs have no "loop_gain" -> the calibrated default.
+            loop_gain=float(v.get("loop_gain", LOOP_GAIN)),
         )

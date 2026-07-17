@@ -7,6 +7,10 @@ from base_core.ipc.worker_handle import WorkerStatus
 from base_core.quantities.enums import Prefix
 from base_qt.ui.form import DirtyForm, FloatSpec, LengthSpec, RangeSpec
 
+from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import (
+    GAIN_MAX,
+    GAIN_MIN,
+)
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import (
     FringeFitParams,
 )
@@ -47,6 +51,7 @@ class PhaseConfigView(DirtyForm):
         ),
         "rms_frac_threshold": FloatSpec("Accept rms/amp below",    0.0,   2.0,     decimals=3, step=0.02),
         "inlier_threshold":  FloatSpec("Accept inliers above (%)", 0.0,   100.0,   decimals=0, step=1.0),
+        "loop_gain":         FloatSpec("Loop gain (err/frame)", GAIN_MIN, GAIN_MAX, decimals=2, step=0.01),
     }
     _groups = [
         ("Fit tunables", [
@@ -55,7 +60,13 @@ class PhaseConfigView(DirtyForm):
         ("Tracking", [
             "wavelength_range", "rms_frac_threshold", "inlier_threshold",
         ]),
+        ("Control loop", [
+            "loop_gain",
+        ]),
     ]
+    # loop_gain is deliberately NOT here: tuning the gain against a loop you are watching
+    # settle is the entire reason it is exposed, and it is safe to change mid-run (the
+    # corrector is retuned in place, and the fit does not depend on it at all).
     _readonly_when_running = frozenset({
         "trunc_threshold", "trust_nsig", "lambda_ref",
     })

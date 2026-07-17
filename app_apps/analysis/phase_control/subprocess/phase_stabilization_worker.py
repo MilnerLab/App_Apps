@@ -58,6 +58,7 @@ class PhaseStabilizationWorker(ThreadedWorker):
         self._tracker = PhaseTracker(self._config)
         self._corrector = PhaseCorrector()
         self._corrector.target_phase = self._config.set_phase
+        self._corrector.gain = self._config.loop_gain
         self._latest_item_id = -1
         self._skipped_since_fit = 0
         self._paused = False
@@ -72,6 +73,7 @@ class PhaseStabilizationWorker(ThreadedWorker):
         self._tracker = PhaseTracker(self._config)
         self._corrector = PhaseCorrector()
         self._corrector.target_phase = self._config.set_phase
+        self._corrector.gain = self._config.loop_gain
         self._latest_item_id = -1
         self._skipped_since_fit = 0
 
@@ -138,6 +140,10 @@ class PhaseStabilizationWorker(ThreadedWorker):
         if self._tracker is not None:
             self._tracker = PhaseTracker(self._config)
         if self._corrector is not None:
+            # Retuned in place, not reconstructed: gain is the knob the operator turns
+            # WHILE watching the loop settle, and a fresh PhaseCorrector would be a
+            # behaviour change mid-run for a value they did not touch.
             self._corrector.target_phase = self._config.set_phase
+            self._corrector.gain = self._config.loop_gain
         self._notify(ConfigSynced(config=self._config))
         self._reply_ok(msg)

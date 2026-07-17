@@ -16,7 +16,17 @@ CORRECTION_SIGN = -1
 # and so cannot be tracked; chasing it just injects it into the stage. We correct
 # long-term drift and average the noise away. This also keeps the loop overdamped
 # despite the dead time, which a gain of 1 would not.
-LOOP_GAIN = 0.15
+#
+# This is only the DEFAULT -- the operator tunes it live from the config panel
+# (StabilizationConfig.loop_gain), because the right value depends on the dead time,
+# which depends on the spectrometer's integration/averaging settings. Raise it toward 1
+# and the dead time will make the loop ring; that is the failure this default avoids.
+LOOP_GAIN = 0.05
+# Bounds for the operator's live edit. 0 would silently kill the loop; negative would be
+# positive feedback (the correction drives the phase further off, every frame). >1 is
+# over-correction on its face: more than the whole measured error, per frame, into a loop
+# that already has ~0.5 s of dead time.
+GAIN_MIN, GAIN_MAX = 0.01, 1.0
 
 
 @dataclass(frozen=True)
@@ -36,6 +46,7 @@ class PhaseCorrector:
     """
     _correction_angle: Angle = Angle(0, AngleUnit.DEG)
     _target_phase: Angle = Angle(0, AngleUnit.DEG)
+    _gain: float = LOOP_GAIN
 
     @property
     def target_phase(self) -> Angle:
@@ -44,6 +55,18 @@ class PhaseCorrector:
     @target_phase.setter
     def target_phase(self, value: Angle) -> None:
         self._target_phase = value
+
+    @property
+    def gain(self) -> float:
+        return self._gain
+
+    @gain.setter
+    def gain(self, value: float) -> None:
+        # Clamped, not validated: this arrives from a live UI edit mid-run, and a stray
+        # 0 (loop silently dead) or a negative (positive feedback -- runs the phase away
+        # and keeps going) must not reach the stage. The UI enforces the same bounds; this
+        # is the one that matters, because it is the one the hardware is behind.
+        self._gain = min(max(float(value), GAIN_MIN), GAIN_MAX)
 
     def update(self, phase: Angle) -> CorrectionResult | None:
         if phase == 0.0:
@@ -59,8 +82,7 @@ class PhaseCorrector:
         sign = 1 if float(self._correction_angle) >= 0 else -1
         return CorrectionResult(angle=self._correction_angle, sign=sign)
 
-    @staticmethod
-    def _convert_phase_to_hwp(phase: Angle) -> Angle:
-        hwp_deg = CORRECTION_SIGN * phase.Deg * CONVERSION_CONST * LOOP_GAIN
+    def _convert_phase_to_hwp(self, phase: Angle) -> Angle:
+        hwp_deg = CORRECTION_SIGN * phase.Deg * CONVERSION_CONST * self._gain
         # wrap=False: an increment is not a point on the circle.
         return Angle(hwp_deg, AngleUnit.DEG, wrap=False)
