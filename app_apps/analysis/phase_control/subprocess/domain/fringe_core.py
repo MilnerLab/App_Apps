@@ -118,7 +118,25 @@ TRUNCDET_VETO_SIGMA = 2.0     # ...and the veto's swing must also clear this * s
                               # from vetoing themselves alive and turns them into false
                               # positives (measured: 3.0 doubled them, all at f1 < 1.6).
 TRUNCDET_MAJORITY_NM = 0.6    # de-speckle: a sample is dead if most of this span is
-TRUNCDET_EDGE_TOL_NM = 0.5    # slack when asking whether a dead run touches an edge
+TRUNCDET_EDGE_TOL_NM = 2.0    # slack when asking whether a dead run touches an edge.
+                              # NOT a fudge: right AT the live boundary the predicted fringe
+                              # is only ~SNR_GAP/2 = 2.5 sigma, so v is at its noisiest there
+                              # and the first nm or so of a genuine dead band reads "alive"
+                              # by accident. The run therefore starts INSIDE the live edge
+                              # and a strict test discards it -- the detector finds the clip
+                              # and then throws the answer away. Measured on one such trace
+                              # (clip 1.5 nm blue of 802): v = 0.140 across the dead band vs
+                              # 0.961 outside it, i.e. the physics separates cleanly, yet the
+                              # run began 1.63 nm inside the live edge and 0.5 nm of slack
+                              # rejected it. This tolerance is the width of that unmeasurable
+                              # band. Swept on near-core clips (1-4 nm, the ones the fit core
+                              # can feel), detection / false positives / FPs reaching the core:
+                              #   0.5 -> 68.0% / 31.2% / 0      2.0 -> 93.2% / 35.8% / 0
+                              #   1.0 -> 80.2% / 33.3% / 0      3.0 -> 94.5% / 36.2% / 0
+                              #   1.5 -> 88.0% / 34.2% / 0      4.0 -> 94.8% / 36.2% / 0
+                              # 2.0 is the knee. The FP cost is real but free in the only
+                              # sense that matters: those FPs still land outside the
+                              # 40%-contrast core, so they remove no phase information.
 TRUNCDET_CUT_PAD_NM = 0.25    # extra guard band added to the reported clip edge, on top
                               # of the w/2 smearing correction, before the fit drops those
                               # samples: keeping one fringe-free point costs far more than
