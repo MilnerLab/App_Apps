@@ -4,7 +4,7 @@ from typing import Any, ClassVar, TYPE_CHECKING
 
 from base_core.ipc.worker_handle import WorkerStatus
 from base_core.quantities.enums import Prefix
-from base_qt.ui.form import DirtyForm, FloatSpec, IntSpec, LengthSpec, RangeSpec
+from base_qt.ui.form import DirtyForm, FloatSpec, LengthSpec, RangeSpec
 
 
 if TYPE_CHECKING:
@@ -23,33 +23,31 @@ class PhaseConfigView(DirtyForm):
         "signal_loss_frac", "init_smooth_div", "lambda_ref",
     })
 
+    # The folded-chirp knobs (ratio, sigma_init, phase_loss_scale, signal_loss_frac,
+    # init_smooth_div) went away with that pipeline: the v3 analysis owns those as
+    # harness-calibrated constants, and exposing constants nobody can tune from the
+    # instrument only invites mis-setting them.
     _specs = {
-        "ratio":             FloatSpec("Envelope pinball ratio",   1.0,   100.0,  decimals=1, step=1.0),
-        "sigma_init":        FloatSpec("Init σ guess (nm)",        0.1,   50.0,   decimals=2, step=0.5),
-        "trunc_threshold":   FloatSpec("Truncation threshold",    0.0,   1.0,    decimals=2, step=0.05),
-        "phase_loss_scale":  FloatSpec("Phase loss scale (rad)",  0.01,  100.0,  decimals=2, step=0.1),
-        "signal_loss_frac":  FloatSpec("Signal loss fraction",    0.01,  10.0,   decimals=2, step=0.1),
-        "init_smooth_div":   IntSpec("Null-init smoothing div",   2,     500),
-        "lambda_ref":        LengthSpec("λ_ref", Prefix.NANO, min=700, max=1000),
+        "trunc_threshold":   FloatSpec("Truncation threshold",     0.0,   1.0,    decimals=2, step=0.05),
+        "trust_nsig":        FloatSpec("Trust margin (sigmas)",    1.0,   16.0,   decimals=2, step=0.25),
+        "lambda_ref":        LengthSpec("λ_ref (preferred)", Prefix.NANO, min=700, max=1000),
         "wavelength_range":  RangeSpec(
             "Wavelength range",
             LengthSpec("", Prefix.NANO, min=700, max=1000),
         ),
-        "rms_frac_threshold": FloatSpec("Accept rms/amp below",   0.0,   2.0,     decimals=3, step=0.02),
-        "inlier_threshold":  FloatSpec("Accept inliers above (%)", 0.0,  100.0,   decimals=0, step=1.0),
+        "rms_frac_threshold": FloatSpec("Accept rms/amp below",    0.0,   2.0,     decimals=3, step=0.02),
+        "inlier_threshold":  FloatSpec("Accept inliers above (%)", 0.0,   100.0,   decimals=0, step=1.0),
     }
     _groups = [
         ("Fit tunables", [
-            "ratio", "sigma_init", "trunc_threshold", "phase_loss_scale",
-            "signal_loss_frac", "init_smooth_div", "lambda_ref",
+            "trunc_threshold", "trust_nsig", "lambda_ref",
         ]),
         ("Tracking", [
             "wavelength_range", "rms_frac_threshold", "inlier_threshold",
         ]),
     ]
     _readonly_when_running = frozenset({
-        "ratio", "sigma_init", "trunc_threshold", "phase_loss_scale",
-        "signal_loss_frac", "init_smooth_div", "lambda_ref",
+        "trunc_threshold", "trust_nsig", "lambda_ref",
     })
 
     def __init__(

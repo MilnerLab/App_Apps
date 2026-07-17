@@ -22,37 +22,41 @@ from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import (
 @dataclass
 class FringeFitParams(PrimitiveSerde):
     # --- tunables (user-editable inputs to fringe_fit.analyze_trace) ---
-    ratio: float = 10.0                # pinball penalty ratio above:below
-    sigma_init: float = 4.0            # initial envelope sigma guess (nm)
-    trunc_threshold: float = 0.40      # high-visibility core keep-level (raised 0.25 -> 0.40;
-                                       # harness-tuned plateau centre -- see FitTunables)
-    phase_loss_scale: float = 1.0      # folded-phase soft-L1 scale (rad)
-    signal_loss_frac: float = 1.0      # raw-signal soft-L1 scale (fraction of half-amp)
-    init_smooth_div: int = 50          # cold null-init smoothing divisor
+    # The v3 analysis owns its own calibrated constants (see fringe_core); only these two
+    # are user-facing. The old folded-chirp knobs (ratio, sigma_init, phase_loss_scale,
+    # signal_loss_frac, init_smooth_div) are gone with that pipeline -- from_primitive
+    # ignores them, so configs persisted before this change still load.
+    trunc_threshold: float = 0.40      # high-visibility core keep-level (harness plateau)
+    trust_nsig: float = 3.0            # accuracy/yield trade; see FitTunables.trust_nsig.
+                                       # 3.0 = >=98% of reported fits correct, <=5% of good
+                                       # fits declined. Lower to commit more frames while
+                                       # aligning; raising past ~5 buys little accuracy and
+                                       # costs a lot of yield.
     lambda_ref: Length = field(default_factory=lambda: Length(802.0, Prefix.NANO))
 
     # --- committed fit outputs (results; drive the overlay + phase readout) ---
     pU: list[float] = field(default_factory=lambda: [0.0, 0.0, 1.0, 0.0])   # upper env Gaussian
     pLn: list[float] = field(default_factory=lambda: [0.0, 0.0, 1.0, 0.0])  # gap Gaussian
-    l0: float = 0.0                    # null / phase origin (nm)
+    l0: float = 0.0                    # phase basis origin (nm) = core centroid
     c0: float = 0.0                    # cubic phase coeffs in u = lambda - l0
     c1: float = 0.0
     c2: float = 0.0
     c3: float = 0.0
-    phase_ref: float = 0.0             # unwrapped cubic phase at lambda_ref (rad)
+    phase_ref: float = 0.0             # unwrapped cubic phase at ref_wl (rad)
+    ref_wl: float = 0.0                # WHERE phase_ref was evaluated. This is NOT always
+                                       # lambda_ref: a clip near the core makes the phase at
+                                       # the spectral centre unsupportable, and the fit falls
+                                       # back to the core centroid. Read this, not lambda_ref.
+    ref_fallback: bool = False         # True => the reference moved off the spectral centre
     rms_sig: float = 0.0               # last raw-signal fit RMS (counts)
     rms_frac: float = 0.0              # last scale-free fit residual (rms / median half-amp)
-    inlier_pct: float = 0.0            # last folded-phase inlier fraction (%)
+    inlier_pct: float = 0.0            # last core inlier fraction (%)
 
     # --- convenience ---
     def tunables(self) -> FitTunables:
         return FitTunables(
-            ratio=self.ratio,
-            sigma_init=self.sigma_init,
             trunc_threshold=self.trunc_threshold,
-            phase_loss_scale=self.phase_loss_scale,
-            signal_loss_frac=self.signal_loss_frac,
-            init_smooth_div=int(self.init_smooth_div),
+            trust_nsig=self.trust_nsig,
         )
 
     def commit(self, r: FringeFitResult, phase_ref: float) -> None:
@@ -62,6 +66,8 @@ class FringeFitParams(PrimitiveSerde):
         self.l0 = float(r.l0)
         self.c0, self.c1, self.c2, self.c3 = (float(v) for v in r.csig)
         self.phase_ref = float(phase_ref)
+        self.ref_wl = float(r.ref_wl)
+        self.ref_fallback = bool(r.ref_fallback)
         self.rms_sig = float(r.rms_sig)
         self.rms_frac = float(r.rms_frac)
         self.inlier_pct = float(r.inlier_pct)
@@ -80,6 +86,8 @@ class FringeFitParams(PrimitiveSerde):
             rms_frac=self.rms_frac,
             inlier_pct=self.inlier_pct,
             has_null=False,
+            ref_wl=self.ref_wl,
+            ref_fallback=self.ref_fallback,
         )
 
     def copy_from(self, other: "FringeFitParams") -> None:
@@ -96,6 +104,10 @@ class FringeFitParams(PrimitiveSerde):
 
     @classmethod
     def from_primitive(cls, v: Primitive) -> "FringeFitParams":
+        # Only fields this class still declares are read, so a config persisted before the
+        # v3 port -- which carries the dead folded-chirp knobs (ratio, sigma_init,
+        # phase_loss_scale, signal_loss_frac, init_smooth_div) -- loads cleanly and simply
+        # ignores them. Missing new fields (trust_nsig, ref_wl) fall back to the defaults.
         kwargs: dict[str, Any] = {}
         for f in fields(cls):
             if f.name not in v:
@@ -104,8 +116,8 @@ class FringeFitParams(PrimitiveSerde):
                 kwargs[f.name] = Length.from_primitive(v[f.name])
             elif f.name in ("pU", "pLn"):
                 kwargs[f.name] = [float(x) for x in v[f.name]]
-            elif f.name == "init_smooth_div":
-                kwargs[f.name] = int(v[f.name])
+            elif f.name == "ref_fallback":
+                kwargs[f.name] = bool(v[f.name])
             else:
                 kwargs[f.name] = float(v[f.name])
         return cls(**kwargs)
@@ -132,8 +144,17 @@ class StabilizationConfig(PrimitiveSerde):
     set_phase: Angle = field(default_factory=lambda: Angle(0))
 
     def accepts(self, r: FringeFitResult) -> bool:
-        """Per-shot quality gate (amplitude-relative; see rms_frac_threshold)."""
+        """Per-shot quality gate.
+
+        `trust_ok` is the important one and it is NOT redundant with the residual gates: a
+        clipped trace costs lever arm, and the chirp c2 goes genuinely underdetermined while
+        the fit still reconstructs at R^2 ~ 0.96. The residual cannot see that -- only the
+        propagated covariance can. Without this clause the app would commit confident-looking
+        phases it has no basis for, which is exactly the failure mode the trust gate exists
+        to stop. Tune it via params.trust_nsig, not by removing it.
+        """
         return (r.accepted
+                and r.trust_ok
                 and r.rms_frac < self.rms_frac_threshold
                 and r.inlier_pct > self.inlier_threshold)
 

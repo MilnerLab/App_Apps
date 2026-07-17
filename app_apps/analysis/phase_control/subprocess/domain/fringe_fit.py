@@ -1,17 +1,30 @@
-"""Cubic-phase fringe fit — pure NumPy/scipy port of the standalone analysis in
-``Data/20260709/spectrometer/plot_traces.py`` (matplotlib/glob/STFT stripped).
+"""Thin adapter between the app and ``fringe_core`` — the verified fringe analysis.
 
-Pipeline per trace (raw counts, already windowed to the analysis band):
-  1. asymmetric pinball-loss Gaussian fit of the upper envelope, and of the
-     (upper-minus-lower) gap envelope;
-  2. closed-form truncation to the high-visibility core;
-  3. Hilbert transform -> unwrapped phase & instantaneous frequency;
-  4. robust folded-chirp fit (single null, no search) to seed the phase;
-  5. FINAL cubic (TOD) fit to the raw fringes with both envelopes held fixed.
+**There is no math in this file, and none may be added.** ``fringe_core.py`` is a VERBATIM
+COPY of the standalone ``Data/20260709/spectrometer/fringe_core.py``; this module only
+translates between the app's frozen dataclasses and that module's ``analyze()``.
 
-The authoritative phase is the final cubic ``csig`` evaluated at a fixed
-reference wavelength (``analyze_trace`` -> ``FringeFitResult.phase_at``), NOT the
-intermediate Hilbert/folded fit.
+That rule is the whole point. Until 2026-07-16 this file carried a hand-maintained second
+copy of the math, and every bug found that day was drift between the two copies:
+
+  * ``fit_ftol=1e-4`` was passed as L-BFGS-B's *relative* ``ftol`` (its default is 2.22e-9),
+    so the envelope fit quit after 19 iterations and returned offset **255** against a truth
+    of **155** on the real bright trace — squeezing sigma ~12% narrow and inflating
+    ``rms_frac``, i.e. feeding the accept gate that was rejecting live frames;
+  * ``cubic_init = [C, 0.0, A, 0.0]`` forced the carrier ``c1 = 0``, and the soft-L1 fit
+    never climbed out: measured, the port reported c1 of -0.15/-4.03/-3.02/-0.39 on the four
+    real traces where the standalone reads 6.65/23.81/8.20/7.68. The carrier — the quantity
+    phase stabilization locks to — was wrong on **every trace**;
+  * the baseline anchor, the truncated-arm detector, BIC phase-order selection and the trust
+    gate simply never arrived.
+
+None of that was a hard bug to write; it was inevitable given two copies. ``analyze_trace``
+now delegates, and ``test/fringe_parity_test.py`` asserts this module and the standalone
+agree bit-for-bit on the real traces, so the copies cannot drift again in silence.
+
+If you need to change the analysis, change the standalone ``fringe_core.py``, re-run its
+harnesses (``verify_phase.py``, ``synth_test.py``, ``synth_truncation.py``), and copy the
+file across whole. Do not patch this side.
 """
 from __future__ import annotations
 
@@ -19,274 +32,199 @@ import logging
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import gaussian_filter1d
-from scipy.optimize import curve_fit, least_squares, minimize
-from scipy.signal import hilbert
+
+from app_apps.analysis.phase_control.subprocess.domain import fringe_core as fc
 
 log = logging.getLogger(__name__)
 
+# Re-exported so callers that already import these from here keep working.
+gauss = fc.gauss
+phase_poly = fc.phase_poly
+signal_model = fc.signal_model
+baseline_anchor = fc.baseline_anchor
+ReferencePolicy = fc.ReferencePolicy
 
-# --------------------------------------------------------------------------- #
-# Tunables (module constants in the standalone script; per-config here).
-# --------------------------------------------------------------------------- #
+
 @dataclass(frozen=True)
 class FitTunables:
-    ratio: float = 10.0          # pinball penalty ratio above:below (higher hugs crests)
-    sigma_init: float = 4.0      # initial Gaussian sigma guess (nm) for the L2 warm start
-    trunc_threshold: float = 0.40  # keep where gap >= min + THRESHOLD*(max-min); higher =>
-                                   # tighter crop. Raised 0.25 -> 0.40 after a harness sweep:
-                                   # pass rate climbs monotonically as we crop tighter to a
-                                   # flat plateau at 0.35-0.45 (~98.6% vs 97.7% at 0.25) -- the
-                                   # low-SNR fringe wings hurt the phase fit more than their
-                                   # extra lever-arm helps. Held out on fresh seeds and on the
-                                   # three real traces (da17 null unmoved) it stays ahead.
-    phase_loss_scale: float = 1.0  # soft-L1 scale (rad) for the folded-phase fit
-    signal_loss_frac: float = 1.0  # soft-L1 scale as a fraction of local half-amplitude
-    init_smooth_div: int = 50    # null-init smoothing sigma = max(N // this, 2)
-    inlier_nsigma: float = 3.0   # inlier if |resid| < this * robust MAD scale
-    # solver caps (rarely touched; kept out of the UI)
-    fit_maxfev: int = 10_000     # curve_fit evaluation cap (warm start)
-    fit_maxiter: int = 20_000    # L-BFGS-B iteration cap (pinball refinement)
-    fit_ftol: float = 1e-4       # L-BFGS-B f-tolerance
+    """User-editable inputs. Everything else is a calibrated constant in ``fringe_core``.
+
+    The knobs the old folded-chirp fitter needed (``phase_loss_scale``, ``init_smooth_div``,
+    ``inlier_nsigma``, ``fit_ftol``) are GONE: that pipeline is gone. ``fit_ftol`` in
+    particular must not come back — it was the L-BFGS-B units bug, and the envelope fit is
+    Nelder-Mead now precisely because a kinked loss makes it unconditionally safe.
+    """
+
+    trunc_threshold: float = 0.40   # keep where the envelope gap >= min + THIS*(max-min).
+                                    # Harness-swept: pass rate climbs monotonically as the
+                                    # crop tightens, to a flat plateau at 0.35-0.45.
+    trust_nsig: float = 3.0         # require THIS * sigma to fit inside the accuracy spec
+                                    # before the phase is reported at all. This is the
+                                    # accuracy/yield trade, measured over the full operating
+                                    # space (2470 fits, two seeds) as accuracy of reported
+                                    # fits / fraction of good fits thrown away:
+                                    #   2.0 -> 97.97% /  0.8%     4.0 -> 98.99% /  9.0%
+                                    #   3.0 -> 98.54% /  3.7%     5.0 -> 99.31% / 15.0%
+                                    #   3.25-> 98.69% /  4.9%    16.0 -> 99.86% / 69.5%
+                                    # 3.0 is the spec point (>=98% accurate, <=5% dropped)
+                                    # with margin on both. Loosen toward 2.0 while aligning
+                                    # if you want every frame to commit; do NOT push past
+                                    # ~5 for accuracy -- it saturates while the yield
+                                    # collapses. See fringe_core's TRUST_NSIG comment.
 
 
 @dataclass(frozen=True)
 class FringeFitResult:
-    """Outcome of one trace fit. ``accepted`` is a solver-success flag only; the
-    caller applies its own quality gate on ``rms_frac`` / ``inlier_pct``."""
+    """Outcome of one trace fit.
+
+    ``accepted`` is a solver-success flag only — the caller applies its own quality gate
+    (``StabilizationConfig.accepts``) on ``rms_frac`` / ``inlier_pct`` / ``trust_ok``.
+    """
+
     accepted: bool
     pU: tuple[float, float, float, float]     # upper envelope Gaussian (a, mu, sigma, off)
     pLn: tuple[float, float, float, float]    # gap (U-L) Gaussian (a, mu, sigma, off)
-    l0: float                                 # null / phase origin (nm)
-    csig: tuple[float, float, float, float]   # cubic phase coeffs (c0, c1, c2, c3) in u=lambda-l0
+    l0: float                                 # phase basis origin (nm) = core centroid
+    csig: tuple[float, float, float, float]   # cubic phase coeffs (c0..c3) in u = lambda-l0
     phase_ref: float                          # phase_poly(csig, lambda_ref - l0) [rad]
     rms_sig: float                            # raw-signal fit RMS (counts)
-    rms_frac: float                           # rms_sig / median(half-amplitude): scale-free fit
-                                              # residual (~0 perfect, ~0.7 = fit no better than
-                                              # a flat line). Amplitude-relative so the accept
-                                              # gate works on bright and dim traces alike.
-    inlier_pct: float                         # folded-phase inlier fraction (%)
-    has_null: bool                            # null lies inside the truncated window
+    rms_frac: float                           # rms_sig / median(half-amp): scale-free, so the
+                                              # accept gate works on bright and dim alike
+    inlier_pct: float                         # fraction of core samples within 3*MAD (%)
+    has_null: bool                            # frequency null lies inside the core
+
+    # --- v3 additions ------------------------------------------------------------------
+    status: str = "ok"                        # "ok" | "underdetermined" | "dead_window" |
+                                              # "too_few" | "nonfinite" | "error"
+    trust_ok: bool = True                     # the data can support the phase AT ref_wl
+    ref_wl: float = float("nan")              # WHERE the phase is trustworthy. READ THIS --
+                                              # never assume 802: a clip near the core moves
+                                              # it to the core centroid.
+    ref_fallback: bool = False                # True => ref_wl moved off the spectral centre
+    csig_sigma: tuple[float, float, float, float] = (0.0,) * 4   # 1-sigma on c0..c3 at ref_wl
+    trunc_side: str = "none"                  # clipped arm: none/left/right/both/all/unknown
+    trunc_hits_core: bool = False             # the fringe-free band overlaps the fitted core
+    msg: str = ""
 
     def phase_at(self, lambda_ref_nm: float) -> float:
-        """Cubic phase at a fixed reference wavelength (radians, unwrapped)."""
-        return float(phase_poly(self.csig, lambda_ref_nm - self.l0))
+        """Cubic phase at a reference wavelength (radians, unwrapped).
+
+        NB ``ref_wl`` is where the fit says the phase is *supportable*. Evaluating here at
+        some other wavelength is allowed and sometimes right, but it is not covered by
+        ``trust_ok``.
+        """
+        return float(fc.phase_poly(np.asarray(self.csig, float), lambda_ref_nm - self.l0))
 
 
-def rejected() -> FringeFitResult:
+def rejected(status: str = "error", msg: str = "") -> FringeFitResult:
     """A fit that failed to converge / had too little signal. NaN-filled."""
     nan4 = (float("nan"),) * 4
-    return FringeFitResult(False, nan4, nan4, float("nan"), nan4,
-                           float("nan"), float("inf"), float("inf"), 0.0, False)
+    return FringeFitResult(
+        accepted=False, pU=nan4, pLn=nan4, l0=float("nan"), csig=nan4,
+        phase_ref=float("nan"), rms_sig=float("inf"), rms_frac=float("inf"),
+        inlier_pct=0.0, has_null=False, status=status, trust_ok=False,
+        ref_wl=float("nan"), ref_fallback=False, msg=msg,
+    )
 
 
-# --------------------------------------------------------------------------- #
-# Model primitives (identical math to the standalone script).
-# --------------------------------------------------------------------------- #
-def gauss(x: np.ndarray, a: float, mu: float, sigma: float, off: float) -> np.ndarray:
-    return a * np.exp(-(x - mu) ** 2 / (2 * sigma ** 2)) + off
-
-
-def _pinball_loss(p: np.ndarray, x: np.ndarray, y: np.ndarray, tau: float) -> float:
-    r = y - gauss(x, *p)
-    return float(np.sum(np.where(r > 0, tau * r, (tau - 1.0) * r)))
-
-
-def _pinball_grad(p: np.ndarray, x: np.ndarray, y: np.ndarray, tau: float) -> np.ndarray:
-    a, mu, sig, _off = p
-    E = np.exp(-(x - mu) ** 2 / (2 * sig ** 2))
-    r = y - (a * E + p[3])
-    w = np.where(r > 0, tau, tau - 1.0)
-    dg_da = E
-    dg_dmu = a * E * (x - mu) / sig ** 2
-    dg_dsig = a * E * (x - mu) ** 2 / sig ** 3
-    return -np.array([np.sum(w * dg_da), np.sum(w * dg_dmu),
-                      np.sum(w * dg_dsig), float(np.sum(w))])
-
-
-def fit_upper_envelope(
-    x: np.ndarray, y: np.ndarray, t: FitTunables,
-    p0: tuple[float, float, float, float] | None = None,
-) -> np.ndarray:
-    """Symmetric L2 warm start, then asymmetric pinball refinement (L-BFGS-B with
-    the analytic subgradient) so the Gaussian hugs the upper fringe envelope.
-
-    ``p0`` seeds the L2 warm start from a prior fit (warm path); when None the
-    seed is the data argmax (cold path)."""
-    tau = t.ratio / (t.ratio + 1.0)
-    if p0 is None:
-        off0 = float(np.median(y))
-        imax = int(np.argmax(y))
-        p0 = [y[imax] - off0, x[imax], t.sigma_init, off0]
-    p0, _ = curve_fit(gauss, x, y, p0=list(p0), maxfev=t.fit_maxfev)
-    res = minimize(_pinball_loss, p0, args=(x, y, tau), method="L-BFGS-B",
-                   jac=_pinball_grad,
-                   options={"maxiter": t.fit_maxiter, "ftol": t.fit_ftol, "gtol": 1e-8})
-    return res.x
-
-
-def folded_phase(p: np.ndarray, l: np.ndarray) -> np.ndarray:
-    """Hilbert-measured phase of a single-null linear chirp: |f| folding turns the
-    signed parabola into a C1 kink at the null l0."""
-    A, l0, C = p
-    return A * (l - l0) * np.abs(l - l0) + C
-
-
-def phase_poly(c: tuple[float, float, float, float] | np.ndarray, u: np.ndarray | float) -> np.ndarray | float:
-    """Cubic (TOD) instantaneous phase in u = lambda - l0."""
-    c0, c1, c2, c3 = c
-    return c0 + c1 * u + c2 * u ** 2 + c3 * u ** 3
-
-
-def signal_model(c: np.ndarray, u: np.ndarray, mid: np.ndarray, half: np.ndarray) -> np.ndarray:
-    """Full raw-fringe model: two fixed envelopes carrying a cubic-phase cosine."""
-    return mid + half * np.cos(phase_poly(c, u))
-
-
-# --------------------------------------------------------------------------- #
-# Full pipeline.
-# --------------------------------------------------------------------------- #
 def analyze_trace(
     wl: np.ndarray,
     intensity: np.ndarray,
     t: FitTunables,
+    anchor: tuple[float, float] | None = None,
+    ref_policy: fc.ReferencePolicy | None = None,
+    lambda_ref_nm: float | None = None,
 ) -> FringeFitResult:
-    """Fit one already-windowed trace, always from scratch. Returns a NaN-filled
-    ``rejected()`` result on any solver failure or degenerate input rather than raising.
+    """Fit one already-windowed trace. Always a cold, independent fit.
 
-    Every call is an independent COLD fit: envelopes from the data argmax, and a
-    from-scratch null search (smoothed-|f| argmin) to seed the folded-chirp fit. There
-    is NO warm-starting -- a fit is never biased by a previous frame's result, so each
-    shot is reproducible in isolation. The null search is the expensive part; that cost
-    is accepted as the price of a fresh, seed-independent fit on every shot."""
+    ``lambda_ref_nm`` is the operator's configured reference — the wavelength the phase is
+    WANTED at, and the lock point of the stabilization loop. It is honoured unless the data
+    cannot support the phase there (a clip near the core), in which case ``ref_wl`` falls
+    back to the core centroid and ``ref_fallback`` says so. Pass None only where there is no
+    operator preference; the fit then uses the fitted intensity centroid, and the reported
+    reference will wander by a fraction of a nm frame to frame.
+
+    ``anchor`` is the ``(U_base, D)`` continuum measurement from
+    ``fringe_core.baseline_anchor()`` on the **FULL frame**, taken BEFORE this window was
+    cut — the analysis window is +-3.1 sigma around the bump and contains no continuum at
+    all, so the envelope offset has nothing to pin it and the tau-quantile loss floats it
+    upward. ``PhaseTracker`` measures it before windowing and passes it down. Omitting it is
+    safe on dim traces and wrong on bright ones (offset 164.9 vs a truth of 155.0).
+
+    ``ref_policy`` is a ``ReferencePolicy`` carried ACROSS frames by the caller, so the
+    reported reference cannot chatter between two wavelengths. Omit it and the reference
+    falls back immediately.
+    """
     try:
-        x = np.asarray(wl, dtype=float)
-        y = np.asarray(intensity, dtype=float)
-        if x.size < 16:
-            log.warning("FITDIAG rejected: only %d points in window", x.size)
-            return rejected()
-
-        # --- Envelopes: upper, and the (upper-lower) gap from the negated residual.
-        pU = fit_upper_envelope(x, y, t)
-        resid_env = y - gauss(x, *pU)
-        pLn = fit_upper_envelope(x, -resid_env, t)
-
-        # --- Closed-form truncation to the high-visibility core.
-        aLn, muLn, sLn, offLn = pLn
-        max_diff = aLn + offLn
-        min_diff = min(gauss(x[0], *pLn), gauss(x[-1], *pLn))
-        level = min_diff + (max_diff - min_diff) * t.trunc_threshold
-        arg = (level - offLn) / aLn if aLn != 0 else -1.0
-        if 0.0 < arg < 1.0:
-            delta = abs(sLn) * np.sqrt(-2.0 * np.log(arg))
-            x_left, x_right = muLn - delta, muLn + delta
-        else:
-            x_left, x_right = x[0], x[-1]
-
-        # --- Normalize fringes with both envelopes; oscillates ~[-1, 1].
-        Ud = gauss(x, *pU)
-        Ld = Ud - gauss(x, *pLn)
-        mid = 0.5 * (Ud + Ld)
-        half = 0.5 * (Ud - Ld)
-        n = (y - mid) / half
-
-        keep = (x >= x_left) & (x <= x_right)
-        xk, nk, midk, halfk, yk = x[keep], n[keep], mid[keep], half[keep], y[keep]
-        if xk.size < 16:
-            log.warning("FITDIAG rejected: core has only %d points after truncation "
-                        "(trunc_threshold=%.2f, window %.1f-%.1f nm)",
-                        xk.size, t.trunc_threshold, float(x[0]), float(x[-1]))
-            return rejected()
-
-        # --- Hilbert analytic signal -> phase & instantaneous frequency.
-        dx = float(np.mean(np.diff(xk)))
-        analytic = hilbert(nk)
-        phase = np.unwrap(np.angle(analytic))
-        f_inst = np.gradient(phase, dx) / (2 * np.pi)
-
-        # --- Folded-chirp fit seed: from-scratch null search (smoothed-|f| argmin).
-        absf_s = gaussian_filter1d(np.abs(f_inst), sigma=max(xk.size // t.init_smooth_div, 2))
-        k0 = int(np.argmin(absf_s))
-        l0_0, C0 = float(xk[k0]), float(phase[k0])
-        denom = float(np.max((xk - l0_0) ** 2))
-        A0 = (phase.max() - phase.min()) / denom if denom > 0 else 1.0
-        folded_init = [A0, l0_0, C0]
-
-        sol = least_squares(lambda p: folded_phase(p, xk) - phase, folded_init,
-                            loss="soft_l1", f_scale=t.phase_loss_scale)
-        A, l0, C = sol.x
-        resid = phase - folded_phase(sol.x, xk)
-        mad = 1.4826 * np.median(np.abs(resid)) + 1e-9
-        inlier_pct = 100.0 * float((np.abs(resid) < t.inlier_nsigma * mad).mean())
-        has_null = bool(xk[0] < l0 < xk[-1])
-
-        # --- FINAL cubic (TOD) raw-signal fit; envelopes fixed, seeded from the
-        #     folded quadratic (c2=A, c0=C, c1=c3=0). This is the authoritative fit.
-        u = xk - l0
-        f_scale_sig = t.signal_loss_frac * float(np.median(halfk)) + 1e-9
-        cubic_init = [C, 0.0, A, 0.0]
-        csig = least_squares(lambda c: signal_model(c, u, midk, halfk) - yk,
-                             cubic_init, loss="soft_l1", f_scale=f_scale_sig).x
-        resid_sig = yk - signal_model(csig, u, midk, halfk)
-        rms_sig = float(np.sqrt(np.mean(resid_sig ** 2)))
-        # Scale-free residual: normalize by the fringe half-amplitude so the accept
-        # gate is independent of how bright the trace is. A perfect fit -> ~0; a fit
-        # no better than the envelope midline -> ~1/sqrt(2). This is the gate metric.
-        rms_frac = rms_sig / (float(np.median(halfk)) + 1e-9)
-
-        # --- Diagnostic logging (INFO): the single most useful comparison is the DATA
-        #     fringe frequency (from the Hilbert |f|) against the SEED carrier (which the
-        #     folded model forces to 0) and the FINAL fitted frequency. If data_f is a few
-        #     cyc/nm but the fit frequency is far from it (or ~0 near l0), the folded/zero-
-        #     carrier seed has trapped the cos fit in a wrong basin -- the expected failure
-        #     on a good, many-fringe, no-null trace. f_fit(u)=(c1+2 c2 u+3 c3 u^2)/2pi.
-        if log.isEnabledFor(logging.WARNING):
-            absf = np.abs(f_inst)
-            d10, d50, d90 = (float(v) for v in np.percentile(absf, [10, 50, 90]))
-            nfringe_data = float(d50 * (xk[-1] - xk[0]))     # ~ number of fringes in core
-
-            def _f_fit(uu: float) -> float:
-                return float((csig[1] + 2 * csig[2] * uu + 3 * csig[3] * uu ** 2) / (2 * np.pi))
-
-            log.warning(
-                "FITDIAG N=%d core=%d dx=%.4fnm span=%.1fnm | data_f=%.2f cyc/nm "
-                "(p10-90 %.2f-%.2f, ~%.0f fringes) | l0=%.2f has_null=%s | "
-                "SEED carrier c1=0 c2=A=%.4g | FIT c=[%.4g,%.4g,%.4g,%.4g] "
-                "fit_f L/C/R=%.2f/%.2f/%.2f cyc/nm | rms=%.1f rms_frac=%.3f inl=%.0f%%",
-                x.size, xk.size, dx, float(xk[-1] - xk[0]),
-                d50, d10, d90, nfringe_data, l0, has_null, A,
-                csig[0], csig[1], csig[2], csig[3],
-                _f_fit(float(u[0])), _f_fit(float(np.median(u))), _f_fit(float(u[-1])),
-                rms_sig, rms_frac, inlier_pct,
-            )
-
-        c_tuple = (float(csig[0]), float(csig[1]), float(csig[2]), float(csig[3]))
-        return FringeFitResult(
-            accepted=True,
-            pU=tuple(float(v) for v in pU),          # type: ignore[arg-type]
-            pLn=tuple(float(v) for v in pLn),        # type: ignore[arg-type]
-            l0=float(l0),
-            csig=c_tuple,
-            phase_ref=float("nan"),                  # filled by caller via phase_at(lambda_ref)
-            rms_sig=rms_sig,
-            rms_frac=rms_frac,
-            inlier_pct=inlier_pct,
-            has_null=has_null,
+        R = fc.analyze(
+            np.asarray(wl, dtype=float), np.asarray(intensity, dtype=float),
+            anchor=anchor, ref_policy=ref_policy,
+            trust_nsig=t.trust_nsig, trunc_threshold=t.trunc_threshold,
+            ref_primary=lambda_ref_nm,
         )
-    except (RuntimeError, ValueError, np.linalg.LinAlgError) as e:
+    except Exception as e:  # fringe_core already guards its own internals; belt and braces
         log.warning("FITDIAG rejected: %s: %s", type(e).__name__, e)
-        return rejected()
+        return rejected("error", f"{type(e).__name__}: {e}")
+
+    status = R.get("status", "error")
+    if R.get("csig") is None:
+        # Degenerate trace (dead window / too few points / non-finite). Not an error.
+        log.warning("FITDIAG rejected [%s]: %s", status, R.get("msg", ""))
+        return rejected(status, R.get("msg", ""))
+
+    half = np.asarray(R["half"], float)
+    med_half = float(np.median(half))
+    rms_sig = float(R["rms_sig"])
+    rms_frac = rms_sig / (med_half + 1e-9)
+
+    resid = np.asarray(R["resid_sig"], float)
+    mad = 1.4826 * float(np.median(np.abs(resid))) + 1e-9
+    inlier_pct = 100.0 * float((np.abs(resid) < 3.0 * mad).mean())
+
+    trunc = R.get("trunc") or {}
+    ref_wl = float(R["ref_wl"])
+
+    if log.isEnabledFor(logging.WARNING):
+        c = R["csig"]
+        log.warning(
+            "FITDIAG core=%d span=%.1fnm q=%d null=%s | c=[%.4g,%.4g,%.4g,%.4g] "
+            "| ref=%.2fnm%s trust=%s | trunc=%s%s | rms=%.1f rms_frac=%.3f inl=%.0f%% %.0fms",
+            len(R["x"]), float(R["x"][-1] - R["x"][0]), R["order"], R["has_null"],
+            c[0], c[1], c[2], c[3], ref_wl,
+            " (MOVED off centre)" if R["ref_fallback"] else "",
+            R["trust_ok"], trunc.get("side", "?"),
+            " HITS-CORE" if trunc.get("hits_core") else "",
+            rms_sig, rms_frac, inlier_pct, R.get("t_run", float("nan")),
+        )
+
+    return FringeFitResult(
+        accepted=True,
+        pU=tuple(float(v) for v in R["pU"]),      # type: ignore[arg-type]
+        pLn=tuple(float(v) for v in R["pLn"]),    # type: ignore[arg-type]
+        l0=float(R["l0"]),
+        csig=tuple(float(v) for v in R["csig"]),  # type: ignore[arg-type]
+        phase_ref=float("nan"),                   # filled by the caller via phase_at()
+        rms_sig=rms_sig,
+        rms_frac=rms_frac,
+        inlier_pct=inlier_pct,
+        has_null=bool(R["has_null"]),
+        status=status,
+        trust_ok=bool(R["trust_ok"]),
+        ref_wl=ref_wl,
+        ref_fallback=bool(R["ref_fallback"]),
+        csig_sigma=tuple(float(v) for v in R["csig_sigma"]),  # type: ignore[arg-type]
+        trunc_side=str(trunc.get("side", "unknown")),
+        trunc_hits_core=bool(trunc.get("hits_core", False)),
+        msg=str(R.get("msg", "")),
+    )
 
 
-def display_curve(
-    r: FringeFitResult, wl_grid: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Reconstruct (mid, half, phase) on an arbitrary wavelength grid from a
-    committed fit, so the chart overlay can draw mid + half*cos(phase) without
-    re-fitting. ``phase`` is the cubic Phi(lambda)."""
-    U = gauss(wl_grid, *r.pU)
-    L = U - gauss(wl_grid, *r.pLn)
-    mid = 0.5 * (U + L)
-    half = 0.5 * (U - L)
-    phase = phase_poly(r.csig, wl_grid - r.l0)
-    return mid, half, np.asarray(phase)
+def display_curve(r: FringeFitResult, wl: np.ndarray):
+    """(mid, half, phase) sampled on ``wl`` for the chart overlay, from a committed fit."""
+    x = np.asarray(wl, dtype=float)
+    Ud = fc.gauss(x, *r.pU)
+    Ld = Ud - fc.gauss(x, *r.pLn)
+    mid = 0.5 * (Ud + Ld)
+    half = 0.5 * (Ud - Ld)
+    phase = fc.phase_poly(np.asarray(r.csig, float), x - r.l0)
+    return mid, half, phase
