@@ -1019,23 +1019,41 @@ def detect_truncation(x, y):
 # Cost: nothing on a good frame (it passes first time and never scans), and ~170 ms per
 # candidate only on frames that would otherwise have been DROPPED and produced nothing at
 # all. A drop becomes a diagnosis.
-TRUNCREC_TRIGGER = 0.20       # rms_frac above this => the model does not explain the trace,
-                              # so try cutting. Well clear of a good live fit (0.06-0.09
-                              # measured on all three real traces) and well below the app's
-                              # 0.30 accept gate, so the scan runs BEFORE a frame is lost,
-                              # not after.
+TRUNCREC_TRIGGER = 0.15       # rms_frac above this => the model does not explain the trace,
+                              # so try cutting.
+                              #
+                              # The window for this is NARROW and measured, not chosen:
+                              #     clean frames     rms_frac p50 0.068, p99 0.145, max 0.147
+                              #     truncated frames rms_frac p05 0.165, p50 0.252
+                              # so it must sit above 0.145 and below 0.165. It was 0.20 --
+                              # ABOVE the truncated p05 -- so truncated frames in 0.165-0.20
+                              # never scanned, and since their median 0.252 is UNDER the
+                              # app's 0.30 accept gate they COMMITTED with the carrier ~3%
+                              # wrong. Raising this hides truncation; lowering it re-fits
+                              # good frames for nothing. Re-measure both distributions
+                              # before touching it.
 TRUNCREC_STEP_NM = 0.25       # cut grid. The real edge needed 0.10 nm resolution to land
                               # between underdetermined (800.05) and COMMIT (800.15), but
                               # the acceptable window is ~0.5 nm wide (800.15-800.55 all
                               # commit) so 0.25 always has a candidate inside it.
-TRUNCREC_MIN_SPAN_NM = 5.0    # never accept a cut that leaves less than this. rms_frac
-                              # ALWAYS improves as you cut more -- you are deleting the
-                              # hardest data -- so a scan that just minimised it would
-                              # "explain" any bad frame by cutting down to three fringes
-                              # (measured: a 0.6 nm span scored a lovely rms_frac 0.070 with
-                              # c2=3.000, pure nonsense). Occam does the real work here: we
-                              # take the SMALLEST cut that explains the trace, not the best-
-                              # scoring one, so a needless cut is never reached.
+TRUNCREC_MIN_SPAN_NM = 3.0    # never accept a cut that leaves less than this.
+                              #
+                              # A HARD FLOOR ONLY -- not the quality guard. It was 5.0, which
+                              # is WIDER THAN A TRUNCATED TRACE'S CORE (measured 4.47 nm: the
+                              # clip collapses the envelope gap, so the 40%-contrast core is
+                              # already narrow). Every candidate was then rejected before it
+                              # was tried and the scan was dead code on exactly the traces it
+                              # exists for. It only ever fired on truncated.csv because that
+                              # core happens to be 8.6 nm.
+                              #
+                              # The real guard against cutting too far is the TRUST GATE
+                              # inside _explains: rms_frac always improves as you cut (you are
+                              # deleting the hardest data), and a 0.6 nm span duly scored a
+                              # lovely 0.070 with c2=3.000 -- but the propagated covariance
+                              # called it underdetermined and it was refused. That plus Occam
+                              # (first success wins, so a needless cut is unreachable) is what
+                              # keeps this honest. This floor is only here to stop the scan
+                              # wasting time on spans no fit could ever support.
 TRUNCREC_MAX_NM = 4.0         # how far into the core to scan from each side. Physical: the
                               # operator's clips land near 802 (">803, <801"), and a clip
                               # that does not reach the core is removed by the contrast cut
@@ -1410,8 +1428,8 @@ def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold
     if R.get("x") is None or len(R["x"]) < 2:
         return R
     lo, hi = float(R["x"][0]), float(R["x"][-1])
-    if (hi - lo) < TRUNCREC_MIN_SPAN_NM:
-        return R
+    if (hi - lo) <= TRUNCREC_MIN_SPAN_NM:
+        return R          # no room for any cut at all
     best = None
     # Smallest cut first, alternating sides, so the first success IS the minimal one.
     steps = int(TRUNCREC_MAX_NM / TRUNCREC_STEP_NM)
