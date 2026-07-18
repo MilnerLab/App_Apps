@@ -19,8 +19,10 @@ from a subprocess worker.
 Pipeline (see analyze()):
   1. detect a spectrally clipped interferometer arm and drop the fringe-free band
   2. fit the envelopes under an asymmetric pinball loss, offset anchored to the continuum
-  3. crop to the high-visibility core, normalize the fringes
-  4. Hilbert -> instantaneous frequency -> null candidates -> BIC picks the phase order
+  3. crop to the high-visibility core (contrast trim), normalize the fringes
+  4. Hilbert -> two-trim seed: phase-value trim + polyfit, with a signed null-flip seed
+     taken per |f| dip only on a clear SSE win, then BIC picks the phase order (see
+     core_seed_fit)
   5. refit the cubic phase on the RAW counts with the envelopes held fixed
   6. propagate the fit covariance and decide WHERE (and whether) the phase can be trusted
 """
@@ -207,21 +209,14 @@ ALIVE_THR = 0.45        # keep samples whose local fringe RMS exceeds this (n ri
                         # [-1,1] so a live fringe has RMS ~0.7; post-clip noise is below)
 MAX_FLIP_CAND = 2       # deepest null candidates to try flipping (each costs one fit)
 
-# --- Phase-order model selection (replaces ridge regularization) --------------
-# Instead of shrinking the higher-order phase terms with a hand-tuned ridge, we fit
-# nested phase models of increasing order and pick the one that earns its keep by
-# BIC: order q means the instantaneous frequency is a degree-(q-1) polynomial, i.e.
-# phase = c0..cq (q=1 carrier / q=2 chirp / q=3 +TOD). BIC = n·ln(SSE/n) + k·ln(n)
-# penalizes extra terms, so spurious TOD is rejected automatically -- no tuning knob.
-#
-# Whether an in-window null exists is NOT thresholded: for each order we try BOTH a
-# no-null seed (polyfit of the smooth monotonic phase) and, for q>=2, a null seed
-# (|f| V-fit anchored at the |f| minimum), keep the better-fitting one, and let BIC
-# choose. A weak real null (frequency just grazing zero) and a no-null core have
-# nearly identical |f| prominence, so a threshold cannot separate them -- the raw-fit
-# residual can. has_null is then read off the winning fit (does f cross zero?).
+# --- Phase-order selection (BIC, replaces ridge regularization) ---------------
+# Order q means the instantaneous frequency is a degree-(q-1) polynomial: phase = c0..cq
+# (q=1 carrier / q=2 chirp / q=3 +TOD). Instead of a hand-tuned ridge, BIC = n·ln(SSE/n)
+# + k·ln(n) penalizes extra terms, so spurious TOD is rejected automatically -- no tuning
+# knob. Applied only when the frequency is one-signed (no null); at a null TOD is
+# unidentifiable and the order is capped at 2 (see core_seed_fit).
 
-# --- Soft null penalty (on the |f| V-fit that provides the null seed) ------------
+# --- Soft null penalty (on the |f| V-fit that provides the null-flip seed) -------
 # The null seed fits the Hilbert |f| with a frequency polynomial whose value at the
 # anchor is softly pulled to zero, so the seed genuinely has its null at the located
 # minimum. Soft (a penalty, not a hard constraint) so real data still moves it.
@@ -489,34 +484,6 @@ def _bic_sse(sse, k, n):
     return n * np.log((float(sse) + 1e-12) / n) + k * np.log(n)
 
 
-def fit_freq(u, f_inst, has_null, q):
-    """Fit the UNSIGNED Hilbert |f| with |degree-(q-1) frequency polynomial|, i.e.
-    f(u) = g0 + g1 u + ... (q terms). A soft penalty pulls f(0)->0 when a null is
-    present. Returns g padded to length 3 (units: cycles/nm)."""
-    absf = np.abs(f_inst)
-    w = float(np.median(absf))
-    ue = float(np.max(np.abs(u))) + 1e-9
-
-    def resid(g):
-        gp = np.zeros(3); gp[:q] = g
-        r = np.abs(gp[0] + gp[1] * u + gp[2] * u ** 2) - absf
-        if has_null:
-            r = np.concatenate([r, [NULL_PEN_FREQ * gp[0]]])
-        return r
-
-    best = None
-    for s in (1.0, -1.0):
-        g0 = np.zeros(q)
-        g0[0] = 0.0 if has_null else s * w      # null => f(0)~0; else carrier ~ median|f|
-        if q >= 2:
-            g0[1] = s * w / ue                   # slope so |f| spans ~median over the core
-        sol = least_squares(resid, g0, loss="soft_l1", max_nfev=4000)
-        if best is None or sol.cost < best.cost:
-            best = sol
-    gp = np.zeros(3); gp[:q] = best.x
-    return gp
-
-
 def _freq_to_phase(g):
     """Convert a frequency polynomial g (cycles/nm) to phase coeffs c1..c3 (radians),
     via c_k coefficient of u^k in Phi = 2*pi*integral(f). c0 is set separately."""
@@ -609,8 +576,14 @@ def core_seed_fit(u, y, mid, half, n, phase, f_inst, cands, f_scale, origin,
             if sse < thresh and sse < sse2:
                 csig2, cph2, sse2, flipped = c_flip, seed, sse, True
 
-    # A null in-window (or a taken flip) => TOD unidentifiable => cap the order at 2. Else
-    # the frequency is one-signed: let BIC admit a cubic if it earns its keep.
+    # A null in-window (or a taken flip) => TOD is unidentifiable, so CAP the order at 2:
+    # at a null the phase turns over and a cubic can curve freely around it without
+    # improving the fit, so a free c3 would just track noise. The flip has already fixed
+    # the SEED (c1, c2) through the null; the cap is the separate, orthogonal statement that
+    # c3 cannot be read there. When the frequency is one-signed and well-sampled, BIC admits
+    # a cubic only if it earns its keep against the k*ln(n) penalty -- which the carrier
+    # sweep needs (its traces carry real TOD), while the 2/3 with c3~0 keep the tight
+    # covariance the trust gate needs to certify them (a needless free c3 inflates it).
     f2 = (csig2[1] + 2 * csig2[2] * ua) / (2 * np.pi)
     if flipped or bool(np.min(f2) < 0.0 < np.max(f2)):
         return csig2, cph2, 2
@@ -1336,16 +1309,11 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
         # Contrast trim (above) removed the low-visibility wings; here the phase-value
         # trim drops the folded null plateau and a quadratic seed is refined on the raw
         # counts, with a signed "flip" seed taken per |f| dip only if it cuts the fringe
-        # SSE by FLIP_SSE_MARGIN. Fixed quadratic (order=2): a free cubic is unidentifiable
-        # at a null and buys nothing here (|c3| <= 0.005 < the trust tolerance anyway).
+        # SSE by FLIP_SSE_MARGIN. Order is BIC-selected when the frequency is one-signed,
+        # capped at 2 at a null (csig is the graded answer, cph its Hilbert-domain seed).
         csig, cph, order = core_seed_fit(u, y, mid, half, n, phase, f_inst, cands,
                                          f_scale_sig, origin)
-        sel = {"csig": csig, "cph": cph}
         l0 = origin
-
-        # Full-signal fit (the graded answer) and its seed (the Hilbert-domain fit).
-        csig = sel["csig"]
-        cph = sel["cph"]
         c0, c1, c2, c3 = csig
         phase_cubic = phase_poly(csig, u)
         f_model = (c1 + 2 * c2 * u + 3 * c3 * u ** 2) / (2 * np.pi)
