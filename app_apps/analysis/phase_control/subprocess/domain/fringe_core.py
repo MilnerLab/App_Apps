@@ -187,8 +187,25 @@ TRUNCDET_NOISE_GAP_FRAC = 0.25  # noise is sampled from this lowest quantile of 
 SMOOTH_FRAC = 0.06    # gaussian sigma for smoothing |f|, as a fraction of core length
 MAX_NULL_CAND = 3     # how many candidate nulls (deepest interior |f| minima, i.e.
                       # zero-derivative dips) to try as anchors; each competes as a
-                      # "with-null" seed against the "no-null" seed and BIC decides,
+                      # "with-null" seed against the "no-null" seed and the SSE decides,
                       # so an inaccurate or false candidate cannot poison the fit
+
+# --- Two-trim + null-flip seed core (replaces BIC/order selection) -------------
+# The seed for the full-signal fit is chosen by the two-trim scheme, validated on the
+# synthetic grid (endtrim_synth.py, 100%/216) and on the six real traces: the contrast
+# crop above already removed the low-visibility wings (trim 1); here we take the Hilbert
+# phase, drop the top/bottom PHASE_TRIM of its VALUE range (trim 2) to cut the folded
+# null plateau, and polyfit a quadratic seed of the surviving one-sided arm. That seed
+# is right whenever the phase is (near-)monotonic. Where the fringe frequency crosses a
+# zero-path null the monotonic Hilbert phase FOLDS, so for each |f| dip we also build a
+# SIGNED parabolic seed (fit_freq_null + recover_offset) that carries the real chirp
+# through the null, and take that "flip" only if it cuts the fringe SSE by >= the margin.
+PHASE_TRIM = 0.15       # phase-VALUE trim fraction (validated value; endtrim_synth TRIM)
+FLIP_SSE_MARGIN = 0.15  # take a null flip only if it cuts fringe SSE by >= this fraction
+ALIVE_WIN_FRAC = 0.07   # rolling-RMS window (fraction of core) for the fringe-alive mask
+ALIVE_THR = 0.45        # keep samples whose local fringe RMS exceeds this (n rides
+                        # [-1,1] so a live fringe has RMS ~0.7; post-clip noise is below)
+MAX_FLIP_CAND = 2       # deepest null candidates to try flipping (each costs one fit)
 
 # --- Phase-order model selection (replaces ridge regularization) --------------
 # Instead of shrinking the higher-order phase terms with a hand-tuned ridge, we fit
@@ -433,6 +450,18 @@ def null_candidates(x, fs):
     return out[:MAX_NULL_CAND]
 
 
+def fringe_alive(nc):
+    """Boolean mask of the fringe-bearing samples of the normalized core: local RMS of
+    the normalized fringe above ALIVE_THR. This cuts a truncated tail (where n is noise)
+    that the smooth Gaussian contrast crop cannot see -- a lighter cut than detect_truncation,
+    which on a null+truncation clip can miss the side entirely. It also trims the immediate
+    null neighbourhood (n->0 there), which costs no phase information. A clean untruncated
+    core is alive throughout, so its path is untouched."""
+    w = max(int(len(nc) * ALIVE_WIN_FRAC), 5)
+    roll = np.sqrt(uniform_filter1d(np.asarray(nc, float) ** 2, w))
+    return roll > ALIVE_THR
+
+
 def fit_freq_null(u, f_inst, u_anchor):
     """Build a QUADRATIC-phase null seed: fit the Hilbert |f| with a LINEAR frequency
     g0 + g1 u (so the phase is quadratic -- no TOD in the seed; TOD is left for the
@@ -522,6 +551,75 @@ def fit_signal(u, y, mid, half, seed, q, f_scale):
     sol = least_squares(resid, seed[:q + 1], loss="soft_l1", f_scale=f_scale, max_nfev=6000)
     cp = np.zeros(4); cp[:q + 1] = sol.x
     return cp
+
+
+def _trim_seed_fit(u, phase, y, mid, half, f_scale, trim, q=2):
+    """Phase-VALUE trim on a Hilbert phase, quadratic polyfit seed, full-signal refit.
+    Drops the top/bottom `trim` of the phase range (the folded null plateau), polyfits a
+    degree-q seed of the surviving arm, and refines it on the raw counts with fit_signal.
+    Returns (csig, cph, sse) with cph the polyfit seed and csig the refined coeffs."""
+    lo, hi = float(phase.min()), float(phase.max()); span = hi - lo + 1e-12
+    keep = (phase >= lo + trim * span) & (phase <= hi - trim * span)
+    if keep.sum() < q + 2:
+        keep = np.ones_like(phase, bool)
+    cph = np.concatenate([np.polyfit(u[keep], phase[keep], q)[::-1], np.zeros(3 - q)])
+    csig = fit_signal(u, y, mid, half, cph, q, f_scale)
+    sse = float(np.sum((signal_model(csig, u, mid, half) - y) ** 2))
+    return csig, cph, sse
+
+
+def core_seed_fit(u, y, mid, half, n, phase, f_inst, cands, f_scale, origin,
+                  trim=PHASE_TRIM, use_flip=True):
+    """Two-trim + null-flip seed core on an already contrast-cropped core.
+
+    The SEED for the full-signal fit is chosen by the two-trim scheme; two quadratic seeds
+    compete and the one whose fit best reconstructs the raw fringe (lowest SSE) wins:
+      * NO-NULL: phase-value trim on the Hilbert phase -> polyfit seed. This is the plain
+        two-trim; correct whenever the phase is (near-)monotonic.
+      * NULL (the flip): for each detected |f| dip, fit_freq_null fits a SIGNED linear
+        frequency to |f| (it does NOT reflect the noisy Hilbert phase -- it fits a smooth
+        signed model and integrates) and recover_offset sets c0 from the fringe, giving a
+        signed parabolic seed that carries the real chirp through the null. A flip is taken
+        only if it beats the no-null fit by FLIP_SSE_MARGIN, so it never perturbs a trace
+        that was already fine (the carrier is not needlessly negated).
+    All seeds and fits use the fringe-ALIVE subset of the core, so a truncated tail the
+    contrast crop missed does not drag the fit.
+
+    ORDER: if the winning quadratic has an in-window null (or a flip was taken), TOD is
+    unidentifiable and the order is CAPPED at 2. Otherwise the frequency is one-signed and
+    well-sampled, so BIC chooses among q in {1,2,3} (seeded from the same phase-value trim)
+    -- this keeps the cubic where it is earned, which the carrier sweep needs. Returns
+    (csig, cph, order)."""
+    alive = fringe_alive(n)
+    if alive.sum() < 6:
+        alive = np.ones_like(n, bool)
+    ua, ya, ma, ha, na, pha = (u[alive], y[alive], mid[alive], half[alive],
+                               n[alive], phase[alive])
+
+    # NO-NULL quadratic seed: the plain two-trim (phase-value trim + polyfit), on alive
+    csig2, cph2, sse2 = _trim_seed_fit(ua, pha, ya, ma, ha, f_scale, trim, q=2)
+    flipped = False
+    if use_flip and len(ua) > 8:
+        thresh = sse2 * (1.0 - FLIP_SSE_MARGIN)
+        for _, xn in cands[:MAX_FLIP_CAND]:
+            u_anchor = xn - origin                # xn is a wavelength; map to the u basis
+            seed = recover_offset(ua, na, fit_freq_null(ua, f_inst[alive], u_anchor), 2)
+            c_flip = fit_signal(ua, ya, ma, ha, seed, 2, f_scale)
+            sse = float(np.sum((signal_model(c_flip, ua, ma, ha) - ya) ** 2))
+            if sse < thresh and sse < sse2:
+                csig2, cph2, sse2, flipped = c_flip, seed, sse, True
+
+    # A null in-window (or a taken flip) => TOD unidentifiable => cap the order at 2. Else
+    # the frequency is one-signed: let BIC admit a cubic if it earns its keep.
+    f2 = (csig2[1] + 2 * csig2[2] * ua) / (2 * np.pi)
+    if flipped or bool(np.min(f2) < 0.0 < np.max(f2)):
+        return csig2, cph2, 2
+    cand = {2: (csig2, cph2, sse2)}
+    for q in (1, 3):
+        cand[q] = _trim_seed_fit(ua, pha, ya, ma, ha, f_scale, trim, q=q)
+    order = min(cand, key=lambda q: _bic_sse(cand[q][2], q + 1, len(ya)))
+    csig, cph, _ = cand[order]
+    return csig, cph, order
 
 
 def _shift_matrix(d):
@@ -1234,35 +1332,15 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
         prom = cands[0][0] if cands else 0.0
         f_scale_sig = SIGNAL_LOSS_FRAC * float(np.median(half)) + 1e-9
 
-        # --- Phase-order model selection (replaces ridge) ------------------------
-        # All seeds are QUADRATIC (no TOD in the Hilbert fit): a "no-null" seed from a
-        # polyfit of the smooth monotonic phase, and one "with-null" seed per candidate
-        # dip (|f| V-fit anchored there). We fit every quadratic seed and keep the
-        # lowest-SSE one, so a false/inaccurate null candidate simply loses.
-        nonull1 = np.concatenate([np.polyfit(u, phase, 1)[::-1], np.zeros(2)])
-        nonull2 = np.concatenate([np.polyfit(u, phase, 2)[::-1], np.zeros(1)])
-        null_seeds = [recover_offset(u, n, fit_freq_null(u, f_inst, xn - origin), 2)
-                      for _, xn in cands]
-
-        def fit_from(seed, q):
-            sq = np.zeros(4); sq[:q + 1] = seed[:q + 1]
-            cq = fit_signal(u, y, mid, half, sq, q, f_scale_sig)
-            sse = float(np.sum((signal_model(cq, u, mid, half) - y) ** 2))
-            return dict(csig=cq, cph=sq, sse=sse)
-
-        q2 = min((fit_from(s, 2) for s in [nonull2] + null_seeds), key=lambda t: t["sse"])
-        f2 = (q2["csig"][1] + 2 * q2["csig"][2] * u) / (2 * np.pi)
-        # A null in-window means TOD is unidentifiable and a free cubic would just curve
-        # around the null. So if the best quadratic already has a null, CAP the order at
-        # 2 (c3=0; true |c3|<=0.005 < the tolerance anyway). TOD is fit only when the
-        # frequency stays one-signed (well-sampled, no null) -- BIC then admits q=3 only
-        # if it earns its keep.
-        if bool(np.min(f2) < 0.0 < np.max(f2)):
-            order, sel = 2, q2
-        else:
-            cand = {1: fit_from(nonull1, 1), 2: q2, 3: fit_from(nonull2, 3)}
-            order = min(cand, key=lambda q: _bic_sse(cand[q]["sse"], q + 1, len(y)))
-            sel = cand[order]
+        # --- Two-trim + null-flip seed core --------------------------------------
+        # Contrast trim (above) removed the low-visibility wings; here the phase-value
+        # trim drops the folded null plateau and a quadratic seed is refined on the raw
+        # counts, with a signed "flip" seed taken per |f| dip only if it cuts the fringe
+        # SSE by FLIP_SSE_MARGIN. Fixed quadratic (order=2): a free cubic is unidentifiable
+        # at a null and buys nothing here (|c3| <= 0.005 < the trust tolerance anyway).
+        csig, cph, order = core_seed_fit(u, y, mid, half, n, phase, f_inst, cands,
+                                         f_scale_sig, origin)
+        sel = {"csig": csig, "cph": cph}
         l0 = origin
 
         # Full-signal fit (the graded answer) and its seed (the Hilbert-domain fit).
