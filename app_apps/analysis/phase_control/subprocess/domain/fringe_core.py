@@ -552,11 +552,13 @@ def core_seed_fit(u, y, mid, half, n, phase, f_inst, cands, f_scale, origin,
     All seeds and fits use the fringe-ALIVE subset of the core, so a truncated tail the
     contrast crop missed does not drag the fit.
 
-    ORDER: if the winning quadratic has an in-window null (or a flip was taken), TOD is
-    unidentifiable and the order is CAPPED at 2. Otherwise the frequency is one-signed and
-    well-sampled, so BIC chooses among q in {1,2,3} (seeded from the same phase-value trim)
-    -- this keeps the cubic where it is earned, which the carrier sweep needs. Returns
-    (csig, cph, order)."""
+    ORDER: BIC over q in {2, 3} (seeded from the same phase-value trim; the flip seed
+    enters at q=2). The k*ln(n) penalty admits a cubic only when it is earned -- which the
+    carrier sweep needs (real TOD) -- and refuses an unidentifiable one, including at a null
+    where a free c3 curves harmlessly around the fold without cutting SSE. No explicit
+    null/flip order-cap is needed: the flip has already fixed c1,c2 THROUGH the null via the
+    seed, and BIC handles c3 the same way everywhere. (q=1 is dropped: a pure carrier still
+    needs c2 sampled, and q=1 never won on the validation grid.) Returns (csig, cph, order)."""
     alive = fringe_alive(n)
     if alive.sum() < 6:
         alive = np.ones_like(n, bool)
@@ -565,7 +567,6 @@ def core_seed_fit(u, y, mid, half, n, phase, f_inst, cands, f_scale, origin,
 
     # NO-NULL quadratic seed: the plain two-trim (phase-value trim + polyfit), on alive
     csig2, cph2, sse2 = _trim_seed_fit(ua, pha, ya, ma, ha, f_scale, trim, q=2)
-    flipped = False
     if use_flip and len(ua) > 8:
         thresh = sse2 * (1.0 - FLIP_SSE_MARGIN)
         for _, xn in cands[:MAX_FLIP_CAND]:
@@ -574,22 +575,17 @@ def core_seed_fit(u, y, mid, half, n, phase, f_inst, cands, f_scale, origin,
             c_flip = fit_signal(ua, ya, ma, ha, seed, 2, f_scale)
             sse = float(np.sum((signal_model(c_flip, ua, ma, ha) - ya) ** 2))
             if sse < thresh and sse < sse2:
-                csig2, cph2, sse2, flipped = c_flip, seed, sse, True
+                csig2, cph2, sse2 = c_flip, seed, sse
 
-    # A null in-window (or a taken flip) => TOD is unidentifiable, so CAP the order at 2:
-    # at a null the phase turns over and a cubic can curve freely around it without
-    # improving the fit, so a free c3 would just track noise. The flip has already fixed
-    # the SEED (c1, c2) through the null; the cap is the separate, orthogonal statement that
-    # c3 cannot be read there. When the frequency is one-signed and well-sampled, BIC admits
-    # a cubic only if it earns its keep against the k*ln(n) penalty -- which the carrier
-    # sweep needs (its traces carry real TOD), while the 2/3 with c3~0 keep the tight
-    # covariance the trust gate needs to certify them (a needless free c3 inflates it).
-    f2 = (csig2[1] + 2 * csig2[2] * ua) / (2 * np.pi)
-    if flipped or bool(np.min(f2) < 0.0 < np.max(f2)):
-        return csig2, cph2, 2
-    cand = {2: (csig2, cph2, sse2)}
-    for q in (1, 3):
-        cand[q] = _trim_seed_fit(ua, pha, ya, ma, ha, f_scale, trim, q=q)
+    # ORDER by BIC over {2, 3}. BIC's k*ln(n) penalty admits a cubic only when it earns its
+    # keep -- which the carrier sweep needs (its traces carry real TOD) -- and refuses one it
+    # cannot support, so the 2/3 with c3~0 keep the tight covariance the trust gate needs.
+    # This handles the null case too, with no separate cap: at a null a free c3 curves
+    # harmlessly around the fold without cutting SSE, so BIC declines it; the flip (above)
+    # has already fixed c1, c2 through the null via the seed. A taken flip therefore no
+    # longer gates the order -- its csig2 simply competes at q=2. (q=1 dropped: it never won.)
+    cand = {2: (csig2, cph2, sse2),
+            3: _trim_seed_fit(ua, pha, ya, ma, ha, f_scale, trim, q=3)}
     order = min(cand, key=lambda q: _bic_sse(cand[q][2], q + 1, len(ya)))
     csig, cph, _ = cand[order]
     return csig, cph, order
@@ -1309,8 +1305,9 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
         # Contrast trim (above) removed the low-visibility wings; here the phase-value
         # trim drops the folded null plateau and a quadratic seed is refined on the raw
         # counts, with a signed "flip" seed taken per |f| dip only if it cuts the fringe
-        # SSE by FLIP_SSE_MARGIN. Order is BIC-selected when the frequency is one-signed,
-        # capped at 2 at a null (csig is the graded answer, cph its Hilbert-domain seed).
+        # SSE by FLIP_SSE_MARGIN. Order is BIC-selected over {2,3} everywhere -- BIC alone
+        # declines an unidentifiable cubic at a null (csig is the graded answer, cph its
+        # Hilbert-domain seed). has_null below is thus the single place a null is decided.
         csig, cph, order = core_seed_fit(u, y, mid, half, n, phase, f_inst, cands,
                                          f_scale_sig, origin)
         l0 = origin
