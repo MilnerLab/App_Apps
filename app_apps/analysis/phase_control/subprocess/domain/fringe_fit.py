@@ -49,16 +49,26 @@ ReferencePolicy = fc.ReferencePolicy
 class FitTunables:
     """User-editable inputs. Everything else is a calibrated constant in ``fringe_core``.
 
+    **The defaults are IMPORTED from ``fringe_core``, never written out here.** Copying a
+    calibrated number into this file is the same drift bug as copying the math, and it bit
+    us the same way: after the v3 port the two ``fringe_core.py`` files were byte-identical
+    and the parity test still failed by up to 24.6 rad/nm of carrier on a real trace, purely
+    because this class said ``trunc_threshold = 0.40`` while the standalone had recalibrated
+    ``TRUNC_THRESHOLD`` to 0.30. Byte-identical math fed different constants is a different
+    analysis. If you need another knob, alias the module constant; never retype its value.
+
     The knobs the old folded-chirp fitter needed (``phase_loss_scale``, ``init_smooth_div``,
     ``inlier_nsigma``, ``fit_ftol``) are GONE: that pipeline is gone. ``fit_ftol`` in
     particular must not come back — it was the L-BFGS-B units bug, and the envelope fit is
     Nelder-Mead now precisely because a kinked loss makes it unconditionally safe.
     """
 
-    trunc_threshold: float = 0.40   # keep where the envelope gap >= min + THIS*(max-min).
-                                    # Harness-swept: pass rate climbs monotonically as the
-                                    # crop tightens, to a flat plateau at 0.35-0.45.
-    trust_nsig: float = 3.0         # require THIS * sigma to fit inside the accuracy spec
+    trunc_threshold: float = fc.TRUNC_THRESHOLD
+                                    # keep where the envelope gap >= min + THIS*(max-min).
+                                    # Harness-swept; see fringe_core.TRUNC_THRESHOLD for the
+                                    # live calibration and the record of why it last moved.
+    trust_nsig: float = fc.TRUST_NSIG
+                                    # require THIS * sigma to fit inside the accuracy spec
                                     # before the phase is reported at all. This is the
                                     # accuracy/yield trade, measured over the full operating
                                     # space (2470 fits, two seeds) as accuracy of reported

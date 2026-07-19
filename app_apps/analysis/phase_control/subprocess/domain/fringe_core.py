@@ -72,7 +72,12 @@ ANCHOR_MIN_PTS = 40        # below this much continuum, decline to anchor (stay 
 # low-SNR fringe wings hurt the phase fit more than their extra lever-arm helps. 0.40 is
 # the plateau centre; held out on 3 fresh seeds it stays ahead (99.0% vs 98.8%) and it
 # leaves real-data cores healthy (~150-185 pts) with the da17 null unmoved (@799.53).
-TRUNC_THRESHOLD = 0.40  # (was 0.25) fraction of peak envelope contrast kept as the core
+TRUNC_THRESHOLD = 0.30  # (was 0.40) fraction of peak envelope contrast kept as the core.
+                        # Eased off from 0.40: the tighter crop shortened the lever arm enough
+                        # to fail trust on 2020607181645 AND clipped clean cores enough that
+                        # their faded blue-edge visibility read as a lead-in dead run, firing
+                        # the knife on a clean trace. 0.30 keeps the arm; the knife now removes
+                        # the dead sliver, so the contrast crop no longer has to.
 
 # --- Truncated-arm detection (DIAGNOSTIC ONLY -- never feeds the fit) ---------
 # One interferometer arm clipped (slit / aperture / shaper mask) removes a spectral
@@ -207,7 +212,58 @@ FLIP_SSE_MARGIN = 0.15  # take a null flip only if it cuts fringe SSE by >= this
 ALIVE_WIN_FRAC = 0.07   # rolling-RMS window (fraction of core) for the fringe-alive mask
 ALIVE_THR = 0.45        # keep samples whose local fringe RMS exceeds this (n rides
                         # [-1,1] so a live fringe has RMS ~0.7; post-clip noise is below)
+# --- Truncated-END trim (before Hilbert): the OSCILLATION mask ----------------
+# fringe_alive keys on the MAGNITUDE of n (rolling RMS), which a truncated arm defeats:
+# past the clip only one arm survives, so with the envelopes mis-estimated across the
+# collapsed gap n sits PINNED near +-1 (high |n|) while it no longer OSCILLATES. Measured
+# on a real left-clip: the dead band reads rolling-|n| ~0.9 (higher than the live core)
+# yet its local oscillation is ~0.05. So the end-trim keys on oscillation -- the rolling
+# STD of n about its local mean -- not magnitude. A genuine null reads low oscillation too,
+# but it is LOW-|n| (n passes through 0) and, decisively, INTERIOR (fringes resume past it),
+# so trimming only edge-touching dead runs leaves it untouched. Threshold is a low floor: a
+# dead band is ~0.05, a null bottom ~0.11, the weakest real fringe ~0.25, so 0.15 sits in
+# the gap and only trims genuinely oscillation-free ends.
+OSC_WIN_FRAC = 0.07     # rolling-std window (fraction of core) for the oscillation measure
+OSC_DEAD_THR = 0.15     # below this local oscillation, a sample carries no live fringe
 MAX_FLIP_CAND = 2       # deepest null candidates to try flipping (each costs one fit)
+
+# --- Scan-free deterministic pipeline (replaces the recovery scan) -------------
+# The derivative "coarse cut" idea was tried and DROPPED (2026-07-19): measured net-negative
+# on every harness -- it over-crops good traces into false-drops (even after the smoothing
+# and one-sided-envelope fixes it added 16 false-drops vs no coarse cut on the realistic
+# synth suite) and it never fixed the truncation corner it was built for. The scan-free path
+# is: full-window envelopes -> contrast crop -> oscillation end-trim -> Hilbert -> TRUNCATION
+# TRIM -> seed/fit. On the realistic suite this beats the shipped scan (99.6% vs 98.8%, fewer
+# wrong) with no 12 s scan. Truncation is handled by trimming the core; two methods, both
+# built for comparison (TRUNC_METHOD):
+SCANFREE = False        # master flag: True routes analyze()/_analyze_once through the
+                        # deterministic scan-free path and SKIPS the recovery scan.
+TRUNC_METHOD = "phase"  # "phase" | "knife" | "none":
+                        #   phase = conditional phase-VALUE trim (baseline both ends, more on
+                        #           a detected dead side); reuses the validated phase-trim idea.
+                        #   knife = knife-edge cut detector (the physical cut is 0.2-0.3 nm
+                        #           wide, so find that sharp oscillation edge with a dead zone
+                        #           beyond it and cut there).
+                        #   none  = no truncation handling (the plain end-trimmed core).
+# -- conditional phase trim (TRUNC_METHOD="phase") --
+PHASE_TRIM_BASE = 0.05  # baseline phase-VALUE trim at BOTH ends. The flat dead zone accrues
+                        # ~no phase, so the legacy 15% both-ends trim wasted good signal; 5%
+                        # is a light residue clean-up.
+PHASE_TRIM_DEAD = 0.25  # phase-VALUE trim at an end with a DETECTED dead region (the clip).
+PHASE_DEAD_RATIO = 0.45 # an end is "dead" if its local oscillation is below this * the core
+                        # median oscillation.
+PHASE_DEAD_FRAC = 0.12  # fraction of the core at each end examined for the dead test.
+# -- knife-edge cut detector (TRUNC_METHOD="knife") --
+KNIFE_MIN_NM = 0.12     # the knife-edge cut is physically ~0.2-0.3 nm wide; accept a high->
+KNIFE_MAX_NM = 0.55     # dead oscillation transition whose width falls in this range.
+KNIFE_DEAD_RATIO = 0.30 # beyond the edge, oscillation must fall below this * core median...
+KNIFE_MIN_DEAD_NM = 1.0 # ...over a dead run at least this long, reaching the window edge.
+KNIFE_DEEPEN_NM = 0.50  # once the sharp edge is found, cut this much FURTHER into the live
+                        # side. The knife cut lands at the FIRST live sample, but the first
+                        # ~0.3-0.5 nm past it is a weak transition sliver (low contrast,
+                        # dragged envelope) that pulls the fit. Cutting to the first CLEAN
+                        # fringe (measured: trunc2020 needs ~800.2, edge is at 799.8) keeps
+                        # the knife's precise null-safe detection but drops the sliver.
 
 # --- Phase-order selection (BIC, replaces ridge regularization) ---------------
 # Order q means the instantaneous frequency is a degree-(q-1) polynomial: phase = c0..cq
@@ -224,6 +280,28 @@ NULL_PEN_FREQ = 3.0   # weight of the f(u=0)->0 penalty in the |f| (cycles/nm) f
 
 # --- Final full raw-signal fit (cubic/TOD phase, envelopes held fixed) ---
 SIGNAL_LOSS_FRAC = 1.0  # soft-L1 scale as a fraction of the local half-amplitude (counts)
+# After the frozen-envelope phase fit, OPTIONALLY re-solve the phase AND both envelope
+# Gaussians jointly (joint_env_refine): the frozen quantile envelope never sees the fringe,
+# so its troughs ride above the raw counts (a `half` error r2_fringe is blind to). Freeing
+# the envelope lifts the RAW reconstruction (r2_sig) markedly.
+#
+# DISABLED by default -- measured 2026-07-19 (joint_env_fit_figs.py / the synth_truncation
+# safety sweep): it is a clean win on UNTRUNCATED traces (0 new wrong, r2_sig 0.988->0.995),
+# but on TRUNCATED traces the freed envelope absorbs the missing-arm misfit and PASSES the
+# trust gate while the phase is actually wrong (+23 confidently-wrong on the dim sweep), and
+# it suppresses the recovery scan that used to catch them (missed 196->295). The truncated
+# corner's pretty 0.938->0.996 is in that false-confidence bucket -- a mirage, not recovery.
+# Safe use requires gating to traces the FROZEN fit already _explains AND side=='none' (so it
+# can never change a recovery decision); that needs a 2nd pass or a tail refactor. Left off
+# pending that decision. See joint_env_refine + joint_env_fit_figs.py / envelope_candidates.
+JOINT_ENV_FIT = False
+# Pipeline B (envelope -> knife -> refit): after the knife locates the dead sliver, refit the
+# Gaussian envelopes on the full window MINUS that deadzone. The prelim envelope is fit on the
+# full window (contaminated by the sliver on a truncated trace); the knife then gives the dead
+# boundary, and this single refit puts the envelope on the correct domain -- replacing the
+# recovery scan with one clean pass. Fit on full-minus-deadzone (NOT the narrow contrast core,
+# which degenerates the gap Gaussian). Only fires when the knife actually found a cut.
+DEADZONE_REFIT = False
 
 # --- Accuracy spec / trust gate ---------------------------------------------
 # The accuracy the pipeline is REQUIRED to deliver (mirrors the synth_test tolerances:
@@ -457,6 +535,104 @@ def fringe_alive(nc):
     return roll > ALIVE_THR
 
 
+def fringe_oscillating(nc):
+    """Local oscillation amplitude of the normalized core: rolling STD of n about its own
+    local mean (= rolling RMS of the AC part). Unlike fringe_alive this ignores a pinned DC
+    excursion, so it reads ~0 through a truncated dead band even where |n| is high. Used only
+    to trim truncated ENDS (see OSC_DEAD_THR); a null dips too but is protected by being
+    interior."""
+    x = np.asarray(nc, float)
+    w = max(int(len(x) * OSC_WIN_FRAC), 5)
+    m = uniform_filter1d(x, w)
+    var = uniform_filter1d(x ** 2, w) - m ** 2
+    return np.sqrt(np.maximum(var, 0.0))
+
+
+def _dead_ends(n):
+    """Return (left_dead, right_dead, osc, med): is the fringe oscillation at each END of the
+    normalized core `n` collapsed relative to the core median? Used by both truncation
+    methods to locate the clipped side. A clip leaves the dying edge with far less local
+    oscillation than the live core; a clean trace's ends are ~as lively as its middle."""
+    osc = fringe_oscillating(n)
+    med = float(np.median(osc)) + 1e-12
+    k = max(int(round(PHASE_DEAD_FRAC * len(n))), 3)
+    left_dead = float(np.mean(osc[:k])) < PHASE_DEAD_RATIO * med
+    right_dead = float(np.mean(osc[-k:])) < PHASE_DEAD_RATIO * med
+    return left_dead, right_dead, osc, med
+
+
+def conditional_phase_trim(n, phase):
+    """TRUNCATION METHOD "phase". Return (keep_mask, info) over the core.
+
+    Trim in phase-VALUE space (the legacy idea, made conditional): PHASE_TRIM_BASE off BOTH
+    ends as light residue clean-up, and PHASE_TRIM_DEAD off an end whose fringe oscillation
+    has collapsed (a clip). The flat dead zone accrues ~no phase, so trimming it costs no
+    lever arm while removing the sliver that drags the fit. The phase ramp's sign maps each
+    END (index 0 / index -1) to a phase-VALUE extreme (low / high)."""
+    n = np.asarray(n, float); phase = np.asarray(phase, float)
+    left_dead, right_dead, _, _ = _dead_ends(n)
+    left_trim = PHASE_TRIM_DEAD if left_dead else PHASE_TRIM_BASE
+    right_trim = PHASE_TRIM_DEAD if right_dead else PHASE_TRIM_BASE
+    lo, hi = float(phase.min()), float(phase.max())
+    span = hi - lo + 1e-12
+    inc = phase[-1] >= phase[0]            # phase increases with index?
+    low_trim, high_trim = (left_trim, right_trim) if inc else (right_trim, left_trim)
+    keep = (phase >= lo + low_trim * span) & (phase <= hi - high_trim * span)
+    side = ("both" if left_dead and right_dead else "left" if left_dead
+            else "right" if right_dead else "none")
+    return keep, {"side": side, "left_trim": left_trim, "right_trim": right_trim}
+
+
+def knife_edge_cut(x, n):
+    """TRUNCATION METHOD "knife". Return (keep_mask, info) over the core.
+
+    The interferometer arm is truncated with a KNIFE EDGE, so the cut is physically only
+    ~0.2-0.3 nm wide: the fringe oscillation drops from live to the floor across that narrow
+    span, with a dead zone (no fringe) beyond it to the spectral edge. Detect exactly that
+    signature at each end -- a sharp high->dead oscillation transition of width
+    KNIFE_MIN_NM..KNIFE_MAX_NM with a >= KNIFE_MIN_DEAD_NM dead run past it -- and cut the
+    core at the edge. A gradual visibility roll-off (no knife) is NOT a sharp edge, so a
+    clean trace is left alone."""
+    x = np.asarray(x, float); n = np.asarray(n, float)
+    N = len(x); dx = float(np.mean(np.diff(x)))
+    _, _, osc, med = _dead_ends(n)
+    dead = osc < KNIFE_DEAD_RATIO * med
+    live = osc > 0.7 * med
+    dmin = int(round(KNIFE_MIN_DEAD_NM / dx))
+    ddeep = max(int(round(KNIFE_DEEPEN_NM / dx)), 0)   # extra samples cut into the live side
+    keep = np.ones(N, bool)
+    info = {"side": "none", "cut_left": None, "cut_right": None, "edge_nm": None}
+
+    def edge_width(lo_i, hi_i):
+        """nm span of the transition between the last dead sample <= lo_i and the first
+        clearly-live sample >= hi_i."""
+        d = np.flatnonzero(dead[:hi_i + 1])
+        l = np.flatnonzero(live[lo_i:]) + lo_i
+        if not len(d) or not len(l):
+            return None
+        return abs(x[l[0]] - x[d[-1]])
+
+    # LEFT edge: a dead run from sample 0, then a sharp rise to live.
+    if live.any():
+        li = int(np.argmax(live))                 # first clearly-live sample
+        if li >= dmin:                            # long dead run leads in
+            w = edge_width(li - 1, li)
+            if w is not None and KNIFE_MIN_NM <= w <= KNIFE_MAX_NM:
+                cut = min(li + ddeep, N - 16)     # deepen past the transition sliver
+                keep[:cut] = False
+                info["side"], info["cut_left"], info["edge_nm"] = "left", float(x[cut]), w
+        # RIGHT edge: symmetric.
+        hi_ = N - 1 - int(np.argmax(live[::-1]))  # last clearly-live sample
+        if (N - 1 - hi_) >= dmin:
+            w = edge_width(hi_, hi_ + 1)
+            if w is not None and KNIFE_MIN_NM <= w <= KNIFE_MAX_NM:
+                cut = max(hi_ + 1 - ddeep, 16)    # deepen past the transition sliver
+                keep[cut:] = False
+                info["cut_right"], info["edge_nm"] = float(x[cut - 1]), w
+                info["side"] = "both" if info["side"] == "left" else "right"
+    return keep, info
+
+
 def fit_freq_null(u, f_inst, u_anchor):
     """Build a QUADRATIC-phase null seed: fit the Hilbert |f| with a LINEAR frequency
     g0 + g1 u (so the phase is quadratic -- no TOD in the seed; TOD is left for the
@@ -518,6 +694,81 @@ def fit_signal(u, y, mid, half, seed, q, f_scale):
     sol = least_squares(resid, seed[:q + 1], loss="soft_l1", f_scale=f_scale, max_nfev=6000)
     cp = np.zeros(4); cp[:q + 1] = sol.x
     return cp
+
+
+def _joint_trust_ok(u, x, half, csig, order, resid, pU):
+    """Is the phase at the spectral centre trustworthy for this (envelope, csig) pair?
+    Mirrors _analyze_once's primary-reference trust, evaluated locally so the joint fit can
+    be gated without turning a trusted answer untrusted."""
+    cov = coef_cov(u, half, csig, order, resid)
+    ok, _, _ = trust_at(csig, cov, float(pU[1]) - float(np.mean(x)))
+    return bool(ok)
+
+
+def joint_env_refine(x, y, u, pU0, pLn0, csig0, order, anchor, mid0, half0, n0):
+    """Final joint fit: free BOTH envelope Gaussians (pU, pLn) TOGETHER with the phase
+    coeffs, seeded from the frozen pinball envelopes + core_seed_fit, under fit_signal's
+    soft-L1 loss. The frozen fit holds the envelope fixed and lets the fringe troughs ride
+    above the data (a pure `half` error the eye sees but r2_fringe -- which divides the
+    envelope out -- cannot); freeing the envelope lets the raw residual pull the troughs down.
+
+    Fully PARAMETRIC by design: a smooth Gaussian gap cannot collapse half->0 at a single
+    null the way a per-point / spline envelope does, so this is null-safe where trough-hugging
+    empirical envelopes are not (measured: spline drove r2_fringe to <0 on the corner).
+
+    Model: y ~= gauss(x,*pU) - 0.5*gauss(x,*pLn)*(1 - cos(phase_poly(c,u))), i.e. the same
+    mid + half*cos with mid=(Ud+Ld)/2, half=(Ud-Ld)/2, Ud=gauss(pU), Ld=Ud-gauss(pLn).
+
+    GATE: adopt the joint fit only if it lowers the raw residual AND does not turn a
+    trustworthy phase untrustworthy (per _joint_trust_ok). Otherwise the frozen envelope is
+    returned unchanged -- the joint fit can only help or no-op. Returns
+    (pU, pLn, mid, half, n, csig, used)."""
+    q = int(order)
+    f_scale = SIGNAL_LOSS_FRAC * float(np.median(half0)) + 1e-9
+
+    def frozen():
+        return pU0, pLn0, mid0, half0, n0, csig0, False
+
+    try:
+        xlo, xhi = float(x[0]), float(x[-1]); pad = 0.5 * (xhi - xlo) + 1e-9
+        ab = anchor_bounds(anchor)
+        offU_lo, offU_hi = ab if ab is not None else (-np.inf, np.inf)
+        # offLn >= 0 keeps the gap G > 0 -> half > 0 everywhere (well-posed normalization).
+        lo = [0.0, xlo - pad, 1e-2, offU_lo, 0.0, xlo - pad, 1e-2, 0.0] + [-np.inf] * (q + 1)
+        hi = [np.inf, xhi + pad, np.inf, offU_hi, np.inf, xhi + pad, np.inf, np.inf] + \
+             [np.inf] * (q + 1)
+        p0 = np.clip(np.concatenate([pU0, pLn0, csig0[:q + 1]]), lo, hi)
+
+        def resid(p):
+            pU = p[0:4]; pLn = p[4:8]; c = np.zeros(4); c[:q + 1] = p[8:8 + q + 1]
+            model = gauss(x, *pU) - 0.5 * gauss(x, *pLn) * (1.0 - np.cos(phase_poly(c, u)))
+            return model - y
+
+        # max_nfev capped low: the trust gate below keeps only an improved fit, so an
+        # early stop is safe (a not-yet-converged solve just fails the gate -> frozen kept),
+        # while it bounds the worst-case cost on a pathological near-Nyquist trace.
+        sol = least_squares(resid, p0, bounds=(lo, hi), loss="soft_l1",
+                            f_scale=f_scale, max_nfev=2000)
+        pU = sol.x[0:4]; pLn = sol.x[4:8]
+        csig = np.zeros(4); csig[:q + 1] = sol.x[8:8 + q + 1]
+        Ud = gauss(x, *pU); G = gauss(x, *pLn)
+        mid = Ud - 0.5 * G; half = 0.5 * G
+        if not np.all(half > 0) or not np.all(np.isfinite(half)):
+            return frozen()
+        n = (y - mid) / half
+
+        # gate: must lower the raw residual and not break a trusted phase
+        r_fz = signal_model(csig0, u, mid0, half0) - y
+        r_jt = signal_model(csig, u, mid, half) - y
+        if float(np.sum(r_jt ** 2)) >= float(np.sum(r_fz ** 2)):
+            return frozen()
+        ok_fz = _joint_trust_ok(u, x, half0, csig0, q, r_fz, pU0)
+        ok_jt = _joint_trust_ok(u, x, half, csig, q, r_jt, pU)
+        if ok_fz and not ok_jt:                 # never demote a trustworthy answer
+            return frozen()
+        return pU, pLn, mid, half, n, csig, True
+    except Exception:
+        return frozen()
 
 
 def _trim_seed_fit(u, phase, y, mid, half, f_scale, trim, q=2):
@@ -1143,7 +1394,8 @@ def _explains(R):
 
 
 def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
-                  trunc_threshold=None, ref_primary=None, force_trunc=None):
+                  trunc_threshold=None, ref_primary=None, force_trunc=None,
+                  scanfree=None, trunc_method=None):
     """Run the full recovery pipeline on one in-window trace.
 
     `trust_nsig` / `trunc_threshold` override TRUST_NSIG / TRUNC_THRESHOLD for this call
@@ -1186,106 +1438,249 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
         return {"status": "nonfinite", "msg": "NaN/Inf in trace", "csig": None}
 
     t_run0 = time.perf_counter()
+    pU_prelim = None      # set only when DEADZONE_REFIT actually replaces the envelope
     try:
-        # --- Truncated-arm detection (runs FIRST: it needs only the raw trace) ----
-        # In its own try/except: a detector failure degrades to "no truncation known"
-        # and the fit proceeds exactly as it would without this feature.
-        t_tr0 = time.perf_counter()
-        if force_trunc is not None:
-            # The recovery scan supplies the cut directly; the detector is not consulted.
-            trunc = dict(force_trunc)
+        use_scanfree = SCANFREE if scanfree is None else scanfree
+        if use_scanfree:
+            # ===== Scan-free deterministic pipeline (replaces the 12 s recovery scan) =====
+            # On the realistic synth suite this BEATS the scan (99.6% vs 98.8%, fewer wrong)
+            # with no scan. Pipeline: full-window envelopes -> contrast crop -> oscillation
+            # end-trim -> Hilbert -> TRUNCATION TRIM -> seed/fit.
+            #
+            # The derivative "coarse cut" was tried and DROPPED (2026-07-19): net-negative on
+            # every harness (it over-crops good traces into false-drops -- +16 vs no coarse
+            # cut even on the realistic suite) and it never fixed the truncation corner it was
+            # built for. Truncation is now handled by trimming the CORE; TRUNC_METHOD selects
+            # "phase" (conditional_phase_trim) or "knife" (knife_edge_cut).
+            #
+            # ENVELOPES ON THE FULL WINDOW. pU (intensity bump) survives a clip and needs its
+            # wings to pin mu/sigma (a narrowed domain sent mu to 927 nm). pLn (contrast gap)
+            # is ALSO fit full-window: narrowing its domain to exclude a clip degenerates the
+            # gap Gaussian (a=3e8 on truncated.csv) and tightens the contrast crop enough to
+            # push clean traces to `underdetermined`. The clipped sliver is removed downstream
+            # by the end-trim + truncation trim, not by the envelope fit.
+            t_tr0 = time.perf_counter()
+            t_trunc = 0.0
+            n_full = len(x); x_all, y_all = x.copy(), y.copy()
+            trunc = {"side": "none", "detected": False, "dead": None, "live": None,
+                     "cut_left": None, "cut_right": None, "msg": "scan-free"}
+            pU = fit_upper_envelope(x, y, off_bounds=anchor_bounds(anchor))
+            pLn = fit_upper_envelope(x, -(y - gauss(x, *pU)))
+            aLn, muLn, sLn, offLn = pLn
+            peak_gap = abs(aLn + offLn)
+            span = float(np.ptp(y)) + 1e-12
+            detrended = y - gauss(x, *pU)
+            if peak_gap < DEAD_GAP_FRAC * span or np.std(detrended) < DEAD_OSC_STD * (span + 1):
+                t_run = (time.perf_counter() - t_run0) * 1e3
+                return {"status": "dead_window", "csig": None, "pU": pU, "pLn": pLn,
+                        "peak_gap": peak_gap, "span": span, "t_run": t_run, "trunc": trunc,
+                        "msg": f"envelope gap {peak_gap:.3g} vs span {span:.3g}: no fringes"}
+
+            # normalize + contrast crop (existing closed-form TRUNC_THRESHOLD).
+            Ud = gauss(x, *pU); Ld = Ud - gauss(x, *pLn)
+            mid = 0.5 * (Ud + Ld); half = 0.5 * (Ud - Ld); n = (y - mid) / half
+            max_diff = aLn + offLn
+            min_diff = min(gauss(x[0], *pLn), gauss(x[-1], *pLn))
+            thr = TRUNC_THRESHOLD if trunc_threshold is None else float(trunc_threshold)
+            level = min_diff + (max_diff - min_diff) * thr
+            arg = (level - offLn) / aLn
+            if 0.0 < arg < 1.0:
+                delta = abs(sLn) * np.sqrt(-2.0 * np.log(arg))
+                x_left, x_right = muLn - delta, muLn + delta
+            else:
+                x_left, x_right = x[0], x[-1]
+            keep = (x >= x_left) & (x <= x_right)
+            if int(np.count_nonzero(keep)) < 16:
+                t_run = (time.perf_counter() - t_run0) * 1e3
+                return {"status": "too_few", "csig": None, "trunc": trunc, "t_run": t_run,
+                        "t_trunc": t_trunc,
+                        "msg": f"contrast core has {int(np.count_nonzero(keep))} pts"}
+
+            # TRUNCATION TRIM: remove the clipped sliver from the CONTRAST core -- BEFORE the
+            # oscillation end-trim, which would otherwise erase the very dead run the detector
+            # needs to see (measured: after the end-trim the "knife" finds no dead run and
+            # misses 2020607181645). TRUNC_METHOD selects the detector. A clean trace has no
+            # clipped edge -> no trim. A preliminary Hilbert phase is taken here for the
+            # "phase" method; the shared tail re-Hilberts the final core.
+            method = TRUNC_METHOD if trunc_method is None else trunc_method
+            if method != "none" and int(np.count_nonzero(keep)) >= 32:
+                kx, kn = x[keep], n[keep]
+                if method == "knife":
+                    ksub, tinfo = knife_edge_cut(kx, kn)
+                else:
+                    ksub, tinfo = conditional_phase_trim(kn, np.unwrap(np.angle(hilbert(kn))))
+                trunc.update(tinfo); trunc["detected"] = tinfo.get("side", "none") != "none"
+                if 16 <= int(ksub.sum()) < len(kx):
+                    core_idx = np.flatnonzero(keep)[ksub]
+                    keep = np.zeros(n_full, bool); keep[core_idx] = True
+            t_trunc = (time.perf_counter() - t_tr0) * 1e3
+
+            # oscillation end-trim: drop any remaining leading/trailing DEAD runs the contrast
+            # crop cannot see. Interior nulls stay (they are protected by being interior).
+            osc = fringe_oscillating(n[keep])
+            live = osc > OSC_DEAD_THR
+            if live.any():
+                lo_i = int(np.argmax(live))
+                hi_i = len(live) - 1 - int(np.argmax(live[::-1]))
+                if (lo_i > 0 or hi_i < len(live) - 1) and (hi_i - lo_i + 1) >= 16:
+                    core_idx = np.flatnonzero(keep)[lo_i:hi_i + 1]
+                    keep = np.zeros(n_full, bool); keep[core_idx] = True
+
+            if int(np.count_nonzero(keep)) < 16:
+                t_run = (time.perf_counter() - t_run0) * 1e3 - t_trunc
+                return {"status": "too_few", "csig": None, "trunc": trunc, "t_run": t_run,
+                        "t_trunc": t_trunc,
+                        "msg": f"live core has {int(np.count_nonzero(keep))} pts"}
+
+            # --- DEADZONE REFIT (pipeline B) -----------------------------------------
+            # The knife has now located the dead sliver (cut_left/cut_right). Refit the
+            # envelopes on the full window MINUS that deadzone: this keeps the fringe wings
+            # (so the gap Gaussian stays well-posed -- refitting on the narrow contrast core
+            # sends a->3e8) while dropping the clipped sliver that dragged the prelim envelope.
+            # One clean envelope on the right domain, in a single pass -- no recovery scan.
+            if DEADZONE_REFIT and (trunc.get("cut_left") is not None
+                                   or trunc.get("cut_right") is not None):
+                lo = trunc.get("cut_left"); hi = trunc.get("cut_right")
+                live = (x >= (lo if lo is not None else x[0])) & \
+                       (x <= (hi if hi is not None else x[-1]))
+                if int(live.sum()) >= 24:
+                    pUr = fit_upper_envelope(x[live], y[live], off_bounds=anchor_bounds(anchor))
+                    pLnr = fit_upper_envelope(x[live], -(y[live] - gauss(x[live], *pUr)))
+                    Gr = gauss(x, *pLnr); halfr = 0.5 * Gr
+                    if (np.all(halfr > 0) and abs(pLnr[0]) < 1e5
+                            and x[0] - 2 <= pLnr[1] <= x[-1] + 2):
+                        pU_prelim = pU          # diagnostics: how far the refit moved muU
+                        pU, pLn = pUr, pLnr
+                        Ud = gauss(x, *pU); mid = Ud - halfr; half = halfr
+                        n = (y - mid) / half
+
+            x, y, n, mid, half = x[keep], y[keep], n[keep], mid[keep], half[keep]
         else:
-            try:
-                trunc = detect_truncation(x, y)
-            except Exception as e:
-                trunc = {"side": "unknown", "detected": False, "v": None, "dead": None,
-                         "live": None, "x_lo": None, "x_hi": None, "left_nm": 0.0,
-                         "right_nm": 0.0, "cut_left": None, "cut_right": None,
-                         "msg": f"detector failed: {type(e).__name__}: {e}"}
-        t_trunc = (time.perf_counter() - t_tr0) * 1e3
+            # --- Truncated-arm detection (runs FIRST: it needs only the raw trace) ----
+            # In its own try/except: a detector failure degrades to "no truncation known"
+            # and the fit proceeds exactly as it would without this feature.
+            t_tr0 = time.perf_counter()
+            if force_trunc is not None:
+                # The recovery scan supplies the cut directly; the detector is not consulted.
+                trunc = dict(force_trunc)
+            else:
+                try:
+                    trunc = detect_truncation(x, y)
+                except Exception as e:
+                    trunc = {"side": "unknown", "detected": False, "v": None, "dead": None,
+                             "live": None, "x_lo": None, "x_hi": None, "left_nm": 0.0,
+                             "right_nm": 0.0, "cut_left": None, "cut_right": None,
+                             "msg": f"detector failed: {type(e).__name__}: {e}"}
+            t_trunc = (time.perf_counter() - t_tr0) * 1e3
 
-        # --- Drop the fringe-free band BEFORE anything is fit --------------------
-        # Where the clipped arm has no power there are no fringes, so those samples
-        # carry NO phase information -- they are a bare Gaussian tail. Fitting a cosine
-        # through them drags the whole cubic off: measured, the base frequency came back
-        # ~0.5 rad/nm wrong (~100x the clean-trace error) and only 20-24% of such traces
-        # recovered their coefficients, while still converging and still reporting a fit.
-        # So the fringe-free band is excluded from the envelopes AND from the phase fit.
-        # An untruncated trace has fit_lo/fit_hi = -inf/+inf, so its path is untouched.
-        fit_lo = trunc.get("cut_left") if trunc.get("side") in ("left", "both") else None
-        fit_hi = trunc.get("cut_right") if trunc.get("side") in ("right", "both") else None
-        if trunc.get("side") == "all":
-            t_run = (time.perf_counter() - t_run0) * 1e3 - t_trunc
-            return {"status": "dead_window", "csig": None, "trunc": trunc,
-                    "t_run": t_run, "t_trunc": t_trunc, "x_all": x, "y_all": y,
-                    "msg": "arm truncated across the whole window: no fringes to fit"}
-        fit_ok = np.ones(len(x), bool)
-        if fit_lo is not None:
-            fit_ok &= x >= fit_lo
-        if fit_hi is not None:
-            fit_ok &= x <= fit_hi
-        if np.count_nonzero(fit_ok) < 16:
-            t_run = (time.perf_counter() - t_run0) * 1e3 - t_trunc
-            return {"status": "too_few", "csig": None, "trunc": trunc,
-                    "t_run": t_run, "t_trunc": t_trunc, "x_all": x, "y_all": y,
-                    "msg": f"only {int(np.count_nonzero(fit_ok))} fringe-bearing pts "
-                           f"survive the arm truncation"}
-        xw, yw = x[fit_ok], y[fit_ok]
+            # --- Drop the fringe-free band BEFORE anything is fit --------------------
+            # Where the clipped arm has no power there are no fringes, so those samples
+            # carry NO phase information -- they are a bare Gaussian tail. Fitting a cosine
+            # through them drags the whole cubic off: measured, the base frequency came back
+            # ~0.5 rad/nm wrong (~100x the clean-trace error) and only 20-24% of such traces
+            # recovered their coefficients, while still converging and still reporting a fit.
+            # So the fringe-free band is excluded from the envelopes AND from the phase fit.
+            # An untruncated trace has fit_lo/fit_hi = -inf/+inf, so its path is untouched.
+            fit_lo = trunc.get("cut_left") if trunc.get("side") in ("left", "both") else None
+            fit_hi = trunc.get("cut_right") if trunc.get("side") in ("right", "both") else None
+            if trunc.get("side") == "all":
+                t_run = (time.perf_counter() - t_run0) * 1e3 - t_trunc
+                return {"status": "dead_window", "csig": None, "trunc": trunc,
+                        "t_run": t_run, "t_trunc": t_trunc, "x_all": x, "y_all": y,
+                        "msg": "arm truncated across the whole window: no fringes to fit"}
+            fit_ok = np.ones(len(x), bool)
+            if fit_lo is not None:
+                fit_ok &= x >= fit_lo
+            if fit_hi is not None:
+                fit_ok &= x <= fit_hi
+            if np.count_nonzero(fit_ok) < 16:
+                t_run = (time.perf_counter() - t_run0) * 1e3 - t_trunc
+                return {"status": "too_few", "csig": None, "trunc": trunc,
+                        "t_run": t_run, "t_trunc": t_trunc, "x_all": x, "y_all": y,
+                        "msg": f"only {int(np.count_nonzero(fit_ok))} fringe-bearing pts "
+                               f"survive the arm truncation"}
+            xw, yw = x[fit_ok], y[fit_ok]
 
-        # --- Envelopes (fit ONLY where fringes exist) ----------------------------
-        # Fitting these on the full window would let the fringe-free band drag them:
-        # both are free Gaussians, so they slide onto the surviving fringes (measured, a
-        # left-clip pulls the gap Gaussian to mu=803.5/sigma=2.4 against a true
-        # 802.0/3.8). mid/half are held FIXED through the phase fit, so that distortion
-        # would corrupt the model amplitude even on the samples we do keep.
-        # Only pU is anchored. pLn is fit to the NEGATED RESIDUAL, whose "baseline" is not
-        # the continuum at all, so the U_base/P5 statistic does not transfer to it -- that
-        # needs its own derivation and is deliberately left unbounded rather than guessed.
-        pU = fit_upper_envelope(xw, yw, off_bounds=anchor_bounds(anchor))
-        resid_env = yw - gauss(xw, *pU)
-        pLn = fit_upper_envelope(xw, -resid_env)  # upper envelope of the negated residual
+            # --- Envelopes (fit ONLY where fringes exist) ----------------------------
+            # Fitting these on the full window would let the fringe-free band drag them:
+            # both are free Gaussians, so they slide onto the surviving fringes (measured, a
+            # left-clip pulls the gap Gaussian to mu=803.5/sigma=2.4 against a true
+            # 802.0/3.8). mid/half are held FIXED through the phase fit, so that distortion
+            # would corrupt the model amplitude even on the samples we do keep.
+            # Only pU is anchored. pLn is fit to the NEGATED RESIDUAL, whose "baseline" is not
+            # the continuum at all, so the U_base/P5 statistic does not transfer to it -- that
+            # needs its own derivation and is deliberately left unbounded rather than guessed.
+            pU = fit_upper_envelope(xw, yw, off_bounds=anchor_bounds(anchor))
+            resid_env = yw - gauss(xw, *pU)
+            pLn = fit_upper_envelope(xw, -resid_env)  # upper envelope of the negated residual
 
-        # --- Dead-window / no-fringe detection -----------------------------------
-        # Peak envelope gap (U-L at its center) vs the overall count span; plus the
-        # variance of the envelope-removed trace. Either collapsing => no fringes.
-        aLn, muLn, sLn, offLn = pLn
-        peak_gap = abs(aLn + offLn)
-        span = float(np.ptp(yw)) + 1e-12          # judged on the fringe-bearing band, to
-        detrended = yw - gauss(xw, *pU)           # match what the envelopes were fit on
-        if peak_gap < DEAD_GAP_FRAC * span or np.std(detrended) < DEAD_OSC_STD * (span + 1):
-            t_run = (time.perf_counter() - t_run0) * 1e3
-            return {"status": "dead_window", "csig": None, "pU": pU, "pLn": pLn,
-                    "peak_gap": peak_gap, "span": span, "t_run": t_run,
-                    "msg": f"envelope gap {peak_gap:.3g} vs span {span:.3g}: no fringes"}
+            # --- Dead-window / no-fringe detection -----------------------------------
+            # Peak envelope gap (U-L at its center) vs the overall count span; plus the
+            # variance of the envelope-removed trace. Either collapsing => no fringes.
+            aLn, muLn, sLn, offLn = pLn
+            peak_gap = abs(aLn + offLn)
+            span = float(np.ptp(yw)) + 1e-12          # judged on the fringe-bearing band, to
+            detrended = yw - gauss(xw, *pU)           # match what the envelopes were fit on
+            if peak_gap < DEAD_GAP_FRAC * span or np.std(detrended) < DEAD_OSC_STD * (span + 1):
+                t_run = (time.perf_counter() - t_run0) * 1e3
+                return {"status": "dead_window", "csig": None, "pU": pU, "pLn": pLn,
+                        "peak_gap": peak_gap, "span": span, "t_run": t_run,
+                        "msg": f"envelope gap {peak_gap:.3g} vs span {span:.3g}: no fringes"}
 
-        # --- Truncation bounds (closed-form Gaussian threshold crossings) --------
-        max_diff = aLn + offLn                                 # Gaussian peak, at muLn
-        min_diff = min(gauss(x[0], *pLn), gauss(x[-1], *pLn))  # gap falls off toward edges
-        thr = TRUNC_THRESHOLD if trunc_threshold is None else float(trunc_threshold)
-        level = min_diff + (max_diff - min_diff) * thr
-        arg = (level - offLn) / aLn                            # exp(-(x-mu)^2/2s^2) at crossing
-        if 0.0 < arg < 1.0:
-            delta = abs(sLn) * np.sqrt(-2.0 * np.log(arg))
-            x_left, x_right = muLn - delta, muLn + delta
-        else:
-            x_left, x_right = x[0], x[-1]
+            # --- Truncation bounds (closed-form Gaussian threshold crossings) --------
+            max_diff = aLn + offLn                                 # Gaussian peak, at muLn
+            min_diff = min(gauss(x[0], *pLn), gauss(x[-1], *pLn))  # gap falls off toward edges
+            thr = TRUNC_THRESHOLD if trunc_threshold is None else float(trunc_threshold)
+            level = min_diff + (max_diff - min_diff) * thr
+            arg = (level - offLn) / aLn                            # exp(-(x-mu)^2/2s^2) at crossing
+            if 0.0 < arg < 1.0:
+                delta = abs(sLn) * np.sqrt(-2.0 * np.log(arg))
+                x_left, x_right = muLn - delta, muLn + delta
+            else:
+                x_left, x_right = x[0], x[-1]
 
-        # --- Normalize the fringes using both envelopes --------------------------
-        Ud = gauss(x, *pU)
-        Ld = Ud - gauss(x, *pLn)
-        mid = 0.5 * (Ud + Ld)
-        half = 0.5 * (Ud - Ld)
-        n = (y - mid) / half
+            # --- Normalize the fringes using both envelopes --------------------------
+            Ud = gauss(x, *pU)
+            Ld = Ud - gauss(x, *pLn)
+            mid = 0.5 * (Ud + Ld)
+            half = 0.5 * (Ud - Ld)
+            n = (y - mid) / half
 
-        # --- Truncate to the high-visibility core (and to the fringe-bearing band) --
-        keep = (x >= x_left) & (x <= x_right) & fit_ok
-        n_full = len(x)
-        x_all, y_all = x.copy(), y.copy()
-        x, y, n, mid, half = x[keep], y[keep], n[keep], mid[keep], half[keep]
-        if len(x) < 16:
-            t_run = (time.perf_counter() - t_run0) * 1e3 - t_trunc
-            return {"status": "too_few", "csig": None, "msg": f"core has {len(x)} pts",
-                    "t_run": t_run, "t_trunc": t_trunc, "trunc": trunc}
+            # --- Truncate to the high-visibility core (and to the fringe-bearing band) --
+            keep = (x >= x_left) & (x <= x_right) & fit_ok
+            n_full = len(x)
+            x_all, y_all = x.copy(), y.copy()
+            x, y, n, mid, half = x[keep], y[keep], n[keep], mid[keep], half[keep]
+            if len(x) < 16:
+                t_run = (time.perf_counter() - t_run0) * 1e3 - t_trunc
+                return {"status": "too_few", "csig": None, "msg": f"core has {len(x)} pts",
+                        "t_run": t_run, "t_trunc": t_trunc, "trunc": trunc}
+
+            # --- Bound to the Hilbert-valid region: drop truncated dead ENDS ----------
+            # The contrast crop is a SMOOTH-envelope threshold and cannot see a clipped arm
+            # whose envelope gap has collapsed: the lower-envelope Gaussian slides straight
+            # across the clip, so x_left/x_right land near the window edge and the fringe-free
+            # dead band stays inside the core. The fit already answers on the fringe-alive
+            # subset -- but the reconstruction metrics (rms_frac, r2_fringe) and the trust
+            # covariance below are evaluated on the WHOLE core, so a good fit is scored against
+            # the dead band and reads r2_fringe ~0.32 / underdetermined, which then drives the
+            # recovery scan for nothing. The fringe-alive mask CAN see the clip (post-clip
+            # samples do not oscillate, so their local fringe RMS is below ALIVE_THR), so trim
+            # the leading and trailing dead RUNS and let Hilbert, the seed, the fit AND the
+            # gating share one untruncated span. Only the ENDS are trimmed: an interior
+            # not-alive run is a genuine null (fringes resume past it), it carries no
+            # truncation, and the Hilbert transform needs the samples uniform -- so it stays.
+            # A clean core is alive edge-to-edge (lo_i=0, hi_i=last) and is left untouched.
+            osc = fringe_oscillating(n)
+            live = osc > OSC_DEAD_THR
+            if live.any():
+                lo_i = int(np.argmax(live))
+                hi_i = len(live) - 1 - int(np.argmax(live[::-1]))
+                if (lo_i > 0 or hi_i < len(live) - 1) and (hi_i - lo_i + 1) >= 16:
+                    core_idx = np.flatnonzero(keep)[lo_i:hi_i + 1]
+                    keep = np.zeros(n_full, bool); keep[core_idx] = True
+                    sl = slice(lo_i, hi_i + 1)
+                    x, y, n, mid, half = x[sl], y[sl], n[sl], mid[sl], half[sl]
 
         # --- Hilbert transform: analytic signal -> phase & instantaneous freq -----
         dx = float(np.mean(np.diff(x)))
@@ -1310,6 +1705,23 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
         # Hilbert-domain seed). has_null below is thus the single place a null is decided.
         csig, cph, order = core_seed_fit(u, y, mid, half, n, phase, f_inst, cands,
                                          f_scale_sig, origin)
+        # --- Joint envelope + phase refinement (UNTRUNCATED ONLY) -----------------
+        # Free both envelope Gaussians together with the phase so the fit -- not a separate
+        # quantile pass -- sets trough depth. Updates pU/pLn/mid/half/n/csig in place when it
+        # helps; a no-op otherwise. Downstream (metrics, covariance, spectral-centre ref,
+        # trust) reads these, so everything below sees the refined envelope automatically.
+        #
+        # RESTRICTED TO UNTRUNCATED TRACES. On a truncated trace the freed envelope absorbs
+        # the missing-arm misfit and PASSES the trust gate while the phase is actually wrong
+        # (measured on synth_truncation: +23 confidently-wrong traces, and it suppresses the
+        # recovery scan that used to catch them). The frozen envelope + trust gate + recovery
+        # scan is the safety machinery for clips; freeing the envelope defeats it. On
+        # untruncated traces the same fit is a clean win (0 new wrong), so it runs only there.
+        env_refit = False
+        _side = (trunc.get("side") if isinstance(trunc, dict) else None)
+        if JOINT_ENV_FIT and _side == "none":
+            pU, pLn, mid, half, n, csig, env_refit = joint_env_refine(
+                x, y, u, pU, pLn, csig, order, anchor, mid, half, n)
         l0 = origin
         c0, c1, c2, c3 = csig
         phase_cubic = phase_poly(csig, u)
@@ -1415,7 +1827,8 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
         csig=csig, cph=cph, c0=c0, c1=c1, c2=c2, c3=c3, phase_cubic=phase_cubic,
         f_model=f_model, y_model=y_model, f_hilbert=f_hilbert, y_hilbert=y_hilbert,
         resid_sig=resid_sig, rms_sig=rms_sig,
-        r2_sig=r2_sig, r2_fringe=r2_fringe, t_run=t_run,
+        r2_sig=r2_sig, r2_fringe=r2_fringe, t_run=t_run, env_refit=env_refit,
+        pU_prelim=pU_prelim,
         trunc=trunc, t_trunc=t_trunc,
         csig_sigma=csig_sigma, csig_at_centre=csig_at_centre, trust_ok=trust_ok,
         cov=cov, fit_span=(float(x[0]), float(x[-1])),
@@ -1428,7 +1841,7 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
 
 
 def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold=None,
-            ref_primary=None, recover=True):
+            ref_primary=None, recover=True, scanfree=None, trunc_method=None):
     """Fit one trace, and if the model cannot explain it, find the cut that can.
 
     Fit normally first. If that explains the trace (`_explains`), return it -- this is the
@@ -1451,10 +1864,14 @@ def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold
     does not need to.
     """
     R = _analyze_once(x, y, anchor=anchor, ref_policy=ref_policy, trust_nsig=trust_nsig,
-                      trunc_threshold=trunc_threshold, ref_primary=ref_primary)
+                      trunc_threshold=trunc_threshold, ref_primary=ref_primary,
+                      scanfree=scanfree, trunc_method=trunc_method)
     R["recovered"] = False
     R["rms_frac"] = _rms_frac(R)
-    if not recover or _explains(R):
+    # Scan-free pipeline: the deterministic fit is the ONLY fit path (PLAN constraint #1/#2).
+    # It lands the truncated fit in one pass, so there is no recovery scan to fall back to.
+    use_scanfree = SCANFREE if scanfree is None else scanfree
+    if use_scanfree or not recover or _explains(R):
         return R
 
     # ref_policy is STATEFUL ACROSS FRAMES (REF_HYST consecutive traces to switch), so the

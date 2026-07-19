@@ -12,6 +12,7 @@ from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import (
     FitTunables,
     FringeFitResult,
 )
+from app_apps.analysis.phase_control.subprocess.domain import fringe_core as fc
 from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import LOOP_GAIN
 
 
@@ -27,8 +28,11 @@ class FringeFitParams(PrimitiveSerde):
     # are user-facing. The old folded-chirp knobs (ratio, sigma_init, phase_loss_scale,
     # signal_loss_frac, init_smooth_div) are gone with that pipeline -- from_primitive
     # ignores them, so configs persisted before this change still load.
-    trunc_threshold: float = 0.40      # high-visibility core keep-level (harness plateau)
-    trust_nsig: float = 3.0            # accuracy/yield trade; see FitTunables.trust_nsig.
+    # Defaults are IMPORTED from fringe_core, not retyped -- a hardcoded 0.40 here while the
+    # standalone had recalibrated to 0.30 is exactly what broke fit parity with a
+    # byte-identical fringe_core.py. Persisted configs still override these on load.
+    trunc_threshold: float = fc.TRUNC_THRESHOLD   # high-visibility core keep-level
+    trust_nsig: float = fc.TRUST_NSIG  # accuracy/yield trade; see FitTunables.trust_nsig.
                                        # 3.0 = >=98% of reported fits correct, <=5% of good
                                        # fits declined. Lower to commit more frames while
                                        # aligning; raising past ~5 buys little accuracy and
