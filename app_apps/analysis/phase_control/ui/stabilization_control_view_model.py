@@ -15,6 +15,7 @@ from base_core.quantities.constants import SPEED_OF_LIGHT
 from base_core.quantities.enums import Prefix
 from base_qt.app.dispatcher import QtDispatcher
 from app_apps.analysis.phase_control.events import PhaseTrackingStateChanged, StabilizationConfigChanged
+from app_apps.analysis.phase_control.subprocess.domain import fringe_core as fc
 from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import display_curve
 
 if TYPE_CHECKING:
@@ -42,6 +43,7 @@ class StabilizationControlViewModel(QObject):
         self._plot_item: pg.PlotItem | None = None
         self._set_phase_series: pg.PlotDataItem | None = None
         self._current_phase_series: pg.PlotDataItem | None = None
+        self._rf_label: pg.TextItem | None = None
         self._active = False
         self._plot_frequency = False
         self._unsub = bus.subscribe(PhaseTrackingStateChanged, self._on_state_changed)
@@ -62,6 +64,13 @@ class StabilizationControlViewModel(QObject):
         current_phase_pen.setStyle(Qt.PenStyle.DashDotLine)
         current_phase_pen.setCosmetic(True)
         self._current_phase_series = pg.PlotDataItem(pen=current_phase_pen)
+
+        # RF frequency-range readout. Parented to the ViewBox rather than added as a plot
+        # item so it stays pinned to the top-left corner in SCREEN coordinates: the y axis is
+        # raw counts and rescales by ~50x between a dim and a bright frame, so a label placed
+        # in data coordinates would drift off screen on the next shot.
+        self._rf_label = pg.TextItem(color=QColor("white"), anchor=(0, 0))
+        self._rf_label.setZValue(100)
 
     def set_active(self, active: bool) -> None:
         """Attach/detach the spectrum_fit overlay curves to the shared chart."""
@@ -92,6 +101,9 @@ class StabilizationControlViewModel(QObject):
             # Excluded from auto-range so the view stays driven by the live spectrum,
             # not by whatever the fit curves happen to be before a config is applied.
             self._plot_item.addItem(series, ignoreBounds=True)
+        if self._rf_label is not None:
+            self._rf_label.setParentItem(self._plot_item.getViewBox())
+            self._rf_label.setPos(10, 6)          # screen px inset from the top-left
 
     def _detach_curves(self) -> None:
         if self._plot_item is None:
@@ -99,6 +111,8 @@ class StabilizationControlViewModel(QObject):
         for series in (self._set_phase_series, self._current_phase_series):
             if series is not None:
                 self._plot_item.removeItem(series)
+        if self._rf_label is not None:
+            self._rf_label.setParentItem(None)
 
     def _update_curves(self, rescale: bool = False) -> None:
         if not self._active:
@@ -131,6 +145,7 @@ class StabilizationControlViewModel(QObject):
 
         self._set_phase_series.setData(x, set_phase_curve)
         self._current_phase_series.setData(x, current_phase_curve)
+        self._update_rf_label()
 
         if rescale and self._plot_item is not None:
             x_lo, x_hi = float(x.min()), float(x.max())
@@ -140,6 +155,26 @@ class StabilizationControlViewModel(QObject):
             y_pad = (y_hi - y_lo) * 0.1 or 1.0
             self._plot_item.setXRange(x_lo - x_pad, x_hi + x_pad, padding=0)
             self._plot_item.setYRange(y_lo - y_pad, y_hi + y_pad, padding=0)
+
+    def _update_rf_label(self) -> None:
+        """Show the RF frequency range this shot generates, over 802 +- 9 nm.
+
+        The spectral fringe rate is converted through the dispersive time-mapping
+        calibration in fringe_core (9 nm ~ 320 ps, linear => 28.125 GHz per cycle/nm). The
+        band is quoted wider than the fitted core on purpose, so this EXTRAPOLATES the cubic
+        -- which is why an unverified shape is labelled rather than quoted bare. An
+        un-fitted config (c1 = c2 = c3 = 0) would read "0.0 GHz", which is a lie about a
+        measurement that has not happened, so it shows nothing at all instead.
+        """
+        if self._rf_label is None:
+            return
+        p = self._config.params
+        if not any((p.c1, p.c2, p.c3)):
+            self._rf_label.setText("")
+            return
+        lo, hi = fc.rf_range_ghz((p.c0, p.c1, p.c2, p.c3), p.l0)
+        self._rf_label.setText(fc.format_rf_range(lo, hi, p.shape_ok))
+        self._rf_label.setColor(QColor("white") if p.shape_ok else QColor("orange"))
 
     @property
     def worker_state(self) -> WorkerStatus:

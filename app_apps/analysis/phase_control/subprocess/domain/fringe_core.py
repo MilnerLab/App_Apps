@@ -314,7 +314,21 @@ DEADZONE_REFIT = False
 TRUST_REL = 0.01        # relative spec on c1, c2
 TRUST_FLOOR_C1 = 0.05   # rad/nm     absolute floor near c1 = 0
 TRUST_FLOOR_C2 = 0.02   # rad/nm^2   absolute floor near c2 = 0
-TRUST_TOL_C0 = 0.126    # rad        (0.02 * 2pi, the phase-stabilization budget)
+TRUST_TOL_C0 = 0.314    # rad        (0.05 * 2pi, the phase-stabilization budget)
+                        # Was 0.126 (2% of 2pi), which was never checked against what the
+                        # loop actually needs -- and it was the BINDING term on real traces.
+                        # Measured 3*sigma/tol on the seven real traces: da_15.95ga_-55.29
+                        # failed at c0=2.03 and da_15.95ga_-75 at c0=1.49, i.e. both real
+                        # rejections were the PHASE tolerance, not curvature. (The synthetic
+                        # gallery's "all 11 wrong fail on c2, never c0" is a synth-only
+                        # result; do not generalise it to real data.)
+                        # 5% of 2pi is the honest spec, per the user 2026-07-19: the beam
+                        # already jitters more than 2% shot to shot even while stabilized,
+                        # and phase stabilization was never meant to suppress that noise. It
+                        # exists to stop the slow drift that SMEARS phase across a long scan
+                        # until the information is wiped out entirely. A gate tuned an order
+                        # of magnitude below the jitter it lives in rejects frames for an
+                        # error the loop does not care about.
 TRUST_TOL_C3 = 0.006    # rad/nm^3   noise-limited TOD floor
 TRUST_NSIG = 3.0        # require NSIG * sigma to fit inside the spec.
                         # CALIBRATED, not derived. The Gauss-Newton covariance is an
@@ -375,8 +389,101 @@ REF_HYST = 5          # consecutive traces agreeing before the app changes refer
 # --- Frequency plot ---
 FREQ_YLIM = 6         # frequency-axis cap (cycles/nm)
 
+# --- Spectral fringe frequency -> generated RF frequency ----------------------
+# Dispersive time-mapping calibration (user, 2026-07-19): 9 nm of spectrum maps to ~320 ps
+# of delay, assumed LINEAR over the band. So a spectral fringe of period P nm becomes a
+# temporal beat of period P * (320/9) ps, and the RF frequency it generates is the
+# reciprocal of that:
+#     f_RF [GHz] = f [cycles/nm] * (9 nm / 320 ps) = f * 28.125
+# The "roughly" in the calibration is the dominant error here -- it is a stated ~1 sig fig,
+# so do not report this to a precision the calibration cannot carry (see format_ghz).
+NM_PER_PS = 9.0 / 320.0          # 0.028125 nm/ps
+GHZ_PER_CYC_PER_NM = 1e3 * NM_PER_PS   # 28.125 GHz per (cycle/nm)
+
+# The band the range is quoted over: 802 +- 9 nm. This deliberately EXTRAPOLATES beyond the
+# fitted core (typically ~150-185 points over 6-9 nm), because the question the readout
+# answers is "what RF does this shot generate across the pulse", not "what did we fit".
+# Extrapolating a cubic is exactly where a badly-determined c2/c3 shows up, multiplied by
+# d^2/d^3 -- which is why the readout must be gated on shape_ok, not trust_ok.
+RF_BAND_CENTRE_NM = 802.0
+RF_BAND_HALFWIDTH_NM = 9.0
+
 TAU = RATIO / (RATIO + 1.0)   # ~0.91 quantile: fit hugs the upper envelope of the fringes
 # =============================================================================
+
+
+def fringe_freq_cyc_per_nm(csig, u):
+    """Instantaneous spectral fringe frequency (cycles/nm) at offset u = lambda - l0.
+
+    dPhi/du / 2pi for the fitted cubic. SIGNED -- the sign flips through a null, and callers
+    that want a frequency magnitude must take abs() themselves. Keeping the sign here is what
+    lets rf_range_ghz find the null (where |f| -> 0) instead of silently reporting the
+    turning point as a minimum of a quantity that never went negative.
+    """
+    c = np.asarray(csig, float)
+    u = np.asarray(u, float)
+    return (c[1] + 2.0 * c[2] * u + 3.0 * c[3] * u ** 2) / (2.0 * np.pi)
+
+
+def rf_range_ghz(csig, l0, centre_nm=None, halfwidth_nm=None, n=401):
+    """RF frequency range (min_GHz, max_GHz) generated across the quoted spectral band.
+
+    Returns the extremes of |f| over lambda in centre +- halfwidth, converted through the
+    dispersive time-mapping calibration (see GHZ_PER_CYC_PER_NM). Sampled on a grid rather
+    than evaluated at the two endpoints, because f is a PARABOLA in u whenever c3 != 0 and a
+    line otherwise: with a chirp, the extreme frequency is often interior, and with an
+    in-band null |f| touches ZERO in the middle while both endpoints are large. Endpoint-only
+    evaluation would report a range that excludes both the true minimum and, past the vertex,
+    the true maximum.
+
+    The band deliberately extends past the fitted core -- this is extrapolation, and it is
+    only as good as c1/c2/c3. Gate the readout on R["shape_ok"].
+    """
+    c = RF_BAND_CENTRE_NM if centre_nm is None else float(centre_nm)
+    h = RF_BAND_HALFWIDTH_NM if halfwidth_nm is None else float(halfwidth_nm)
+    u = np.linspace(c - h, c + h, int(n)) - float(l0)
+    f = np.abs(fringe_freq_cyc_per_nm(csig, u)) * GHZ_PER_CYC_PER_NM
+    return float(np.min(f)), float(np.max(f))
+
+
+def format_ghz(v):
+    """Nearest GHz, but never fewer than two significant figures (100, 20, 1.5).
+
+    Rounding to the nearest GHz is right for the tens-to-hundreds values this readout
+    normally shows, but it destroys a 1.4 GHz reading and turns a 0.4 GHz one into "0". So
+    the integer form is used only where it already carries two figures, and below ~10 GHz we
+    add decimals to keep two. Thresholds are 9.95/0.995/0.0995 rather than 10/1/0.1 so a
+    value that ROUNDS UP across the boundary (9.96 -> "10") is formatted by the rule it lands
+    in, not the one it started in.
+    """
+    v = float(v)
+    a = abs(v)
+    if not np.isfinite(v):
+        return "--"
+    if a >= 9.95:
+        return f"{v:.0f}"
+    if a >= 0.995:
+        return f"{v:.1f}"
+    if a >= 0.0995:
+        return f"{v:.2f}"
+    return f"{v:.3f}"
+
+
+def format_rf_range(lo_ghz, hi_ghz, shape_ok=True):
+    """The overlay string: "12-47 GHz", or a single value when the range is degenerate.
+
+    ``shape_ok=False`` marks the number as unsupported rather than hiding it -- the phase can
+    still be locked on such a frame, so blanking the readout would misreport a working shot,
+    while quoting it bare would launder an extrapolated c2 the fit cannot vouch for.
+    """
+    lo, hi = float(lo_ghz), float(hi_ghz)
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        return "-- GHz"
+    # Collapse to one number when the two ends round to the same displayed value: an
+    # unchirped shot is a single frequency, and "34-34 GHz" reads as a bug.
+    s_lo, s_hi = format_ghz(lo), format_ghz(hi)
+    body = s_lo if s_lo == s_hi else f"{s_lo}-{s_hi}"
+    return f"{body} GHz" + ("" if shape_ok else " (unverified)")
 
 
 def gauss(x, a, mu, sigma, off):
@@ -701,8 +808,11 @@ def _joint_trust_ok(u, x, half, csig, order, resid, pU):
     Mirrors _analyze_once's primary-reference trust, evaluated locally so the joint fit can
     be gated without turning a trusted answer untrusted."""
     cov = coef_cov(u, half, csig, order, resid)
-    ok, _, _ = trust_at(csig, cov, float(pU[1]) - float(np.mean(x)))
-    return bool(ok)
+    # BOTH gates here, deliberately. This guards the joint envelope refit, which moves the
+    # envelope and so can degrade the phase SHAPE as easily as the phase itself; it is not
+    # the control loop's accept decision. (Dormant: JOINT_ENV_FIT is False.)
+    ok_phase, _, _, ok_shape = trust_at(csig, cov, float(pU[1]) - float(np.mean(x)))
+    return bool(ok_phase and ok_shape)
 
 
 def joint_env_refine(x, y, u, pU0, pLn0, csig0, order, anchor, mid0, half0, n0):
@@ -880,7 +990,23 @@ def coef_cov(u, half, csig, q, resid):
 
 def trust_at(csig, cov, d, nsig=None):
     """Can the fit meet the accuracy spec at an origin shifted by d (i.e. at the
-    spectral centre)? Returns (ok, sigmas_at_d, coeffs_at_d).
+    spectral centre)? Returns (ok_phase, sigmas_at_d, coeffs_at_d, ok_shape).
+
+    TWO gates, because there are two consumers and they need different things.
+
+    `ok_phase` covers c0 alone -- the unwrapped phase AT the reference. That is the entire
+    quantity the stabilization loop consumes: it corrects phase at one wavelength, and the
+    fitted carrier and chirp are only the vehicle for evaluating it there. This is what
+    `trust_ok` means and what the app's accept gate must use.
+
+    `ok_shape` covers c1..c3 -- the frequency and chirp. Nothing in the control loop reads
+    these, but anything that evaluates the fit AWAY from the reference does: the chart
+    overlay, and the fringe-frequency (GHz) readout, which extrapolates across the whole
+    793-811 nm window where a wrong c2 shows up multiplied by d^2.
+
+    Keeping them fused was over-rejecting frames whose phase was fine, and would also have
+    let a phase-trustworthy fit quote a frequency range it could not support. Neither is
+    what you want, and no single flag can express both.
 
     `nsig` overrides TRUST_NSIG for this call (the app surfaces it as a UI knob). It is a
     parameter rather than a mutated global so that two callers -- or two threads -- can
@@ -898,9 +1024,10 @@ def trust_at(csig, cov, d, nsig=None):
     sig = np.sqrt(np.clip(np.diag(cov_at), 0.0, np.inf))
     need = [TRUST_TOL_C0, max(TRUST_REL * abs(b[1]), TRUST_FLOOR_C1),
             max(TRUST_REL * abs(b[2]), TRUST_FLOOR_C2), TRUST_TOL_C3]
-    ok = bool(np.all(np.isfinite(sig)) and
-              all(s * ns <= t for s, t in zip(sig, need)))
-    return ok, sig, b
+    finite = bool(np.all(np.isfinite(sig)))
+    ok_phase = bool(finite and sig[0] * ns <= need[0])
+    ok_shape = bool(finite and all(s * ns <= t for s, t in zip(sig[1:], need[1:])))
+    return ok_phase, sig, b, ok_shape
 
 
 class ReferencePolicy:
@@ -1774,10 +1901,10 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
         # Fallback = the CORE CENTROID l0. See the REF_HYST block for why.
         cov = coef_cov(u, half, csig, order, resid_sig)
         ref_primary = float(pU[1]) if ref_primary is None else float(ref_primary)
-        ok_primary, sig_primary, b_primary = trust_at(csig, cov, ref_primary - l0,
-                                                      nsig=trust_nsig)
-        ok_fallback, sig_fallback, b_fallback = trust_at(csig, cov, 0.0,   # d=0 at l0
-                                                         nsig=trust_nsig)
+        ok_primary, sig_primary, b_primary, shape_primary = trust_at(
+            csig, cov, ref_primary - l0, nsig=trust_nsig)
+        ok_fallback, sig_fallback, b_fallback, shape_fallback = trust_at(
+            csig, cov, 0.0, nsig=trust_nsig)                              # d=0 at l0
 
         # No policy => switch immediately (standalone + harness). A policy => the app's
         # hysteresis decides, and it only gets to choose the fallback if that is in fact
@@ -1787,10 +1914,10 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
         use_fallback = bool(use_fallback and ok_fallback)
 
         if use_fallback:
-            ref_wl, trust_ok = float(l0), ok_fallback
+            ref_wl, trust_ok, shape_ok = float(l0), ok_fallback, shape_fallback
             csig_sigma, csig_at_centre = sig_fallback, b_fallback
         else:
-            ref_wl, trust_ok = ref_primary, ok_primary
+            ref_wl, trust_ok, shape_ok = ref_primary, ok_primary, shape_primary
             csig_sigma, csig_at_centre = sig_primary, b_primary
 
         t_run = (time.perf_counter() - t_run0) * 1e3 - t_trunc
@@ -1805,16 +1932,19 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
     # A fit the data cannot support is reported as "underdetermined", NOT as a number
     # indistinguishable from a good one. The coefficients and their sigmas still come
     # back for inspection; the status is the contract.
+    # `trust_ok` is now the PHASE gate alone (c0 at ref_wl), so an "underdetermined" status
+    # always means c0 and the message says so directly -- no argmax over four coefficients,
+    # which would have named c1 or c2 as "worst" while c0 was the clause that actually
+    # failed. A fit whose SHAPE is untrustworthy but whose phase is fine stays status "ok"
+    # and reports shape_ok=False; that is a usable frame for the loop and an unusable one
+    # for the frequency readout, and conflating the two is what over-rejected real frames.
     if not trust_ok:
         R["status"] = "underdetermined"
-        worst = ["c0", "c1", "c2", "c3"][int(np.argmax(csig_sigma / np.maximum(
-            [TRUST_TOL_C0, max(TRUST_REL * abs(csig_at_centre[1]), TRUST_FLOOR_C1),
-             max(TRUST_REL * abs(csig_at_centre[2]), TRUST_FLOOR_C2), TRUST_TOL_C3],
-            1e-12)))]
         where = "the core centroid" if use_fallback else "the spectral centre"
         alt = "" if use_fallback else " (the core-centroid fallback could not be trusted either)"
-        R["msg"] = (f"phase underdetermined at {where} {ref_wl:.2f} nm ({worst} sigma="
-                    f"{csig_sigma[int('c0c1c2c3'.index(worst) / 2)]:.3g}); "
+        R["msg"] = (f"phase underdetermined at {where} {ref_wl:.2f} nm (c0 sigma="
+                    f"{csig_sigma[0]:.3g}, need {TRUST_NSIG if trust_nsig is None else trust_nsig:g}"
+                    f"*sigma <= {TRUST_TOL_C0:g} rad); "
                     f"{len(x)} pts over {x[-1] - x[0]:.2f} nm{alt}")
 
     R.update(dict(
@@ -1836,6 +1966,8 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
         # csig_at_centre is ALWAYS at ref_wl -- read ref_wl, never assume 802.
         ref_wl=ref_wl, ref_fallback=use_fallback, ref_primary=ref_primary,
         trust_primary_ok=ok_primary, trust_fallback_ok=ok_fallback,
+        shape_ok=shape_ok, shape_primary_ok=shape_primary,
+        shape_fallback_ok=shape_fallback,
     ))
     return R
 

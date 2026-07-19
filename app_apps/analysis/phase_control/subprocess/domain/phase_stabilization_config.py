@@ -53,6 +53,12 @@ class FringeFitParams(PrimitiveSerde):
                                        # the spectral centre unsupportable, and the fit falls
                                        # back to the core centroid. Read this, not lambda_ref.
     ref_fallback: bool = False         # True => the reference moved off the spectral centre
+    shape_ok: bool = True              # the fit can support its CARRIER and CHIRP, not just
+                                       # the phase. Carried through to the UI because the GHz
+                                       # frequency-range readout extrapolates to 802+-9 nm,
+                                       # far outside the fitted core, where a poorly
+                                       # determined c2 enters as d^2. The phase lock does not
+                                       # need this and must not be gated on it.
     rms_sig: float = 0.0               # last raw-signal fit RMS (counts)
     rms_frac: float = 0.0              # last scale-free fit residual (rms / median half-amp)
     inlier_pct: float = 0.0            # last core inlier fraction (%)
@@ -73,6 +79,7 @@ class FringeFitParams(PrimitiveSerde):
         self.phase_ref = float(phase_ref)
         self.ref_wl = float(r.ref_wl)
         self.ref_fallback = bool(r.ref_fallback)
+        self.shape_ok = bool(r.shape_ok)
         self.rms_sig = float(r.rms_sig)
         self.rms_frac = float(r.rms_frac)
         self.inlier_pct = float(r.inlier_pct)
@@ -93,6 +100,7 @@ class FringeFitParams(PrimitiveSerde):
             has_null=False,
             ref_wl=self.ref_wl,
             ref_fallback=self.ref_fallback,
+            shape_ok=self.shape_ok,
         )
 
     def copy_from(self, other: "FringeFitParams") -> None:
@@ -121,7 +129,7 @@ class FringeFitParams(PrimitiveSerde):
                 kwargs[f.name] = Length.from_primitive(v[f.name])
             elif f.name in ("pU", "pLn"):
                 kwargs[f.name] = [float(x) for x in v[f.name]]
-            elif f.name == "ref_fallback":
+            elif f.name in ("ref_fallback", "shape_ok"):
                 kwargs[f.name] = bool(v[f.name])
             else:
                 kwargs[f.name] = float(v[f.name])
@@ -157,11 +165,23 @@ class StabilizationConfig(PrimitiveSerde):
         """Per-shot quality gate.
 
         `trust_ok` is the important one and it is NOT redundant with the residual gates: a
-        clipped trace costs lever arm, and the chirp c2 goes genuinely underdetermined while
-        the fit still reconstructs at R^2 ~ 0.96. The residual cannot see that -- only the
-        propagated covariance can. Without this clause the app would commit confident-looking
-        phases it has no basis for, which is exactly the failure mode the trust gate exists
-        to stop. Tune it via params.trust_nsig, not by removing it.
+        clipped trace costs lever arm and the phase at the reference goes genuinely
+        underdetermined while the fit still reconstructs at R^2 ~ 0.96. The residual cannot
+        see that -- only the propagated covariance can. Without this clause the app would
+        commit confident-looking phases it has no basis for, which is exactly the failure
+        mode the trust gate exists to stop. Tune it via params.trust_nsig, not by removing it.
+
+        `trust_ok` now covers the PHASE ONLY (c0 at ref_wl). That is deliberate and it is the
+        whole fix for the over-rejection: the loop corrects phase at one wavelength and never
+        reads the carrier or chirp, so gating on those threw away frames for an error it does
+        not act on. Measured over 1240 harness traces, 11 of the 13 fits that fail a
+        four-coefficient grader have a CORRECT phase. Phase-only accuracy of committed fits is
+        99.84% with 0.0% of good fits declined, against 3.7% declined under the fused gate.
+
+        `shape_ok` (c1..c3) is therefore NOT checked here. It exists for consumers that
+        evaluate the fit away from ref_wl -- the chart overlay and the GHz frequency-range
+        readout -- and those must check it themselves. Folding it back in here would
+        reintroduce exactly the rejections this change removed.
         """
         return (r.accepted
                 and r.trust_ok

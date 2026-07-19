@@ -225,6 +225,98 @@ def test_operator_lambda_ref_is_honoured() -> None:
     assert ok and ok2 and ok3
 
 
+def test_phase_and_shape_gates_are_separate() -> None:
+    """The loop gate (c0) and the shape gate (c1..c3) must not be re-fused.
+
+    Measured on 1240 harness traces: of the 13 fits a four-coefficient grader calls wrong,
+    11 have a CORRECT phase and fail only on carrier/chirp -- quantities the stabilization
+    loop never reads. Gating the loop on them declined 3.7% of good fits; splitting the gates
+    took that to 0.0% at 99.84% phase accuracy, and made all seven real traces commit.
+
+    da_15.95ga_-55.29 is the case that proves the split is load-bearing rather than cosmetic:
+    its phase is supportable and its CHIRP is not (3*sigma/tol = 0.82 vs 2.49), so it must
+    commit for stabilization AND be marked unverified for the GHz readout. One boolean cannot
+    say both, which is the entire reason there are two.
+    """
+    path = os.path.join(STANDALONE_DIR, "da_15.95ga_-55.29.xls")
+    if not os.path.exists(path):
+        import pytest; pytest.skip("trace missing")
+    std, _ = _load_standalone()
+    if std is None:
+        import pytest; pytest.skip("standalone not importable")
+
+    lam, amp = _read(path)
+    m = (lam >= ZOOM[0]) & (lam <= ZOOM[1])
+    anchor = std.baseline_anchor(lam, amp)
+    R = std.analyze(lam[m], amp[m], anchor=anchor, ref_primary=802.0)
+    A = analyze_trace(lam[m], amp[m], FitTunables(), anchor=anchor, lambda_ref_nm=802.0)
+
+    ok = R["trust_ok"] is True and R["shape_ok"] is False
+    print(f"\n{'PASS' if ok else 'FAIL'}  da_15.95ga_-55.29: phase trusted={R['trust_ok']}, "
+          f"shape trusted={R['shape_ok']} (must be True/False -- commits, readout unverified)")
+
+    ok2 = A.trust_ok == R["trust_ok"] and A.shape_ok == R["shape_ok"]
+    print(f"{'PASS' if ok2 else 'FAIL'}  the adapter carries both flags through unchanged")
+
+    # The accept gate must consult the phase gate ONLY. Read via AST: importing the config
+    # needs base_core, which is absent outside the instrument checkout.
+    import ast
+    cfg_p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "app_apps", "analysis", "phase_control", "subprocess", "domain",
+                         "phase_stabilization_config.py")
+    tree = ast.parse(open(cfg_p, encoding="utf-8").read())
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "accepts"), None)
+    assert fn is not None, "StabilizationConfig.accepts not found"
+    attrs = {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
+    ok3 = "trust_ok" in attrs and "shape_ok" not in attrs
+    print(f"{'PASS' if ok3 else 'FAIL'}  accepts() gates on trust_ok and NOT shape_ok"
+          + ("" if ok3 else "  <- folding shape_ok back in restores the 3.7% false drops"))
+    assert ok and ok2 and ok3
+
+
+def test_rf_range_readout() -> None:
+    """The GHz overlay: correct conversion, and the '>= 2 sig figs' formatting rule."""
+    std, _ = _load_standalone()
+    core = std if std is not None else app_core
+
+    # 28.125 GHz per cycle/nm, from 9 nm ~ 320 ps assumed linear.
+    ok = abs(core.GHZ_PER_CYC_PER_NM - 28.125) < 1e-9
+    print(f"\n{'PASS' if ok else 'FAIL'}  9nm/320ps => {core.GHZ_PER_CYC_PER_NM} GHz per cycle/nm")
+
+    # A pure carrier with no chirp is ONE frequency across the whole band.
+    c1 = 2.0 * np.pi * 1.0                     # exactly 1 cycle/nm
+    lo, hi = core.rf_range_ghz((0.0, c1, 0.0, 0.0), 802.0)
+    ok2 = abs(lo - 28.125) < 1e-6 and abs(hi - 28.125) < 1e-6
+    print(f"{'PASS' if ok2 else 'FAIL'}  1 cycle/nm, no chirp -> {lo:.3f}-{hi:.3f} GHz "
+          f"(flat at 28.125)")
+
+    # With a chirp the extreme is at a band EDGE, and an in-band null puts the minimum in
+    # the MIDDLE -- an endpoints-only implementation would miss the zero. c1 + 2*c2*u = 0
+    # at u = -c1/(2*c2); place that null 3 nm above the origin.
+    c2 = -c1 / (2 * 3.0)
+    lo2, hi2 = core.rf_range_ghz((0.0, c1, c2, 0.0), 802.0)
+    ok3 = lo2 < 0.5                             # the null is found, not stepped over
+    print(f"{'PASS' if ok3 else 'FAIL'}  chirped with an in-band null -> {lo2:.3f}-{hi2:.1f} "
+          f"GHz (min must reach ~0 at the null)")
+
+    cases = [(100.0, "100"), (20.4, "20"), (9.96, "10"), (1.52, "1.5"),
+             (0.44, "0.44"), (0.037, "0.037")]
+    ok4 = all(core.format_ghz(v) == want for v, want in cases)
+    print(f"{'PASS' if ok4 else 'FAIL'}  format_ghz: "
+          + ", ".join(f"{v}->{core.format_ghz(v)}" for v, _ in cases)
+          + "  (nearest GHz, never under 2 sig figs)")
+
+    ok5 = core.format_rf_range(12.0, 47.0, True) == "12-47 GHz"
+    ok5 &= core.format_rf_range(28.125, 28.125, True) == "28 GHz"      # collapses
+    ok5 &= "unverified" in core.format_rf_range(12.0, 47.0, False)
+    print(f"{'PASS' if ok5 else 'FAIL'}  format_rf_range: "
+          f"{core.format_rf_range(12.0, 47.0, True)!r} / "
+          f"{core.format_rf_range(28.125, 28.125, True)!r} / "
+          f"{core.format_rf_range(12.0, 47.0, False)!r}")
+    assert ok and ok2 and ok3 and ok4 and ok5
+
+
 def test_no_hidden_state() -> None:
     """Two fits of the same trace must be bit-identical (every fit is cold)."""
     path = os.path.join(STANDALONE_DIR, TRACES[0])
@@ -417,6 +509,8 @@ if __name__ == "__main__":
         test_tunable_defaults_are_not_copied,
         test_fit_parity,
         test_operator_lambda_ref_is_honoured,
+        test_phase_and_shape_gates_are_separate,
+        test_rf_range_readout,
         test_no_hidden_state,
         test_reference_policy_hysteresis,
         test_config_view_field_routing,
@@ -433,7 +527,7 @@ if __name__ == "__main__":
     if not failures:
         print("ALL PARITY TESTS PASS")
         sys.exit(0)
-    print(f"PARITY FAILED ({len(failures)} of 8)")
+    print(f"PARITY FAILED ({len(failures)} of 10)")
     for f in failures:
         print(f"  - {f}")
     sys.exit(1)

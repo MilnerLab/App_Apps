@@ -106,7 +106,21 @@ class FringeFitResult:
     # --- v3 additions ------------------------------------------------------------------
     status: str = "ok"                        # "ok" | "underdetermined" | "dead_window" |
                                               # "too_few" | "nonfinite" | "error"
-    trust_ok: bool = True                     # the data can support the phase AT ref_wl
+    trust_ok: bool = True                     # the data can support the PHASE at ref_wl.
+                                              # c0 only -- the one quantity the loop acts on.
+    shape_ok: bool = True                     # ...and the data can support the CARRIER and
+                                              # CHIRP (c1..c3). Separate because only things
+                                              # that evaluate the fit AWAY from ref_wl need
+                                              # it: the chart overlay and the GHz frequency
+                                              # readout, which extrapolate across 793-811 nm
+                                              # where a wrong c2 enters as d^2. Measured on
+                                              # 1240 harness traces: 11 of the 13 fits the
+                                              # four-coefficient grader calls "wrong" have a
+                                              # CORRECT phase and fail only on shape, and
+                                              # shape_ok flags 8 of those 11. Gating the loop
+                                              # on shape threw those frames away for an error
+                                              # it does not care about. Do NOT fold this back
+                                              # into trust_ok or accepts().
     ref_wl: float = float("nan")              # WHERE the phase is trustworthy. READ THIS --
                                               # never assume 802: a clip near the core moves
                                               # it to the core centroid.
@@ -132,7 +146,7 @@ def rejected(status: str = "error", msg: str = "") -> FringeFitResult:
     return FringeFitResult(
         accepted=False, pU=nan4, pLn=nan4, l0=float("nan"), csig=nan4,
         phase_ref=float("nan"), rms_sig=float("inf"), rms_frac=float("inf"),
-        inlier_pct=0.0, has_null=False, status=status, trust_ok=False,
+        inlier_pct=0.0, has_null=False, status=status, trust_ok=False, shape_ok=False,
         ref_wl=float("nan"), ref_fallback=False, msg=msg,
     )
 
@@ -220,6 +234,7 @@ def analyze_trace(
         has_null=bool(R["has_null"]),
         status=status,
         trust_ok=bool(R["trust_ok"]),
+        shape_ok=bool(R.get("shape_ok", False)),
         ref_wl=ref_wl,
         ref_fallback=bool(R["ref_fallback"]),
         csig_sigma=tuple(float(v) for v in R["csig_sigma"]),  # type: ignore[arg-type]
