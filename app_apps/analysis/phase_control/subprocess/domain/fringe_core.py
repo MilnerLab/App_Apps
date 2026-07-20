@@ -1608,6 +1608,27 @@ def _missed_clip(R):
     return bool(T.get("hits_core")) and T.get("side") in (None, "none")
 
 
+def applied_cuts(trunc):
+    """The cut edges the FIT ACTUALLY APPLIED, as `(lo, hi)`; None where no cut was made.
+
+    NOT the same as `trunc["cut_left"]` / `trunc["cut_right"]`, and the difference bites.
+    The detector reports a candidate edge on BOTH sides whenever it finds a dead run, but
+    the fit only honours the side(s) the detector actually CLAIMS -- so a clean trace can
+    (and does: `live_desktop_spectrum.csv` reports `cut_right = 810.98` at `side="none"`)
+    carry an edge that nothing ever cut on.
+
+    Anything that reports the cut to a human -- a chart marker, a log line -- must ask this
+    question, not read the raw keys, or it will draw a clip on an unclipped frame. It lives
+    here rather than in the caller because it is the SAME rule the fit uses, and a second
+    copy of a rule is how the trunc_threshold 0.30/0.40 parity bug happened.
+    """
+    if not isinstance(trunc, dict):
+        return None, None
+    side = trunc.get("side")
+    return (trunc.get("cut_left") if side in ("left", "both") else None,
+            trunc.get("cut_right") if side in ("right", "both") else None)
+
+
 def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
                   trunc_threshold=None, ref_primary=None, force_trunc=None,
                   scanfree=None, trunc_method=None):
@@ -1796,8 +1817,7 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
             # recovered their coefficients, while still converging and still reporting a fit.
             # So the fringe-free band is excluded from the envelopes AND from the phase fit.
             # An untruncated trace has fit_lo/fit_hi = -inf/+inf, so its path is untouched.
-            fit_lo = trunc.get("cut_left") if trunc.get("side") in ("left", "both") else None
-            fit_hi = trunc.get("cut_right") if trunc.get("side") in ("right", "both") else None
+            fit_lo, fit_hi = applied_cuts(trunc)
             if trunc.get("side") == "all":
                 t_run = (time.perf_counter() - t_run0) * 1e3 - t_trunc
                 return {"status": "dead_window", "csig": None, "trunc": trunc,

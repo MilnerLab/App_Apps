@@ -59,6 +59,12 @@ class FringeFitParams(PrimitiveSerde):
                                        # far outside the fitted core, where a poorly
                                        # determined c2 enters as d^2. The phase lock does not
                                        # need this and must not be gated on it.
+    cut_left: float | None = None      # WHERE the knife edge was found (nm), per side; None
+    cut_right: float | None = None     # = no edge there. Samples outside [cut_left, cut_right]
+                                       # were EXCLUDED from the fit, so these bound what the
+                                       # committed answer actually rests on. Carried to the UI
+                                       # so the chart can draw the boundary instead of leaving
+                                       # the operator to infer it from a gap in the fringes.
     rms_sig: float = 0.0               # last raw-signal fit RMS (counts)
     rms_frac: float = 0.0              # last scale-free fit residual (rms / median half-amp)
     inlier_pct: float = 0.0            # last core inlier fraction (%)
@@ -80,6 +86,8 @@ class FringeFitParams(PrimitiveSerde):
         self.ref_wl = float(r.ref_wl)
         self.ref_fallback = bool(r.ref_fallback)
         self.shape_ok = bool(r.shape_ok)
+        self.cut_left = None if r.cut_left is None else float(r.cut_left)
+        self.cut_right = None if r.cut_right is None else float(r.cut_right)
         self.rms_sig = float(r.rms_sig)
         self.rms_frac = float(r.rms_frac)
         self.inlier_pct = float(r.inlier_pct)
@@ -101,6 +109,8 @@ class FringeFitParams(PrimitiveSerde):
             ref_wl=self.ref_wl,
             ref_fallback=self.ref_fallback,
             shape_ok=self.shape_ok,
+            cut_left=self.cut_left,
+            cut_right=self.cut_right,
         )
 
     def copy_from(self, other: "FringeFitParams") -> None:
