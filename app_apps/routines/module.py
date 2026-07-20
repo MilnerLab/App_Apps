@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from base_core.framework.app.context import AppContext
 from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
@@ -8,12 +10,18 @@ from base_core.quantities.models import Frequency, Time
 from app_apps.analysis.phase_control.module import PhaseControlModule
 from app_apps.analysis.phase_control.phase_stabilization_handle import PhaseStabilizationHandle
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
+from app_apps.io.control_readout.fms300pp.handler import Fms300ppHandle
+from app_apps.io.control_readout.mfa_cc.handler import MfaccHandle
+from app_apps.io.control_readout.module import ControlReadoutModule
+from app_apps.io.control_readout.uts150cc.handler import Uts150ccHandle
 from app_apps.routines.cfg_calibration.cfg_range import CfgRange
+from app_apps.routines.xcorr.config import XcorrConfig
+from app_apps.routines.xcorr.routine import XcorrRoutine
 
 
 class RoutinesModule(BaseModule):
     name = "routines"
-    requires = (PhaseControlModule,)
+    requires = (PhaseControlModule, ControlReadoutModule)
 
     def register(self, c: Container, ctx: AppContext) -> None:
         c.register_singleton(CfgRange, lambda _: CfgRange(
@@ -21,6 +29,8 @@ class RoutinesModule(BaseModule):
             max=Frequency(0.0),
             fwhm=Time(100e-15),
         ))
+
+        self._register_xcorr(c, ctx)
 
         from base_qt.app.dispatcher import QtDispatcher
         from app_apps.routines.cfg_calibration.ui.view_model import CfgCalibrationViewModel
@@ -34,3 +44,34 @@ class RoutinesModule(BaseModule):
             cfg_range=c.get(CfgRange),
         ))
         c.register_factory(CfgCalibrationView, lambda c: CfgCalibrationView(c.get(CfgCalibrationViewModel), parent=None))
+
+    @staticmethod
+    def _register_xcorr(c: Container, ctx: AppContext) -> None:
+        """Register the XCORR routine. **No Qt** — this half must stay importable
+        and resolvable from the headless harness, which never builds a window.
+
+        The config is a singleton so the (future) UI and the headless runner
+        configure the same object. ``XcorrRoutine`` is a *factory*: ``BaseRoutine``
+        starts a serial ``TaskRunner`` thread in its constructor, so each ``get()``
+        must produce a fresh instance rather than resurrecting a stopped one.
+
+        Note there is no in-repo precedent for a routine in DI at all —
+        ``CfgCalibrationRoutine`` is constructed directly by its ViewModel, which is
+        exactly the coupling that makes it undriveable headlessly.
+        """
+        c.register_singleton(XcorrConfig, lambda _: XcorrConfig(
+            # Placeholders. The headless runner and the eventual UI both override
+            # these; a scan is never launched on defaults.
+            probe_start_mm=75.0, probe_stop_mm=75.0, probe_step_mm=1.0,
+            grating_start_mm=-30.0, grating_stop_mm=-30.0, grating_step_mm=1.0,
+            delay_base_start_mm=18.0, delay_base_stop_mm=18.0, delay_base_step_mm=1.0,
+            out_dir=Path.cwd() / "xcorr_runs",
+        ))
+
+        c.register_factory(XcorrRoutine, lambda c: XcorrRoutine(
+            bus=ctx.event_bus,
+            config=c.get(XcorrConfig),
+            probe=c.get(Fms300ppHandle),
+            delay=c.get(MfaccHandle),
+            grating=c.get(Uts150ccHandle),
+        ))

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable
+
 from base_core.framework.events.event_bus import EventBus
 from base_core.ipc.message import OKReply
 from base_core.ipc.worker_handle import BaseWorkerHandle
@@ -30,8 +32,30 @@ class Fms300ppHandle(BaseWorkerHandle):
         self._subscribe(RequestMoveFms300pp, self._on_request_move)
         self._subscribe_service(FMS300PPPosUpdate, self._on_position_update)
 
-    def move_to(self, position: float) -> None:
-        self._request(MoveFMS300PPTo(position=position), self._on_reply)
+    def move_to(
+        self,
+        position: float,
+        on_done: Callable[[], None] | None = None,
+        on_error: Callable[[str], None] | None = None,
+    ) -> None:
+        """Command an absolute move, in mm.
+
+        The worker replies only *after* ``wait_for_motion`` returns, so the reply is
+        a genuine motion-complete signal. Pass ``on_done``/``on_error`` when you need
+        to sequence the next command behind this one: the callbacks are threaded
+        through ``_request``, which correlates them to this specific request id.
+
+        Do not substitute a completion event on the bus — it carries no request id
+        and no target position, so it cannot be correlated, and it would race the
+        device panel's own live ``RequestMoveFms300pp`` subscription.
+
+        Callbacks run on the IPC reader thread. Keep them short.
+        """
+        self._request(
+            MoveFMS300PPTo(position=position),
+            (lambda _reply: on_done()) if on_done is not None else self._on_reply,
+            (lambda err: on_error(err.error)) if on_error is not None else None,
+        )
 
     def home(self) -> None:
         self._request(HomeFMS300PP(), self._on_reply)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable
+
 from base_core.framework.events.event_bus import EventBus
 from base_core.ipc.message import OKReply
 from base_core.ipc.worker_handle import BaseWorkerHandle
@@ -30,8 +32,22 @@ class Uts150ccHandle(BaseWorkerHandle):
         self._subscribe(RequestMoveUts150cc, self._on_request_move)
         self._subscribe_service(UTS150CCPosUpdate, self._on_position_update)
 
-    def move_to(self, position: float) -> None:
-        self._request(MoveUTS150CCTo(position=position), self._on_reply)
+    def move_to(
+        self,
+        position: float,
+        on_done: Callable[[], None] | None = None,
+        on_error: Callable[[str], None] | None = None,
+    ) -> None:
+        """Command an absolute move, in mm. See ``Fms300ppHandle.move_to``.
+
+        The reply arrives after motion completes, so ``on_done`` is a motion-complete
+        signal correlated to this request. Callbacks run on the IPC reader thread.
+        """
+        self._request(
+            MoveUTS150CCTo(position=position),
+            (lambda _reply: on_done()) if on_done is not None else self._on_reply,
+            (lambda err: on_error(err.error)) if on_error is not None else None,
+        )
 
     def home(self) -> None:
         self._request(HomeUTS150CC(), self._on_reply)
