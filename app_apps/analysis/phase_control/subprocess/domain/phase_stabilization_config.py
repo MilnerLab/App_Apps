@@ -141,6 +141,10 @@ class FringeFitParams(PrimitiveSerde):
                 kwargs[f.name] = [float(x) for x in v[f.name]]
             elif f.name in ("ref_fallback", "shape_ok"):
                 kwargs[f.name] = bool(v[f.name])
+            elif f.name in ("cut_left", "cut_right"):
+                # Genuinely optional: None means no knife edge was found on that side.
+                # These must NOT go through float() -- that is what broke the decode.
+                kwargs[f.name] = None if v[f.name] is None else float(v[f.name])
             else:
                 kwargs[f.name] = float(v[f.name])
         return cls(**kwargs)
