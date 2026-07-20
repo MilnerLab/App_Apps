@@ -303,6 +303,20 @@ JOINT_ENV_FIT = False
 # which degenerates the gap Gaussian). Only fires when the knife actually found a cut.
 DEADZONE_REFIT = False
 
+# DEAD END, measured 2026-07-19 -- do not re-add a global-kernel Hilbert detrend.
+# The idea was sound: n = (y-mid)/half should be zero-mean, and in the tails `half` is small
+# so envelope error becomes a large offset in n, which the Hilbert transform mixes into the
+# phase. Implemented as n - gaussian_filter1d(n, sigma) with sigma from the mean
+# zero-crossing period. Result on the seven real traces: SIX were bit-identical (the full
+# fit dominates the seed, same finding as the flip-scan null experiment), and the seventh,
+# da_15.95ga_-75, COLLAPSED -- r2_fringe 0.645 -> -0.116.
+# Mechanism: that trace has a null, so its local period runs 4.2 samples in the blue third
+# to 8.0 in the middle. ONE global kernel cannot be "about one period" everywhere -- at
+# sigma=5.3 it was 0.8x the local period in the blue third, where it tracked the fringe and
+# ate 14.7% of the fringe RMS, while removing only 1.4% in the middle where the baseline
+# actually lives. Any retry needs a LOCAL, chirp-following kernel, and must first show that
+# the seed matters at all: six of seven traces say it does not.
+
 # --- Accuracy spec / trust gate ---------------------------------------------
 # The accuracy the pipeline is REQUIRED to deliver (mirrors the synth_test tolerances:
 # 1% relative on the frequency c1 and chirp c2 with small absolute floors near zero, a
