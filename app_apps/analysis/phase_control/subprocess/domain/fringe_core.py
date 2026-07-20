@@ -1238,12 +1238,40 @@ def _noise_sigma(y, ref):
 
 def _fit_gauss_robust(x, z):
     """Robust (soft-L1) symmetric Gaussian fit to z, seeded from the data. Used for the
-    intensity DC trend, where a null's local bulge must not drag the curve."""
+    intensity DC trend, where a null's local bulge must not drag the curve.
+
+    `x_scale="jac"` is NOT cosmetic -- it is the single biggest latency fix in the whole
+    pipeline. The four parameters live on wildly different scales (amp ~1e3, mu ~802,
+    sigma ~4, offset ~160), and least_squares defaults to x_scale=1.0, i.e. a trust region
+    that takes the same step in all four: a step that means nothing to mu is enormous for
+    sigma. On a clipped trace that mis-scaling stops the solve converging at all -- it
+    walks the full max_nfev=3000 while moving the answer ~1%, and MEASURED
+    (archive/probes/cc_prof.py) that ONE call was 94-96% of the entire frame, 2.4-4.7 s.
+    Scaling by the Jacobian columns is the textbook fix and changes the PATH, not the
+    optimum. Measured over 43 traces (7 real + a synthetic clean/clipped/both-arms sweep,
+    archive/probes/cc_dcfit_scale.py): total 44448 -> 1249 ms (36x), worst case
+    4694 -> 85 ms (55x), nfev 3000 -> ~25 (it now CONVERGES; it never needed the budget).
+
+    Accuracy is unchanged, checked against GROUND TRUTH rather than against the old
+    behaviour -- necessary, because on exactly the cases whose verdict moves, the OLD fit
+    is the one that failed to converge, so "differs from before" is not "wrong". Scored on
+    the synthetic sweep where the true clip is known (archive/probes/cc_dcfit_verdict.py),
+    old and new are identical: 24 miss / 6 wrong-side / 6 clean. The verdicts that differ
+    all sit INSIDE the wrong-side class (a slightly different, equally wrong edge on a
+    right-of-centre clip the detector never gets right anyway -- the documented synth
+    weakness). No detection is gained or lost, on synthetic or on any of the 7 real traces.
+
+    Do NOT "fix" this instead by lowering max_nfev: measured (cc_dcfit_nfev.py), a flat cap
+    is the wrong trade -- it truncates the genuinely-converging fits (real traces need
+    8-78 nfev, one needs 562) without addressing why the pathological ones run away.
+    An analytic Jacobian on top of this was also measured (1249 -> 1006 ms); it is a
+    further ~20% for extra code and is deliberately not taken."""
     off0 = float(np.median(np.concatenate([z[:max(len(z) // 10, 3)],
                                            z[-max(len(z) // 10, 3):]])))
     i = int(np.argmax(gaussian_filter1d(z, 5)))
     p0 = [max(z[i] - off0, 1e-6), x[i], 4.0, off0]
-    sol = least_squares(lambda p: gauss(x, *p) - z, p0, loss="soft_l1", max_nfev=3000)
+    sol = least_squares(lambda p: gauss(x, *p) - z, p0, loss="soft_l1",
+                        x_scale="jac", max_nfev=3000)
     return sol.x
 
 
@@ -1528,10 +1556,56 @@ def _rms_frac(R):
     return float(R["rms_sig"]) / (med + 1e-9)
 
 
+TRUNCREC_SCAN_ON_HITS_CORE = True
+                              # Also scan when the DEAD MASK says a fringe-free band reaches
+                              # into the fit core while the SIDE CLASSIFIER says "none" --
+                              # regardless of rms_frac.
+                              #
+                              # WHY rms_frac alone cannot do this (measured, 15.3/15.3d):
+                              # clips missed on ~1 hardware frame in 4 sit at rms_frac
+                              # 0.131-0.147 and real CLEAN frames sit at 0.11-0.144, so the
+                              # two distributions OVERLAP and no threshold separates them.
+                              # `hits_core` does: it is the raw dead mask (28/30 correct on
+                              # synthetic clips) rather than `_edge_runs` (0/30), and it is
+                              # False on every real clean trace measured. The frames it
+                              # catches are exactly the hardware signature: an OUTBOARD clip
+                              # on the WEAK arm, `side=none, hits_core=True`, which then
+                              # COMMITS with the carrier ~3% wrong because rms_frac is under
+                              # both this trigger and the app's 0.30 accept gate.
+TRUNCREC_HC_IMPROVE = 0.70    # ...but a frame reached this way ALREADY EXPLAINS ITSELF
+                              # uncut, which breaks the invariant that makes the scan safe.
+                              # Normally a needless cut is unreachable (the scan only runs
+                              # after the uncut fit FAILED, and the first success wins, so
+                              # the smallest adequate cut is taken). Reached on an explaining
+                              # frame, that guard is gone: rms_frac always improves as you
+                              # cut -- you are deleting the hardest data -- so the scan can
+                              # always find *some* cut that scores better and would silently
+                              # replace a good answer. See the 3.2/18.3 rad cut-first result
+                              # in CLIPCACHE_STATUS sec.4 for what that failure looks like.
+                              # So on THESE frames only, keep the uncut fit unless the cut
+                              # improves rms_frac by at least this factor. A genuine missed
+                              # clip clears it easily (fitting through a fringe-free band is
+                              # a gross residual, ~0.25 vs ~0.07); a cosmetic over-cut of a
+                              # clean frame does not.
+
+
 def _explains(R):
     """Does this fit account for the trace, and can we vouch for it?"""
     return (R.get("status") == "ok" and bool(R.get("trust_ok"))
             and _rms_frac(R) < TRUNCREC_TRIGGER)
+
+
+def _missed_clip(R):
+    """Dead mask reaches the fit core, yet the side classifier saw nothing.
+
+    The self-contradiction (`trunc=none HITS-CORE`) that HISTORY sec.7 flagged and 15.3e
+    quantified: the mask works, the classifier does not. Treated as "unexplained" so the
+    scan gets a look, WITHOUT touching `_explains` itself -- `_explains` is also the
+    scan's own accept test, and a recovered fit can still legitimately carry
+    hits_core=True, so folding this in there would reject the cut it just found.
+    """
+    T = R.get("trunc") or {}
+    return bool(T.get("hits_core")) and T.get("side") in (None, "none")
 
 
 def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
@@ -1906,6 +1980,21 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
                                   np.any(trunc["dead"] & (x_all >= x_left) &
                                          (x_all <= x_right)))
 
+        # `hits_core` is measured against the NOMINAL contrast core [x_left, x_right] --
+        # i.e. BEFORE the cut (`fit_ok`) and BEFORE the dead-end trim. It therefore answers
+        # "did the clip land where the phase wanted to be fit", NOT "did the fit run through
+        # dead samples". Both cases are useful and they are not the same question:
+        #   hits_core & not hits_fit -> the pipeline already excluded the dead band (cut or
+        #                               end-trim). The fit is honest; it just stood on fewer
+        #                               fringes, so its lever arm is shorter than the core
+        #                               width suggests.
+        #   hits_fit                 -> dead samples are IN the fitted set. That is the fit
+        #                               being asked to explain data with no fringes in it.
+        # `keep` is the final fitted mask over the full window, so this is the fit's own
+        # domain and not a re-derivation of it.
+        trunc["hits_fit"] = bool(trunc.get("dead") is not None and
+                                 np.any(trunc["dead"] & keep))
+
         # t_run stays comparable to pre-detector runs: the detector is timed separately.
         # --- Is the answer supported by the data, and where? ----------------------
         # Primary reference = the SPECTRAL CENTRE (fitted intensity peak muU): that is
@@ -1987,7 +2076,8 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
 
 
 def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold=None,
-            ref_primary=None, recover=True, scanfree=None, trunc_method=None):
+            ref_primary=None, recover=True, scanfree=None, trunc_method=None,
+            clip_cache=None):
     """Fit one trace, and if the model cannot explain it, find the cut that can.
 
     Fit normally first. If that explains the trace (`_explains`), return it -- this is the
@@ -2009,6 +2099,11 @@ def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold
     ["cut_right"] carry it, so a caller cannot tell a scanned cut from a detected one and
     does not need to.
     """
+    use_scanfree_0 = SCANFREE if scanfree is None else scanfree
+    if clip_cache is not None and recover and not use_scanfree_0:
+        return _analyze_cached(x, y, clip_cache, anchor=anchor, ref_policy=ref_policy,
+                               trust_nsig=trust_nsig, trunc_threshold=trunc_threshold,
+                               ref_primary=ref_primary)
     R = _analyze_once(x, y, anchor=anchor, ref_policy=ref_policy, trust_nsig=trust_nsig,
                       trunc_threshold=trunc_threshold, ref_primary=ref_primary,
                       scanfree=scanfree, trunc_method=trunc_method)
@@ -2017,9 +2112,40 @@ def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold
     # Scan-free pipeline: the deterministic fit is the ONLY fit path (PLAN constraint #1/#2).
     # It lands the truncated fit in one pass, so there is no recovery scan to fall back to.
     use_scanfree = SCANFREE if scanfree is None else scanfree
-    if use_scanfree or not recover or _explains(R):
+    if use_scanfree or not recover:
         return R
+    ok = _explains(R)
+    # A frame that explains itself but hits the core is a SUSPECTED missed clip: scan it,
+    # but keep the uncut answer unless the cut is decisively better (TRUNCREC_HC_IMPROVE).
+    on_suspicion = bool(ok and TRUNCREC_SCAN_ON_HITS_CORE and _missed_clip(R))
+    if ok and not on_suspicion:
+        return R
+    R2 = _recovery_scan(x, y, R, anchor=anchor, ref_policy=ref_policy,
+                        trust_nsig=trust_nsig, trunc_threshold=trunc_threshold,
+                        ref_primary=ref_primary)
+    if R2 is None:
+        return R
+    if on_suspicion and not (_rms_frac(R2) < TRUNCREC_HC_IMPROVE * _rms_frac(R)):
+        R["hc_scan_declined"] = True
+        return R
+    R2["hc_scan"] = on_suspicion
+    return R2
 
+
+def _recovery_scan(x, y, R, anchor=None, ref_policy=None, trust_nsig=None,
+                   trunc_threshold=None, ref_primary=None, deadline=None):
+    """Scan candidate cuts until one explains the trace. Returns the recovered R, or None.
+
+    Split out of `analyze` so the clip cache can fall back to the EXACT same search
+    instead of forking it (one source of truth). `deadline` is a `time.perf_counter()`
+    value: past it the scan gives up and returns None -- the hard cap of PLAN sec.3b, a
+    failure signal, NOT an anytime/best-so-far commit. Nothing else about the search is
+    parameterised; in particular the candidate ORDER is fixed, because "smallest cut
+    first, first success wins" is what makes a needless cut unreachable. Reordering the
+    grid (e.g. seeding it at a remembered lambda) would quietly replace the minimal cut
+    with a merely-adequate one, so the cache short-circuits this scan rather than steering
+    it.
+    """
     # ref_policy is STATEFUL ACROSS FRAMES (REF_HYST consecutive traces to switch), so the
     # scan must not touch it: 32 candidates would drive the hysteresis counter 32x in one
     # frame and switch the reference on the first bad trace instead of the fifth. Candidates
@@ -2032,16 +2158,18 @@ def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold
     # the wings and never reaches the clip (measured: 32 candidates, none within 6 nm of a
     # real 800.3 edge). R["x"] IS the core the first fit used.
     if R.get("x") is None or len(R["x"]) < 2:
-        return R
+        return None
     lo, hi = float(R["x"][0]), float(R["x"][-1])
     if (hi - lo) <= TRUNCREC_MIN_SPAN_NM:
-        return R          # no room for any cut at all
+        return None       # no room for any cut at all
     best = None
     # Smallest cut first, alternating sides, so the first success IS the minimal one.
     steps = int(TRUNCREC_MAX_NM / TRUNCREC_STEP_NM)
     for n in range(1, steps + 1):
         d = n * TRUNCREC_STEP_NM
         for side in ("left", "right"):
+            if deadline is not None and time.perf_counter() > deadline:
+                return None           # hard cap: fail the frame, do not commit a half-search
             cut = lo + d if side == "left" else hi - d
             if side == "left" and (hi - cut) < TRUNCREC_MIN_SPAN_NM:
                 continue
@@ -2066,7 +2194,7 @@ def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold
         if best is not None:
             break
     if best is None:
-        return R                      # nothing explains it: report the honest failure
+        return None                   # nothing explains it: the caller reports the failure
 
     R2, ft = best
     if ref_policy is not None:
@@ -2088,3 +2216,505 @@ def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold
             pass
     R2["recovered"] = True
     return R2
+
+
+# ===================== CLIP-EDGE CACHE (cross-frame state) ===================
+# WHY THIS EXISTS (measured, Task 15): on the instrument the RECOVERY SCAN is both the
+# thing that works (14/14 correct sides came from it; the detector's `side` was 0/30 on
+# synth) and the entire latency cost (mean fit 225 -> 645 ms when an arm is clipped, i.e.
+# ~18 blind candidate fits per frame). Every frame re-derives, from scratch, a cut that
+# has not moved: the knife is a piece of metal, stable in WAVELENGTH, while everything
+# else about the trace drifts. Remembering lambda turns that global search into a single
+# hypothesis test -- one fit instead of eighteen.
+#
+# It also breaks a documented circularity. "Detect the deadzone first, then fit the
+# envelope on clean data" was recorded INFEASIBLE, because detection needs a
+# normalization and the normalization needs the deadzone gone. The cache supplies the
+# PREVIOUS frame's answer, so the first envelope of THIS frame is already fit on the
+# fringe-bearing band -- via the existing `force_trunc` path, which is exactly that
+# pipeline and needed no new fitting code.
+#
+# WHAT KEEPS IT HONEST. The cache can only ever be consulted on a frame whose UNCUT fit
+# already failed `_explains` (see `_analyze_cached` -- the plan called for the opposite
+# order and the measurements overruled it), so it can only turn a failure into a success.
+# On top of that:
+#   * `_explains` judges every frame on its OWN data; nothing commits on the cache's word;
+#   * n consecutive failures flush the cache -- this catches a knife that moved INWARD,
+#     because the stale cut then leaves dead samples in the fit and the fit fails;
+#   * the SHRINK PROBE catches the other direction, which no metric can. A knife that
+#     moved OUTWARD leaves a stale cut that still fits beautifully -- it just throws away
+#     live fringes. `rms_frac` IMPROVES as you cut more (you are deleting the hardest
+#     data), so an over-deep cut is both invisible and REWARDED by the quality metric.
+#     Measured, an over-deep cut is not merely a lever-arm loss: on a clean real trace a
+#     stale cut passed every check while putting the phase at the reference 3.2 rad out,
+#     and an injected 802.0 nm cut 18.3 rad out. That is why the ordering above matters
+#     and why this probe is not optional.
+#
+# WHAT MAY VOTE. Only a cut that some FIT accepted without the cache's help: a fresh
+# recovery scan, or a shrink probe. A cache-hit frame resets the failure counter and
+# contributes NO lambda -- it was fit on data the cache itself selected, so its agreement
+# is not evidence; that is a closed loop and it would freeze the estimate wherever it
+# happened to start.
+#
+# `detect_truncation`'s own cut_left/cut_right are NOT voted, though the plan proposed the
+# raw dead mask as the primary vote source on the strength of a 28/30 SYNTHETIC hit rate.
+# Measured on the real traces (archive/probes/cc_gate.py) that number does not transfer at all:
+#     2020607181645  clipped at 800.14 -- mask marks 15 dead samples at 807.26 (wrong end)
+#     da17_1GA_-75   clipped at 797.95 -- mask marks NOTHING
+#     live_desktop   clean             -- mask marks 16 dead samples at 812 (false)
+# So on real data the mask neither finds the clips nor stays quiet without them, and a
+# cut sourced from it would be a fiction the cache then defends. [[synthetic-data-gap]]
+# again: it is also why the cached cut cannot be GATED on this frame's mask, which would
+# otherwise have let the cut be applied first and saved a fit.
+#
+# State lives in the CALLER, exactly like `ref_policy`: omit `clip_cache` and analyze()
+# is bit-identical to before.
+CLIPCACHE_HIST = 5            # accepted cuts kept per side; the applied cut is their
+                              # MEDIAN, so one bad vote cannot move it.
+CLIPCACHE_MAX_FAILS = 3       # consecutive frames a cached cut may fail `_explains`
+                              # before it is flushed. 1 would thrash on an ordinary bad
+                              # frame (noise, a dropped shot); this needs the failure to
+                              # persist, which a moved knife does and a bad frame does not.
+CLIPCACHE_BUDGET_MS = 3000.0  # hard cap on analyze() wall time. The user's number: >3 s
+                              # "feels like forever", and today's worst case is 4207 ms
+                              # and unbounded. Exceeding it FAILS the frame (and counts
+                              # toward MAX_FAILS) rather than committing a partial search.
+CLIPCACHE_SHRINK_NM = 1.0     # how much shallower the shrink probe cuts. BIG on purpose:
+                              # a small step sits inside frame-to-frame noise, so its
+                              # pass/fail says nothing, and if a shallower cut passes at
+                              # all the knife has probably moved a real distance -- a fine
+                              # step would then need many frames to walk back. 4x the scan
+                              # grid (TRUNCREC_STEP_NM = 0.25) converges in one or two
+                              # probes and its verdict is unambiguous.
+CLIPCACHE_SHRINK_EVERY = 8    # frames between probes while a cached cut is in USE. Was
+                              # 20; tightened because the exposure being bounded here is
+                              # a wrong phase, not just a short lever arm (see above).
+                              # A probe only ever runs on a frame that already needed the
+                              # cut, so this is one extra fit per 8 clipped frames -- and
+                              # a successful shrink re-probes immediately, so walking back
+                              # a knife that moved 3 nm takes 3 frames, not 3 probes.
+
+# --- the NEGATIVE cache: remember that the scan FAILED --------------------------
+# Measured on the real traces (archive/probes/cc_smoke.py, 12-frame replay), and it is the
+# largest remaining cost by a wide margin:
+#     2020607181645  460 -> 93 ms   (cache hit; the scan runs once)
+#     da17_1GA_-75   417 -> 66 ms   (cache hit)
+#     da_15.95ga_-55.29           1845 ms EVERY FRAME
+#     da_15.95ga_-75              2779 ms EVERY FRAME
+# The last two commit (trust_ok=True) but sit at rms_frac 0.35/0.49, far above
+# TRUNCREC_TRIGGER, so `_explains` is False and the scan runs -- EXHAUSTIVELY, ~18
+# candidates, finding nothing, on every single frame, forever. A positive cache cannot
+# help: there is no cut to remember, because no cut exists. What repeats here is the
+# FAILURE, so that is what must be remembered.
+#
+# This does not change the frame's answer: an exhausted scan returns the same primary fit
+# it started from. It only stops re-proving the same negative. The retry exists because
+# the trace CAN become recoverable (the operator inserts a knife), and the backoff is in
+# frames rather than seconds so it scales with acquisition rate.
+CLIPCACHE_SCANFAIL_MAX = 2    # consecutive exhaustive scan failures before backing off.
+                              # 2, not 1: one failure can be a bad frame.
+CLIPCACHE_GROW_STEPS = 6      # deepening probes (in TRUNCREC_STEP_NM = 0.25 nm units)
+                              # tried around a FAILED cached cut before falling back to
+                              # the global scan: 1.5 nm of travel for at most 6 fits,
+                              # against ~18 for the scan. Sized from the simulator's
+                              # scripted 1.0 nm inward move, which is already a large
+                              # deliberate adjustment by hand.
+CLIPCACHE_SCANFAIL_RETRY = 10 # while backed off, re-attempt the scan every N frames, so
+                              # a newly-inserted clip is found within ~3 s at 3 fps and
+                              # the steady-state cost of a permanently-bad trace is one
+                              # scan per 10 frames instead of one per frame.
+
+
+class ClipCache:
+    """Remembered clip edge, in WAVELENGTH, carried across frames by the caller.
+
+    Never a sample index and never a core-relative offset: the core centroid `l0` wobbles
+    ~1 nm frame to frame (the contrast crop breathes), while the knife does not move at
+    all. Caching an index would re-introduce that wobble as a moving cut.
+    """
+
+    def __init__(self, hist=CLIPCACHE_HIST, max_fails=CLIPCACHE_MAX_FAILS,
+                 budget_ms=CLIPCACHE_BUDGET_MS, shrink_nm=CLIPCACHE_SHRINK_NM,
+                 shrink_every=CLIPCACHE_SHRINK_EVERY,
+                 scanfail_max=CLIPCACHE_SCANFAIL_MAX,
+                 scanfail_retry=CLIPCACHE_SCANFAIL_RETRY,
+                 grow_steps=CLIPCACHE_GROW_STEPS):
+        self.hist, self.max_fails = int(hist), int(max_fails)
+        self.budget_ms, self.shrink_nm = float(budget_ms), float(shrink_nm)
+        self.shrink_every, self.grow_steps = int(shrink_every), int(grow_steps)
+        self.scanfail_max, self.scanfail_retry = int(scanfail_max), int(scanfail_retry)
+        self.votes = {"left": [], "right": []}
+        self.fails = 0
+        self.frames = 0
+        self.last_probe = 0           # frame number of the last shrink probe
+        self.probe_now = False        # a successful shrink re-probes IMMEDIATELY (the
+                                      # knife has demonstrably moved; expect more)
+        self.scan_fails = 0           # consecutive exhaustive scan failures
+        self.last_scan = 0            # frame number of the last scan ATTEMPT
+        self.stats = {"hit": 0, "miss": 0, "cold": 0, "fail": 0, "flush": 0,
+                      "scan": 0, "probe": 0, "shrunk": 0, "capped": 0,
+                      "scanfail": 0, "scanfail_capped": 0, "suppressed": 0, "grown": 0}
+        self.log = []                 # (frame, event, detail) -- diagnostics only
+
+    # --- state -------------------------------------------------------------------
+    def cut(self, side):
+        """Median of the remembered cuts for one side, or None."""
+        v = self.votes[side]
+        return float(np.median(v)) if v else None
+
+    def has_cut(self):
+        return bool(self.votes["left"] or self.votes["right"])
+
+    def vote(self, side, lam, why=""):
+        if side not in self.votes or lam is None or not np.isfinite(lam):
+            return
+        self.votes[side].append(float(lam))
+        del self.votes[side][:-self.hist]
+        self.log.append((self.frames, "vote", "%s %.2f %s" % (side, lam, why)))
+
+    def flush(self, why=""):
+        self.votes = {"left": [], "right": []}
+        self.fails = 0
+        self.probe_now = False
+        self.stats["flush"] += 1
+        self.log.append((self.frames, "flush", why))
+
+    def force(self, det, shrink=0.0):
+        """The cut to apply this frame, as a `force_trunc` dict, or None.
+
+        Built ON TOP of the raw detector report so `dead`/`live`/`v` (hence `hits_core`
+        and every diagnostic downstream) still describe THIS frame's trace -- the cache
+        overrides only the cut itself. `shrink` moves both edges outward by that many nm,
+        which is the shrink probe.
+        """
+        l, r = self.cut("left"), self.cut("right")
+        if l is None and r is None:
+            return None
+        if shrink:
+            l = None if l is None else l - shrink
+            r = None if r is None else r + shrink
+        ft = dict(det) if det else {}
+        ft.update(side=("both" if (l is not None and r is not None)
+                        else "left" if l is not None else "right"),
+                  detected=True, cut_left=l, cut_right=r,
+                  msg=("cut from clip cache (shrink %.2f nm)" % shrink) if shrink
+                      else "cut from clip cache")
+        return ft
+
+    def due_probe(self):
+        return (self.has_cut() and self.shrink_every > 0
+                and (self.probe_now
+                     or (self.frames - self.last_probe) >= self.shrink_every))
+
+    def skip_scan(self):
+        """Has the scan failed often enough, recently enough, to be worth skipping?"""
+        return (self.scanfail_max > 0 and self.scan_fails >= self.scanfail_max
+                and (self.frames - self.last_scan) < self.scanfail_retry)
+
+    def on_scan(self, found, exhausted=True):
+        """Record the outcome of an ATTEMPTED scan.
+
+        A CAPPED scan (`exhausted` False) counts toward the backoff too, and the reason is
+        worth stating because the opposite is tempting: a capped scan does not prove no cut
+        exists, only that none was reachable inside the budget -- but the scan is
+        deterministic in its ordering, so re-running it on the next frame cuts off at the
+        same place and learns the same nothing. The operative question is not "does a cut
+        exist" but "is one findable within the budget", and a capped scan answers that.
+        MEASURED both ways on the real traces: excluding capped scans leaves
+        `da_15.95ga_-55.29` and `da_15.95ga_-75` re-running a doomed 3 s search on EVERY
+        frame (3104/3115 ms median); including them drops that to ~150 ms.
+        The counterexample that made this look wrong -- clipcache_sim's `knife moves
+        INWARD`, where the backoff once cost 12 correct frames -- was never really about
+        capped scans: the cap itself was truncating the search before it reached the moved
+        edge. That is now handled where it belongs, by the GROW PROBE, which finds a moved
+        edge in 1-4 fits without any global search.
+        """
+        self.last_scan = self.frames
+        if found:
+            self.scan_fails = 0
+        else:
+            self.scan_fails += 1
+            self.stats["scanfail" if exhausted else "scanfail_capped"] += 1
+
+    # --- outcomes ----------------------------------------------------------------
+    def on_success(self):
+        self.fails = 0
+
+    def on_fail(self, why=""):
+        self.fails += 1
+        self.stats["fail"] += 1
+        self.log.append((self.frames, "fail",
+                         "%s (%d/%d)" % (why, self.fails, self.max_fails)))
+        if self.fails >= self.max_fails:
+            self.flush("%d consecutive failures: %s" % (self.fails, why))
+
+    def summary(self):
+        s = dict(self.stats)
+        s.update(frames=self.frames, left=self.cut("left"), right=self.cut("right"),
+                 fails=self.fails)
+        return s
+
+
+def _analyze_cached(x, y, cache, anchor=None, ref_policy=None, trust_nsig=None,
+                    trunc_threshold=None, ref_primary=None):
+    """`analyze` with a clip cache. Same contract, same return dict (+ R["clip_cache"]).
+
+    Order of operations, and why:
+      1. `detect_truncation` on the RAW, UNTRIMMED trace -- ONCE per frame, ~25 ms. It is
+         self-contained, so its verdict is independent of whatever cut we are about to
+         apply. Its report is then handed to `_analyze_once` as `force_trunc`, which is
+         exactly what that function would have computed itself: no work is duplicated.
+      2. Fit UNCUT, exactly as today. If that explains the trace, return it: the cache had
+         no influence on the answer at all.
+      3. Only if that FAILS, fit with the remembered cut. Hit => done, two fits (~90 ms
+         against ~645 ms for the scan).
+      4. Still unexplained => today's recovery scan, under the wall-clock cap and the
+         repeat-failure backoff.
+
+    WHY UNCUT FIRST, against PLAN_clip_cache sec.1 (which specified cached-cut-first so
+    the cut would feed the first envelope fit): MEASURED, on the real traces, applying a
+    stale cut first is not a lever-arm problem, it is a WRONG-PHASE problem.
+      * cache warmed on `2020607181645_truncated`, then fed the CLEAN
+        `live_desktop_spectrum` (= knife removed): the stale cut still passed `_explains`
+        on every frame -- 173 core points instead of 260 -- and moved the phase at the
+        reference by 3.21 rad;
+      * an injected 802.0 nm cut on that same clean trace: also passed `_explains`, 125
+        points, 18.3 rad out.
+    Both are silent: `_explains` cannot object, because rms_frac IMPROVES as you cut more.
+    Under the plan's ordering nothing would have caught either until the next shrink probe
+    (up to 20 frames, ~7 s at 3 fps) -- and 3.2 rad is ten times the 0.314 rad the trust
+    gate is there to enforce, fed straight to the control loop.
+    Fitting uncut first makes that class of error UNREACHABLE: the cut is only ever
+    consulted on a frame the uncut fit could not explain, i.e. only where it can help.
+    It costs one extra fit (~40 ms) on genuinely clipped frames and nothing elsewhere,
+    which still lands inside the plan's 100-200 ms target. The plan's stated reason for
+    cut-first -- deleting the prelim-envelope -> knife -> refit sequence -- does not apply
+    to the SHIPPED pipeline anyway: that sequence is pipeline B (`SCANFREE`/
+    `DEADZONE_REFIT`, both OFF). In the shipped path the uncut fit is not wasted work, it
+    IS the answer on every clean frame.
+    """
+    t0 = time.perf_counter()
+    deadline = t0 + cache.budget_ms * 1e-3
+    cache.frames += 1
+    kw = dict(anchor=anchor, trust_nsig=trust_nsig, trunc_threshold=trunc_threshold,
+              ref_primary=ref_primary)
+
+    t_d0 = time.perf_counter()
+    try:
+        det = detect_truncation(x, y)
+    except Exception as e:
+        det = {"side": "unknown", "detected": False, "v": None, "dead": None,
+               "live": None, "x_lo": None, "x_hi": None, "left_nm": 0.0, "right_nm": 0.0,
+               "cut_left": None, "cut_right": None,
+               "msg": "detector failed: %s: %s" % (type(e).__name__, e)}
+    t_det = (time.perf_counter() - t_d0) * 1e3
+
+    def finish(R, tag):
+        R["clip_cache"] = tag
+        R["t_detect"] = t_det
+        R["t_wall"] = (time.perf_counter() - t0) * 1e3
+        R.setdefault("recovered", False)
+        return R
+
+    def run(ft, policy=ref_policy):
+        R = _analyze_once(x, y, ref_policy=policy, force_trunc=ft, **kw)
+        R["rms_frac"] = _rms_frac(R)
+        R["recovered"] = False
+        return R
+
+    # --- 2. today's first fit, UNCUT (the detector's own verdict only) ------------
+    cache.stats["cold"] += 1
+    R = run(det)
+    # A frame that explains itself but whose dead mask reaches the fit core is a suspected
+    # missed clip (see `_missed_clip`): let it fall through to the cached cut / scan, but
+    # hold on to the uncut fit and keep it unless the cut is decisively better.
+    R_uncut = R if (TRUNCREC_SCAN_ON_HITS_CORE and _explains(R) and _missed_clip(R)) else None
+    if _explains(R) and R_uncut is None:
+        # Nothing to recover: this IS today's answer, bit-for-bit, and the cache had no
+        # say in it. Note the cache is NOT flushed here -- a trace can explain uncut and
+        # still be clipped (the contrast crop removes a shallow clip unaided, e.g.
+        # truncated.csv), so a success here is not evidence the knife is gone. The cached
+        # cut simply goes unused this frame, which is the whole point of the ordering.
+        cache.on_success()
+        return finish(R, "uncut-ok")
+
+    def hc_beats(Rn):
+        """Is this cut decisively better than the uncut fit we are holding?
+
+        Vacuously True on an ordinary failing frame: there is no standing answer to keep,
+        so the normal accept rule (`_explains`) is the only test.
+        """
+        return (R_uncut is None
+                or _rms_frac(Rn) < TRUNCREC_HC_IMPROVE * _rms_frac(R_uncut))
+
+    def keep_uncut():
+        """Suspicion was not confirmed: the uncut fit, which already explained the trace,
+        stands. Reached ONLY on suspicion frames, so it is never a lost recovery."""
+        R_uncut["hc_scan_declined"] = True
+        cache.on_success()
+        return finish(R_uncut, "uncut-ok")
+
+    def finish_hc(Rn, tag):
+        """`finish`, marking a cut that was accepted on suspicion rather than on failure."""
+        if R_uncut is not None:
+            Rn["hc_scan"] = True
+        return finish(Rn, tag)
+
+    # --- 3. the fit failed: try the REMEMBERED cut before searching for a new one --
+    ft = cache.force(det)
+    if ft is not None and det.get("side") != "all":
+        Rc = run(ft)
+        if _explains(Rc) and hc_beats(Rc):
+            cache.on_success()
+            cache.stats["hit"] += 1
+            if cache.due_probe():
+                Rc = _shrink_probe(x, y, cache, Rc, det, run)
+            return finish_hc(Rc, "hit")
+        if R_uncut is not None:
+            # SUSPICION FRAME, and the remembered cut did not beat an answer that already
+            # stands. That is NOT evidence the cut has gone stale, so it must not touch the
+            # cache: `on_fail` counts toward invalidation (`CLIPCACHE_MAX_FAILS` flushes the
+            # whole memory) and the grow probe exists to chase an edge that MOVED, which a
+            # frame we cannot even prove is clipped gives no reason to believe.
+            # This is also the cheap path the cache buys us: one cached fit decides the
+            # suspicion instead of an ~18-candidate scan.
+            return keep_uncut()
+        cache.stats["miss"] += 1
+        cache.on_fail("cached cut did not explain the trace")
+        Rg = _grow_probe(x, y, cache, det, run)
+        if Rg is not None:
+            return finish_hc(Rg, "grown")
+
+    # --- 4. recovery scan, capped, and not re-run if it keeps failing -------------
+    if cache.skip_scan():
+        if R_uncut is not None:      # suspicion only: the uncut fit still stands
+            return keep_uncut()
+        cache.stats["suppressed"] += 1
+        R["msg"] = (R.get("msg", "") + " [clip-cache: recovery scan suppressed after %d "
+                    "consecutive failures; retry in %d frames]"
+                    % (cache.scan_fails,
+                       cache.scanfail_retry - (cache.frames - cache.last_scan))).strip()
+        return finish(R, "scan-suppressed")
+    cache.stats["scan"] += 1
+    R2 = _recovery_scan(x, y, R, ref_policy=ref_policy, deadline=deadline, **kw)
+    cache.on_scan(R2 is not None, exhausted=time.perf_counter() <= deadline)
+    if R2 is None:
+        if R_uncut is not None:      # suspicion only: nothing better was found, keep uncut
+            return keep_uncut()      # note: BEFORE the cap's on_fail, so a slow suspicion
+        if time.perf_counter() > deadline:   # frame cannot invalidate a good cached cut
+            cache.stats["capped"] += 1
+            R["msg"] = (R.get("msg", "") + " [clip-cache: %.0f ms cap exceeded, frame "
+                        "failed]" % cache.budget_ms).strip()
+            # The cap counts toward invalidation only when a cached cut was in force --
+            # that is what n-fails invalidates. With no cache there is nothing to flush
+            # and incrementing the counter would just mislabel a slow frame as a stale one.
+            if cache.has_cut():
+                cache.on_fail("wall-clock cap exceeded")
+        return finish(R, "scan-failed")
+    # ORDER MATTERS: the improvement guard runs BEFORE the votes. A cut this frame
+    # declines must not be taught to the cache -- otherwise the guard protects THIS
+    # frame's answer and then the rejected cut is forced onto every later frame, which
+    # is the corruption the guard exists to prevent, merely deferred by one frame.
+    if not hc_beats(R2):
+        return keep_uncut()
+    t = R2.get("trunc", {})
+    for s in ("left", "right"):
+        if t.get("cut_" + s) is not None:
+            cache.vote(s, t["cut_" + s], "recovery scan")
+    cache.on_success()
+    cache.last_probe = cache.frames             # a fresh scan IS a minimal-cut check
+    return finish_hc(R2, "scan-recovered")
+
+
+def _grow_probe(x, y, cache, det, run):
+    """The cached cut failed. Try a few DEEPER cuts around it before searching globally.
+
+    Returns the recovered R, or None to fall through to the full scan.
+
+    Why this is not the "amortized seeded search" the plan rejected, and why it does not
+    break the scan's minimal-cut rule: we only get here after the UNCUT fit failed AND the
+    cached cut failed. A knife that moved OUTWARD cannot land here -- its stale cut is too
+    DEEP, which still fits, so it lands on the cache-hit path and is walked back by the
+    shrink probe. So a miss means the cut we need is deeper than the one we have, and
+    deepening from the last known edge searches exactly that direction.
+
+    MEASURED (clipcache_sim, `knife moves INWARD` 1.0 nm): without this the frame falls
+    into the full scan, which needs 2.9-5.5 s to reach a cut that far in and therefore
+    trips the 3 s cap -- 12 consecutive wrong frames where the uncapped baseline was
+    right. With it the new edge is found in 1-4 fits, inside the cap, and the cache
+    relearns immediately.
+    """
+    if not cache.has_cut() or cache.grow_steps <= 0:
+        return None
+    base_l, base_r = cache.cut("left"), cache.cut("right")
+    for k in range(1, cache.grow_steps + 1):
+        d = k * TRUNCREC_STEP_NM
+        ft = dict(det)
+        l = None if base_l is None else base_l + d      # deeper = further into the core
+        r = None if base_r is None else base_r - d
+        ft.update(side=("both" if (l is not None and r is not None)
+                        else "left" if l is not None else "right"),
+                  detected=True, cut_left=l, cut_right=r,
+                  msg="cut from clip cache, deepened %.2f nm" % d)
+        try:
+            Rg = run(ft)
+        except Exception:
+            continue
+        if _explains(Rg):
+            cache.votes = {"left": [], "right": []}     # the knife MOVED; old votes are
+            for s, v in (("left", l), ("right", r)):    # about a position that is gone
+                if v is not None:
+                    cache.vote(s, v, "grow probe")
+            cache.on_success()
+            cache.stats["grown"] += 1
+            return Rg
+    return None
+
+
+def _shrink_probe(x, y, cache, R_hit, det, run):
+    """Test whether a SHALLOWER cut also explains the trace; adopt it if so.
+
+    This is the recovery scan's Occam rule ("take the smallest cut that explains") applied
+    ACROSS frames. Without it, a knife that moved outward or was removed leaves a cached
+    cut that passes every check we have while silently deleting live fringes -- and since
+    `rms_frac` improves as you cut more, no quality metric will ever complain. Costs one
+    fit per CLIPCACHE_SHRINK_EVERY frames.
+
+    On success the shrunk cut REPLACES the frame's answer (it is the better-supported fit:
+    same explanation, more lever arm) and the next frame probes again immediately.
+    """
+    cache.last_probe = cache.frames
+    cache.probe_now = False
+    cache.stats["probe"] += 1
+    # Big step first, then BISECT it twice on failure. The plan's objection to a small
+    # step -- that it sits inside frame-to-frame noise, so its verdict says nothing -- is
+    # about the OPENING move, and it stands. These are different: once the big step has
+    # failed we hold a bracket (the current cut explains, one shrink_nm shallower does
+    # not), so halving it is a bisection with an unambiguous answer, not a nudge.
+    # MEASURED (clipcache_sim, outward move to v=-4.5): with the big step alone the cut
+    # converges to the last 1.0 nm multiple above the true edge and stalls 0.7 nm deep,
+    # holding span at 9.9 nm against the baseline's 10.5.
+    Rs, ft = None, None
+    for frac in (1.0, 0.5, 0.25):
+        ft = cache.force(det, shrink=cache.shrink_nm * frac)
+        if ft is None:
+            return R_hit
+        try:
+            Rs = run(ft)
+        except Exception:
+            return R_hit
+        if _explains(Rs):
+            break
+    else:
+        return R_hit
+    # The shallower cut stands up. Move the cache there -- REPLACING the history, not
+    # appending to it: the old votes describe a knife position that no longer exists, and
+    # a median over both would sit between the two and match neither.
+    cache.votes = {"left": [], "right": []}
+    for s in ("left", "right"):
+        if ft.get("cut_" + s) is not None:
+            cache.vote(s, ft["cut_" + s], "shrink probe")
+    cache.probe_now = True
+    cache.stats["shrunk"] += 1
+    Rs["clip_cache"] = "shrunk"
+    return Rs
