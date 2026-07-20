@@ -29,6 +29,7 @@ file across whole. Do not patch this side.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -179,6 +180,7 @@ def analyze_trace(
     reported reference cannot chatter between two wavelengths. Omit it and the reference
     falls back immediately.
     """
+    t_wall0 = time.perf_counter()
     try:
         R = fc.analyze(
             np.asarray(wl, dtype=float), np.asarray(intensity, dtype=float),
@@ -208,17 +210,40 @@ def analyze_trace(
     trunc = R.get("trunc") or {}
     ref_wl = float(R["ref_wl"])
 
+    t_wall = (time.perf_counter() - t_wall0) * 1e3
+
     if log.isEnabledFor(logging.WARNING):
-        c = R["csig"]
+        # Log `csig_at_centre`, NOT `csig`. They are the SAME fit expressed about different
+        # origins: `csig` sits at the polynomial's internal origin, which moves with the
+        # fitted core, so plotting it frame to frame produces a two-cluster split that looks
+        # like a fit instability and is not one. `csig_at_centre` is the answer at `ref_wl`
+        # -- the number the loop actually locks to.
+        c = R.get("csig_at_centre")
+        c = R["csig"] if c is None else c
+        # `t_run` is timed INSIDE the winning fit, so on a recovering frame it EXCLUDES the
+        # candidates the recovery scan rejected -- measured 5x under-report (43 vs 212 ms).
+        # `wall` is the honest per-frame cost; keep both, the gap IS the recovery cost.
         log.warning(
-            "FITDIAG core=%d span=%.1fnm q=%d null=%s | c=[%.4g,%.4g,%.4g,%.4g] "
-            "| ref=%.2fnm%s trust=%s | trunc=%s%s | rms=%.1f rms_frac=%.3f inl=%.0f%% %.0fms",
+            "FITDIAG core=%d span=%.1fnm q=%d null=%s | c@ref=[%.4g,%.4g,%.4g,%.4g] "
+            "| ref=%.2fnm%s l0=%.2f trust=%s shape=%s | trunc=%s%s%s%s%s "
+            "| rms=%.1f rms_frac=%.3f inl=%.0f%% fit=%.0fms trunc=%.0fms wall=%.0fms",
             len(R["x"]), float(R["x"][-1] - R["x"][0]), R["order"], R["has_null"],
             c[0], c[1], c[2], c[3], ref_wl,
             " (MOVED off centre)" if R["ref_fallback"] else "",
-            R["trust_ok"], trunc.get("side", "?"),
+            float(R.get("l0", float("nan"))),
+            R["trust_ok"], R.get("shape_ok", "?"), trunc.get("side", "?"),
+            # HITS-CORE = the clip landed where the phase wanted to be fit (shorter lever
+            # arm). HITS-FIT = dead samples are actually IN the fitted set. Both are logged
+            # because which one predicts a bad frame on hardware is an OPEN QUESTION, and
+            # this run is what answers it.
             " HITS-CORE" if trunc.get("hits_core") else "",
+            " HITS-FIT" if trunc.get("hits_fit") else "",
+            " RECOVERED" if R.get("recovered") else "",
+            # Did the hits_core trigger fire, and did its improvement guard accept the cut?
+            " HC-CUT" if R.get("hc_scan") else (" HC-DECLINED" if R.get("hc_scan_declined")
+                                                else ""),
             rms_sig, rms_frac, inlier_pct, R.get("t_run", float("nan")),
+            R.get("t_trunc", float("nan")), t_wall,
         )
 
     return FringeFitResult(
