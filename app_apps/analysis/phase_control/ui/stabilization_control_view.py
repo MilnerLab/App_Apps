@@ -65,14 +65,14 @@ class StabilizationControlView(QWidget):
         self._freq_cb = QCheckBox("Plot in frequency")
         self._freq_cb.setChecked(vm.plot_frequency)
         freq_row.addWidget(self._freq_cb)
-        self._knife_cb = QCheckBox("Knife edge")
-        self._knife_cb.setToolTip(
-            "Mark where the clip was detected. Samples beyond the marker were excluded "
-            "from the fit, so it shows the edge of the data the phase rests on. "
-            "Nothing is drawn on an unclipped frame."
+        self._set_phase_cb = QCheckBox("Set-phase curve")
+        self._set_phase_cb.setToolTip(
+            "Show the red target curve. Display only — hiding it does not change the "
+            "fit or the lock. The orange dotted line, where the clip was cut, is always "
+            "shown when there is one."
         )
-        self._knife_cb.setChecked(vm.show_knife_edges)
-        freq_row.addWidget(self._knife_cb)
+        self._set_phase_cb.setChecked(vm.show_set_phase)
+        freq_row.addWidget(self._set_phase_cb)
         freq_row.addStretch()
         fbox.addLayout(freq_row)
 
@@ -99,8 +99,8 @@ class StabilizationControlView(QWidget):
         self._freq_cb.checkStateChanged.connect(
             lambda state: self._vm.set_plot_frequency(state == Qt.CheckState.Checked)
         )
-        self._knife_cb.checkStateChanged.connect(
-            lambda state: self._vm.set_show_knife_edges(state == Qt.CheckState.Checked)
+        self._set_phase_cb.checkStateChanged.connect(
+            lambda state: self._vm.set_show_set_phase(state == Qt.CheckState.Checked)
         )
         self._phase_draft.dirty_changed.connect(self._phase_ind.set_dirty)
 

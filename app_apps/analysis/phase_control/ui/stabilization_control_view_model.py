@@ -27,7 +27,7 @@ class StabilizationControlViewModel(QObject):
     worker_state_changed = Signal(object)  # WorkerStatus
     config_updated = Signal()              # subprocess synced new fit params
     plot_mode_changed = Signal(bool)       # plot-in-frequency toggled
-    knife_edges_changed = Signal(bool)     # knife-edge markers toggled
+    set_phase_curve_changed = Signal(bool)  # red set-phase overlay toggled
 
     def __init__(
         self,
@@ -48,7 +48,7 @@ class StabilizationControlViewModel(QObject):
         self._knife_lines: list[pg.InfiniteLine] = []
         self._active = False
         self._plot_frequency = False
-        self._show_knife_edges = True
+        self._show_set_phase = True
         self._unsub = bus.subscribe(PhaseTrackingStateChanged, self._on_state_changed)
         self._unsub_cfg = bus.subscribe(StabilizationConfigChanged, self._on_config_updated)
 
@@ -75,17 +75,23 @@ class StabilizationControlViewModel(QObject):
         self._rf_label = pg.TextItem(color=QColor("white"), anchor=(0, 0))
         self._rf_label.setZValue(100)
 
-        # Knife-edge markers: where the truncation detector put the clip, i.e. the boundary
-        # of the data the committed fit actually rests on. Two lines, one per side; a frame
-        # clipped on one side only ever shows one. Cosmetic pen for the same reason as the
-        # curves above -- dash lengths must be in screen pixels, not data units.
+        # Knife-edge markers: where the clip was CUT, i.e. the boundary of the data the
+        # committed fit actually rests on. Two lines, one per side; a one-sided clip shows
+        # one, an unclipped frame shows none. Cosmetic pen for the same reason as the curves
+        # above -- dot spacing must be in screen pixels, not data units.
+        #
+        # ORANGE DOTTED, deliberately not red: red is the set-phase curve, which the operator
+        # can switch off independently, and two different red things on one chart is how a
+        # marker gets mistaken for part of the trace. Orange already means "the fit is
+        # reaching past what it measured" here (the RF readout uses it for an unverified
+        # shape), which is the same kind of statement a knife edge makes.
         for side in ("left", "right"):
-            pen = QPen(QColor("red"))
-            pen.setStyle(Qt.PenStyle.DashLine)
+            pen = QPen(QColor("orange"))
+            pen.setStyle(Qt.PenStyle.DotLine)
             pen.setCosmetic(True)
             line = pg.InfiniteLine(angle=90, movable=False, pen=pen,
                                    label="knife " + side,
-                                   labelOpts={"color": "red", "position": 0.92,
+                                   labelOpts={"color": "orange", "position": 0.92,
                                               "movable": False})
             line.setZValue(50)
             line.setVisible(False)
@@ -114,15 +120,23 @@ class StabilizationControlViewModel(QObject):
         self.plot_mode_changed.emit(enabled)
 
     @property
-    def show_knife_edges(self) -> bool:
-        return self._show_knife_edges
+    def show_set_phase(self) -> bool:
+        return self._show_set_phase
 
-    def set_show_knife_edges(self, enabled: bool) -> None:
-        if enabled == self._show_knife_edges:
+    def set_show_set_phase(self, enabled: bool) -> None:
+        """Show/hide the RED set-phase overlay -- the target the loop is driving toward.
+
+        It is the busiest thing on the chart (a full oscillating reconstruction), and when
+        the lock is close it sits on top of the green current-phase curve and the live
+        spectrum, hiding both. Hiding it is a display choice only: nothing here touches the
+        fit, the config or the loop.
+        """
+        if enabled == self._show_set_phase:
             return
-        self._show_knife_edges = enabled
-        self._update_knife_lines()
-        self.knife_edges_changed.emit(enabled)
+        self._show_set_phase = enabled
+        if self._set_phase_series is not None:
+            self._set_phase_series.setVisible(enabled)
+        self.set_phase_curve_changed.emit(enabled)
 
     def _attach_curves(self) -> None:
         if self._plot_item is None or self._set_phase_series is None or self._current_phase_series is None:
@@ -133,6 +147,8 @@ class StabilizationControlViewModel(QObject):
             self._plot_item.addItem(series, ignoreBounds=True)
         for line in self._knife_lines:
             self._plot_item.addItem(line, ignoreBounds=True)
+        # Re-attaching builds fresh items; carry the operator's choice across.
+        self._set_phase_series.setVisible(self._show_set_phase)
         if self._rf_label is not None:
             self._rf_label.setParentItem(self._plot_item.getViewBox())
             self._rf_label.setPos(10, 6)          # screen px inset from the top-left
@@ -205,17 +221,20 @@ class StabilizationControlViewModel(QObject):
                      - 2.0 * np.pi * SPEED_OF_LIGHT / lambda_ref * 1e-3)
 
     def _update_knife_lines(self) -> None:
-        """Place/hide the two knife-edge markers from the committed fit.
+        """Place the knife-edge markers: whichever edge the fit ACTUALLY CUT ON, and only that.
 
-        Hidden when the toggle is off, and hidden per side when that side has no cut -- an
-        unclipped frame must show nothing at all rather than a marker parked at an edge of
-        the window, which would read as a clip that is not there.
+        Not toggleable, and not drawn speculatively. `cut_left`/`cut_right` arrive already
+        filtered through `fringe_core.applied_cuts`, which is the same rule the fit itself
+        uses to decide what to exclude -- so a side shows a marker if and only if the
+        committed answer stands on data bounded there. An unclipped frame, or the unclipped
+        side of a one-sided clip, draws nothing: a marker parked at the window edge would
+        read as a clip that is not there.
         """
         if not self._knife_lines:
             return
         p = self._config.params
         for line, cut in zip(self._knife_lines, (p.cut_left, p.cut_right)):
-            if cut is None or not self._show_knife_edges:
+            if cut is None:
                 line.setVisible(False)
                 continue
             line.setPos(self._to_plot_x(float(cut)))
