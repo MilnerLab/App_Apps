@@ -1,17 +1,11 @@
 """Cubic-phase fringe analysis — THE source of truth for the fit math.
 
-This module is the ONE place the analysis lives. `plot_traces.py` imports it for the
-standalone/harness path, and the App_Apps production port carries a VERBATIM COPY of this
-file plus a thin adapter (`fringe_fit.py`). Nothing here may be hand-edited in only one of
-those two places.
-
-That rule exists because breaking it is what produced every bug found on 2026-07-16: the
-port had drifted into passing Nelder-Mead's absolute `fatol` as L-BFGS-B's relative `ftol`
-(envelope offset 255 against a truth of 155), into seeding the cubic with `c1=0` (carrier
-wrong on every real trace), and into having no baseline anchor at all. Two hand-maintained
-copies of the same math is the defect, not the symptom. `test/fringe_parity_test.py` in the
-app asserts this file's `analyze()` and the app's adapter agree bit-for-bit, and it fails
-loudly the moment the copies diverge.
+This module is the ONE place the analysis lives; `fringe_fit.py` is a thin adapter over it
+and holds no math of its own. Keep it that way. The app once carried a second, hand-
+maintained copy of this math, and every bug found on 2026-07-16 was drift between the two:
+Nelder-Mead's absolute `fatol` passed as L-BFGS-B's relative `ftol` (envelope offset 255
+against a truth of 155), the cubic seeded with `c1=0` (carrier wrong on every real trace),
+and no baseline anchor at all. One copy, no drift.
 
 Pure numpy/scipy: no matplotlib, no file I/O, no globals mutated at runtime. Safe to import
 from a subprocess worker.
@@ -66,8 +60,8 @@ ANCHOR_MIN_PTS = 40        # below this much continuum, decline to anchor (stay 
 
 # --- Wing truncation before the Hilbert transform ---
 # Keep only the high-visibility core where the envelope contrast (upper-lower gap) is
-# >= min + THRESHOLD*(max-min); higher => tighter crop. Swept on the harness (4 tuning
-# seeds x seven values 0.10..0.45): pass rate rises MONOTONICALLY as we crop tighter up
+# >= min + THRESHOLD*(max-min); higher => tighter crop. Swept over 4 tuning
+# seeds x seven values 0.10..0.45: pass rate rises MONOTONICALLY as we crop tighter up
 # to a broad flat plateau at 0.35-0.45 (~98.6%, vs 97.7% at the old 0.25), i.e. the
 # low-SNR fringe wings hurt the phase fit more than their extra lever-arm helps. 0.40 is
 # the plateau centre; held out on 3 fresh seeds it stays ahead (99.0% vs 98.8%) and it
@@ -260,9 +254,9 @@ MAX_FLIP_CAND = 2       # deepest null candidates to try flipping (each costs on
 
 # --- Scan-free deterministic pipeline (replaces the recovery scan) -------------
 # The derivative "coarse cut" idea was tried and DROPPED (2026-07-19): measured net-negative
-# on every harness -- it over-crops good traces into false-drops (even after the smoothing
+# in testing -- it over-crops good traces into false-drops (even after the smoothing
 # and one-sided-envelope fixes it added 16 false-drops vs no coarse cut on the realistic
-# synth suite) and it never fixed the truncation corner it was built for. The scan-free path
+# test suite) and it never fixed the truncation corner it was built for. The scan-free path
 # is: full-window envelopes -> contrast crop -> oscillation end-trim -> Hilbert -> TRUNCATION
 # TRIM -> seed/fit. On the realistic suite this beats the shipped scan (99.6% vs 98.8%, fewer
 # wrong) with no 12 s scan. Truncation is handled by trimming the core; two methods, both
@@ -316,8 +310,8 @@ SIGNAL_LOSS_FRAC = 1.0  # soft-L1 scale as a fraction of the local half-amplitud
 # so its troughs ride above the raw counts (a `half` error r2_fringe is blind to). Freeing
 # the envelope lifts the RAW reconstruction (r2_sig) markedly.
 #
-# DISABLED by default -- measured 2026-07-19 (joint_env_fit_figs.py / the synth_truncation
-# safety sweep): it is a clean win on UNTRUNCATED traces (0 new wrong, r2_sig 0.988->0.995),
+# DISABLED by default -- measured 2026-07-19 on a truncation safety sweep: it is a clean win
+# on UNTRUNCATED traces (0 new wrong, r2_sig 0.988->0.995),
 # but on TRUNCATED traces the freed envelope absorbs the missing-arm misfit and PASSES the
 # trust gate while the phase is actually wrong (+23 confidently-wrong on the dim sweep), and
 # it suppresses the recovery scan that used to catch them (missed 196->295). The truncated
@@ -349,7 +343,7 @@ DEADZONE_REFIT = False
 # the seed matters at all: six of seven traces say it does not.
 
 # --- Accuracy spec / trust gate ---------------------------------------------
-# The accuracy the pipeline is REQUIRED to deliver (mirrors the synth_test tolerances:
+# The accuracy the pipeline is REQUIRED to deliver (the accuracy tolerances:
 # 1% relative on the frequency c1 and chirp c2 with small absolute floors near zero, a
 # mod-2pi budget on c0, absolute on TOD). The fit's own covariance, propagated to the
 # spectral centre, is checked against this: a trace that cannot meet it is reported as
@@ -407,8 +401,8 @@ TRUST_NSIG = 3.0        # require NSIG * sigma to fit inside the spec.
                         #
                         # This knob IS the accuracy/yield trade, and both sides are specced:
                         # accuracy of REPORTED fits >= 98%, and <= 5% of the fits that would
-                        # have been RIGHT may be thrown away (user, 2026-07-16). Swept on
-                        # verify_phase.py over the full operating space (2470 fits,
+                        # have been RIGHT may be thrown away (user, 2026-07-16). Swept over
+                        # the full operating space (2470 fits,
                         # brightness continuum x carrier x legal clips, two seeds pooled) --
                         # accuracy / false-drop rate (declined-but-would-have-passed, as a
                         # fraction of all good fits):
@@ -448,9 +442,8 @@ TRUST_NSIG = 3.0        # require NSIG * sigma to fit inside the spec.
 #
 # Switching reference is not free for the app -- a stabilization loop locked to one
 # wavelength must not chatter between two -- so the app passes a ReferencePolicy that
-# requires REF_HYST consecutive traces before switching EITHER way. The standalone and the
-# harness pass no policy, which means switch immediately (per user: "for testing you can
-# immediately do the fallback").
+# requires REF_HYST consecutive traces before switching EITHER way. A caller that passes no
+# policy switches immediately (per user: "for testing you can immediately do the fallback").
 REF_HYST = 5          # consecutive traces agreeing before the app changes reference
 
 # --- Frequency plot ---
@@ -482,10 +475,10 @@ TAU = RATIO / (RATIO + 1.0)   # ~0.91 quantile: fit hugs the upper envelope of t
 def fringe_freq_cyc_per_nm(csig, u):
     """Instantaneous spectral fringe frequency (cycles/nm) at offset u = lambda - l0.
 
-    dPhi/du / 2pi for the fitted cubic. SIGNED -- the sign flips through a null, and callers
-    that want a frequency magnitude must take abs() themselves. Keeping the sign here is what
-    lets rf_range_ghz find the null (where |f| -> 0) instead of silently reporting the
-    turning point as a minimum of a quantity that never went negative.
+    dPhi/du / 2pi for the fitted cubic. SIGNED -- the sign flips through a null. rf_range_ghz
+    reports this signed, so a chirp that sweeps the frequency through zero shows a genuine
+    zero / negative rather than an abs-folded small positive; callers that want a magnitude
+    must take abs() themselves.
     """
     c = np.asarray(csig, float)
     u = np.asarray(u, float)
@@ -495,13 +488,16 @@ def fringe_freq_cyc_per_nm(csig, u):
 def rf_range_ghz(csig, l0, centre_nm=None, halfwidth_nm=None, n=401):
     """RF frequency range (min_GHz, max_GHz) generated across the quoted spectral band.
 
-    Returns the extremes of |f| over lambda in centre +- halfwidth, converted through the
-    dispersive time-mapping calibration (see GHZ_PER_CYC_PER_NM). Sampled on a grid rather
-    than evaluated at the two endpoints, because f is a PARABOLA in u whenever c3 != 0 and a
-    line otherwise: with a chirp, the extreme frequency is often interior, and with an
-    in-band null |f| touches ZERO in the middle while both endpoints are large. Endpoint-only
-    evaluation would report a range that excludes both the true minimum and, past the vertex,
-    the true maximum.
+    Returns the extremes of the SIGNED frequency f over lambda in centre +- halfwidth,
+    converted through the dispersive time-mapping calibration (see GHZ_PER_CYC_PER_NM). The
+    sign is kept on purpose: where the chirp sweeps f through zero the fringes reverse and f
+    goes negative, and the readout must show that genuine zero / negative rather than the
+    meaningless small positive that abs() leaves once the exact crossing falls between grid
+    nodes (measured ~0.03 GHz where the true value is zero).
+
+    Sampled on a grid rather than at the two endpoints, because f is a PARABOLA in u whenever
+    c3 != 0 (a line otherwise): with a chirp the extreme frequency is often interior, so
+    endpoint-only evaluation would miss the true min or max at the vertex.
 
     The band deliberately extends past the fitted core -- this is extrapolation, and it is
     only as good as c1/c2/c3. Gate the readout on R["shape_ok"].
@@ -509,7 +505,7 @@ def rf_range_ghz(csig, l0, centre_nm=None, halfwidth_nm=None, n=401):
     c = RF_BAND_CENTRE_NM if centre_nm is None else float(centre_nm)
     h = RF_BAND_HALFWIDTH_NM if halfwidth_nm is None else float(halfwidth_nm)
     u = np.linspace(c - h, c + h, int(n)) - float(l0)
-    f = np.abs(fringe_freq_cyc_per_nm(csig, u)) * GHZ_PER_CYC_PER_NM
+    f = fringe_freq_cyc_per_nm(csig, u) * GHZ_PER_CYC_PER_NM   # SIGNED -- see docstring
     return float(np.min(f)), float(np.max(f))
 
 
@@ -549,7 +545,10 @@ def format_rf_range(lo_ghz, hi_ghz, shape_ok=True):
     # Collapse to one number when the two ends round to the same displayed value: an
     # unchirped shot is a single frequency, and "34-34 GHz" reads as a bug.
     s_lo, s_hi = format_ghz(lo), format_ghz(hi)
-    body = s_lo if s_lo == s_hi else f"{s_lo}-{s_hi}"
+    # "-" reads fine between two positives ("12-47"); once an end is negative it collides with
+    # the minus sign ("-19-30"), so widen the separator to " to " when a sign is present.
+    sep = " to " if (lo < 0 or hi < 0) else "-"
+    body = s_lo if s_lo == s_hi else f"{s_lo}{sep}{s_hi}"
     return f"{body} GHz" + ("" if shape_ok else " (unverified)")
 
 
@@ -635,7 +634,7 @@ def fit_upper_envelope(x, y, off_bounds=None, mu_bounds=None):
     `mu_bounds` pins the Gaussian mean (the envelope centre) to a narrow band -- the
     operator's dragged ENV_CENTRE +- ENV_CENTRE_TOL. See ENV_CENTRE_DEFAULT: a one-sided
     clip drags the intensity peak, and following it moves the phase anchor; pinning mu
-    holds it. None leaves the centre free, which is the standalone/harness behaviour.
+    holds it. None leaves the centre free (no operator pin).
 
     The refinement is Nelder-Mead. This once used L-BFGS-B on the analytic subgradient,
     which really did stop at loss 7182.5 after 19 iterations (off=255.1, sigma=3.41) where
@@ -1693,7 +1692,7 @@ def applied_cuts(trunc):
     Anything that reports the cut to a human -- a chart marker, a log line -- must ask this
     question, not read the raw keys, or it will draw a clip on an unclipped frame. It lives
     here rather than in the caller because it is the SAME rule the fit uses, and a second
-    copy of a rule is how the trunc_threshold 0.30/0.40 parity bug happened.
+    copy of a rule is how the trunc_threshold 0.30/0.40 stale-constant bug happened.
     """
     if not isinstance(trunc, dict):
         return None, None
@@ -1709,17 +1708,17 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
 
     `trust_nsig` / `trunc_threshold` override TRUST_NSIG / TRUNC_THRESHOLD for this call
     (the app surfaces them as UI knobs). They are parameters, never mutated globals, so
-    concurrent callers cannot reconfigure each other. None = use the module default, which
-    is the value the harness calibrated.
+    concurrent callers cannot reconfigure each other. None = use the module default, the
+    calibrated value.
 
     `ref_primary` is the wavelength the phase is WANTED at. None => the fitted intensity
-    centroid muU, which is what the standalone and the harness use. A live caller that lets
+    centroid muU. A live caller that lets
     the operator pin a reference (the app's `lambda_ref`) must pass it here, or the answer
     silently drifts from the wavelength they asked for to wherever the envelope centred
     this frame -- a fraction of a nm, but it is THEIR lock point, not ours to move.
 
     `ref_policy` is an optional ReferencePolicy carried ACROSS traces by a live caller, to
-    add hysteresis to the phase-reference choice. Omit it (standalone, harness) and the
+    add hysteresis to the phase-reference choice. Omit it and the
     reference falls back immediately whenever the spectral centre cannot be trusted.
     The reference actually used is R["ref_wl"]; the coefficients in R["csig_at_centre"]
     are expressed at it. Callers must READ ref_wl rather than assume 802.
@@ -1741,7 +1740,7 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
     R = {"status": "ok", "msg": ""}
 
     # The operator's envelope-centre pin, as a (lo, hi) band for the upper-envelope mean.
-    # None => the centre is free (standalone/harness). See ENV_CENTRE_DEFAULT.
+    # None => the centre is free (no operator pin). See ENV_CENTRE_DEFAULT.
     mu_bounds = (None if env_center is None
                  else (float(env_center) - ENV_CENTRE_TOL, float(env_center) + ENV_CENTRE_TOL))
 
@@ -1761,8 +1760,8 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
             # with no scan. Pipeline: full-window envelopes -> contrast crop -> oscillation
             # end-trim -> Hilbert -> TRUNCATION TRIM -> seed/fit.
             #
-            # The derivative "coarse cut" was tried and DROPPED (2026-07-19): net-negative on
-            # every harness (it over-crops good traces into false-drops -- +16 vs no coarse
+            # The derivative "coarse cut" was tried and DROPPED (2026-07-19): net-negative in
+            # testing (it over-crops good traces into false-drops -- +16 vs no coarse
             # cut even on the realistic suite) and it never fixed the truncation corner it was
             # built for. Truncation is now handled by trimming the CORE; TRUNC_METHOD selects
             # "phase" (conditional_phase_trim) or "knife" (knife_edge_cut).
@@ -2035,7 +2034,7 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
         #
         # RESTRICTED TO UNTRUNCATED TRACES. On a truncated trace the freed envelope absorbs
         # the missing-arm misfit and PASSES the trust gate while the phase is actually wrong
-        # (measured on synth_truncation: +23 confidently-wrong traces, and it suppresses the
+        # (measured on truncated traces: +23 confidently-wrong traces, and it suppresses the
         # recovery scan that used to catch them). The frozen envelope + trust gate + recovery
         # scan is the safety machinery for clips; freeing the envelope defeats it. On
         # untruncated traces the same fit is a clean win (0 new wrong), so it runs only there.
@@ -2136,7 +2135,7 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
         ref_offset_frac = ref_offset / half_span if half_span > 0 else np.inf
         ref_offset_ok = bool(ref_offset_frac <= REF_MAX_OFFSET_FRAC)
 
-        # No policy => switch immediately (standalone + harness). A policy => the app's
+        # No policy => switch immediately. A policy => the app's
         # hysteresis decides, and it only gets to choose the fallback if that is in fact
         # trustworthy -- hysteresis may delay a switch, never fabricate a good verdict.
         use_fallback = (ref_policy.update(ok_primary) if ref_policy is not None
@@ -2163,7 +2162,7 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
             csig_sigma, csig_at_centre = sig_primary, b_primary
 
         t_run = (time.perf_counter() - t_run0) * 1e3 - t_trunc
-    except Exception as e:  # hard failure -> the harness buckets this as a crash
+    except Exception as e:  # hard failure -> reported as a crash via status "error"
         t_run = (time.perf_counter() - t_run0) * 1e3
         return {"status": "error", "csig": None, "t_run": t_run,
                 "msg": f"{type(e).__name__}: {e}"}

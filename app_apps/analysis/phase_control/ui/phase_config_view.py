@@ -39,7 +39,7 @@ class PhaseConfigView(DirtyForm):
 
     # The folded-chirp knobs (ratio, sigma_init, phase_loss_scale, signal_loss_frac,
     # init_smooth_div) went away with that pipeline: the v3 analysis owns those as
-    # harness-calibrated constants, and exposing constants nobody can tune from the
+    # calibrated constants, and exposing constants nobody can tune from the
     # instrument only invites mis-setting them.
     _specs = {
         "trunc_threshold":   FloatSpec("Truncation threshold",     0.0,   1.0,    decimals=2, step=0.05),

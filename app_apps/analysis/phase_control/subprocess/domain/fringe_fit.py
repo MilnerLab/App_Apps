@@ -1,30 +1,26 @@
-"""Thin adapter between the app and ``fringe_core`` — the verified fringe analysis.
+"""Thin adapter between the app and ``fringe_core`` — the fringe analysis.
 
-**There is no math in this file, and none may be added.** ``fringe_core.py`` is a VERBATIM
-COPY of the standalone ``Data/20260709/spectrometer/fringe_core.py``; this module only
-translates between the app's frozen dataclasses and that module's ``analyze()``.
+**There is no math in this file, and none may be added.** All analysis lives in
+``fringe_core.py`` (the single source of truth); this module only translates between the
+app's frozen dataclasses and that module's ``analyze()``.
 
-That rule is the whole point. Until 2026-07-16 this file carried a hand-maintained second
-copy of the math, and every bug found that day was drift between the two copies:
+That separation is the whole point. Until 2026-07-16 this file carried a hand-maintained
+second copy of the math, and every bug found that day was drift between the two copies:
 
   * ``fit_ftol=1e-4`` was passed as L-BFGS-B's *relative* ``ftol`` (its default is 2.22e-9),
     so the envelope fit quit after 19 iterations and returned offset **255** against a truth
     of **155** on the real bright trace — squeezing sigma ~12% narrow and inflating
     ``rms_frac``, i.e. feeding the accept gate that was rejecting live frames;
   * ``cubic_init = [C, 0.0, A, 0.0]`` forced the carrier ``c1 = 0``, and the soft-L1 fit
-    never climbed out: measured, the port reported c1 of -0.15/-4.03/-3.02/-0.39 on the four
-    real traces where the standalone reads 6.65/23.81/8.20/7.68. The carrier — the quantity
+    never climbed out: measured, this copy reported c1 of -0.15/-4.03/-3.02/-0.39 on four
+    real traces where ``fringe_core`` reads 6.65/23.81/8.20/7.68. The carrier — the quantity
     phase stabilization locks to — was wrong on **every trace**;
   * the baseline anchor, the truncated-arm detector, BIC phase-order selection and the trust
     gate simply never arrived.
 
 None of that was a hard bug to write; it was inevitable given two copies. ``analyze_trace``
-now delegates, and ``test/fringe_parity_test.py`` asserts this module and the standalone
-agree bit-for-bit on the real traces, so the copies cannot drift again in silence.
-
-If you need to change the analysis, change the standalone ``fringe_core.py``, re-run its
-harnesses (``verify_phase.py``, ``synth_test.py``, ``synth_truncation.py``), and copy the
-file across whole. Do not patch this side.
+now delegates to ``fringe_core`` and nothing else. If you need to change the analysis, change
+``fringe_core.py`` — never re-implement any of it here.
 """
 from __future__ import annotations
 
@@ -51,12 +47,11 @@ class FitTunables:
     """User-editable inputs. Everything else is a calibrated constant in ``fringe_core``.
 
     **The defaults are IMPORTED from ``fringe_core``, never written out here.** Copying a
-    calibrated number into this file is the same drift bug as copying the math, and it bit
-    us the same way: after the v3 port the two ``fringe_core.py`` files were byte-identical
-    and the parity test still failed by up to 24.6 rad/nm of carrier on a real trace, purely
-    because this class said ``trunc_threshold = 0.40`` while the standalone had recalibrated
-    ``TRUNC_THRESHOLD`` to 0.30. Byte-identical math fed different constants is a different
-    analysis. If you need another knob, alias the module constant; never retype its value.
+    calibrated number into this file is the same drift bug as copying the math: a stale
+    ``trunc_threshold = 0.40`` restated here while ``fringe_core`` had recalibrated
+    ``TRUNC_THRESHOLD`` to 0.30 threw the carrier off by up to 24.6 rad/nm on a real trace —
+    the same math fed a different constant is a different analysis. If you need another knob,
+    alias the module constant; never retype its value.
 
     The knobs the old folded-chirp fitter needed (``phase_loss_scale``, ``init_smooth_div``,
     ``inlier_nsigma``, ``fit_ftol``) are GONE: that pipeline is gone. ``fit_ftol`` in
@@ -66,8 +61,8 @@ class FitTunables:
 
     trunc_threshold: float = fc.TRUNC_THRESHOLD
                                     # keep where the envelope gap >= min + THIS*(max-min).
-                                    # Harness-swept; see fringe_core.TRUNC_THRESHOLD for the
-                                    # live calibration and the record of why it last moved.
+                                    # See fringe_core.TRUNC_THRESHOLD for the live calibration
+                                    # and the record of why it last moved.
     trust_nsig: float = fc.TRUST_NSIG
                                     # require THIS * sigma to fit inside the accuracy spec
                                     # before the phase is reported at all. This is the
@@ -115,7 +110,7 @@ class FringeFitResult:
                                               # it: the chart overlay and the GHz frequency
                                               # readout, which extrapolate across 793-811 nm
                                               # where a wrong c2 enters as d^2. Measured on
-                                              # 1240 harness traces: 11 of the 13 fits the
+                                              # 1240 test traces: 11 of the 13 fits the
                                               # four-coefficient grader calls "wrong" have a
                                               # CORRECT phase and fail only on shape, and
                                               # shape_ok flags 8 of those 11. Gating the loop

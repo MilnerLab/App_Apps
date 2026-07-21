@@ -28,9 +28,9 @@ class FringeFitParams(PrimitiveSerde):
     # are user-facing. The old folded-chirp knobs (ratio, sigma_init, phase_loss_scale,
     # signal_loss_frac, init_smooth_div) are gone with that pipeline -- from_primitive
     # ignores them, so configs persisted before this change still load.
-    # Defaults are IMPORTED from fringe_core, not retyped -- a hardcoded 0.40 here while the
-    # standalone had recalibrated to 0.30 is exactly what broke fit parity with a
-    # byte-identical fringe_core.py. Persisted configs still override these on load.
+    # Defaults are IMPORTED from fringe_core, not retyped -- a hardcoded 0.40 here while
+    # fringe_core had recalibrated to 0.30 is exactly the kind of stale-constant drift that
+    # throws the carrier off. Persisted configs still override these on load.
     trunc_threshold: float = fc.TRUNC_THRESHOLD   # high-visibility core keep-level
     trust_nsig: float = fc.TRUST_NSIG  # accuracy/yield trade; see FitTunables.trust_nsig.
                                        # 3.0 = >=98% of reported fits correct, <=5% of good
@@ -196,7 +196,7 @@ class StabilizationConfig(PrimitiveSerde):
         `trust_ok` now covers the PHASE ONLY (c0 at ref_wl). That is deliberate and it is the
         whole fix for the over-rejection: the loop corrects phase at one wavelength and never
         reads the carrier or chirp, so gating on those threw away frames for an error it does
-        not act on. Measured over 1240 harness traces, 11 of the 13 fits that fail a
+        not act on. Measured over 1240 test traces, 11 of the 13 fits that fail a
         four-coefficient grader have a CORRECT phase. Phase-only accuracy of committed fits is
         99.84% with 0.0% of good fits declined, against 3.7% declined under the fused gate.
 
