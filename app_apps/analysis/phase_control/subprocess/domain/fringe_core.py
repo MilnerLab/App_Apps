@@ -1,24 +1,11 @@
-"""Cubic-phase fringe analysis — THE source of truth for the fit math.
+"""Cubic-phase fringe analysis — the source of truth for the fit math.
 
-This module is the ONE place the analysis lives; `fringe_fit.py` is a thin adapter over it
-and holds no math of its own. Keep it that way. The app once carried a second, hand-
-maintained copy of this math, and every bug found on 2026-07-16 was drift between the two:
-Nelder-Mead's absolute `fatol` passed as L-BFGS-B's relative `ftol` (envelope offset 255
-against a truth of 155), the cubic seeded with `c1=0` (carrier wrong on every real trace),
-and no baseline anchor at all. One copy, no drift.
+`fringe_fit.py` is a thin adapter over this module and holds no math of its own; keep it
+that way. Pure numpy/scipy: no file I/O, no globals mutated at runtime — safe to import from
+a subprocess worker.
 
-Pure numpy/scipy: no matplotlib, no file I/O, no globals mutated at runtime. Safe to import
-from a subprocess worker.
-
-Pipeline (see analyze()):
-  1. detect a spectrally clipped interferometer arm and drop the fringe-free band
-  2. fit the envelopes under an asymmetric pinball loss, offset anchored to the continuum
-  3. crop to the high-visibility core (contrast trim), normalize the fringes
-  4. Hilbert -> two-trim seed: phase-value trim + polyfit, with a signed null-flip seed
-     taken per |f| dip only on a clear SSE win, then BIC picks the phase order (see
-     core_seed_fit)
-  5. refit the cubic phase on the RAW counts with the envelopes held fixed
-  6. propagate the fit covariance and decide WHERE (and whether) the phase can be trusted
+The physical model, the analyze() pipeline, and the reasoning behind every tuned constant
+here are documented in docs/phase_stabilization_fit.md.
 """
 import time
 import numpy as np
@@ -27,444 +14,159 @@ from scipy.signal import hilbert
 from scipy.ndimage import gaussian_filter1d, median_filter, uniform_filter1d
 
 # ============================ TUNABLE PARAMETERS =============================
+# Rationale for these values is in docs/phase_stabilization_fit.md (Decision rationales).
+
 # --- Data window ---
 ZOOM = (790, 814)     # analysis window (nm) around the ~802 nm peak
 
 # --- Envelope fit (asymmetric pinball / quantile loss) ---
-RATIO = 10            # penalty ratio above:below the fit; higher hugs the crests tighter.
-                      # NOT a loose knob: with a correctly-minimized loss the R-sweep gives
-                      # an `off` error of +3.6 counts at R=10 vs -0.2 at R=5 (and +0.3 for a
-                      # tail-weighted loss) -- indistinguishable. Do not turn it.
+RATIO = 10            # crest:tail penalty ratio; higher hugs the crests tighter
 SIGMA_INIT = 4.0      # initial Gaussian sigma guess (nm) for the L2 warm start
 FIT_MAXFEV = 10000    # curve_fit evaluation cap (warm start)
 FIT_XATOL = 1e-4      # Nelder-Mead x-tolerance (pinball refinement)
 FIT_FATOL = 1e-4      # Nelder-Mead f-tolerance
 FIT_MAXITER = 20000   # Nelder-Mead iteration cap
 
-# --- Baseline anchor for the envelope offset --------------------------------
-# ZOOM is +-3.1 sigma around a sigma~3.9 bump, so it contains ZERO pure-baseline points.
-# With no baseline in view the Gaussian's offset is unconstrained, and the tau=0.91
-# quantile lowers its own loss by floating `off` UP and shrinking sigma with it -- on a
-# high-visibility trace it settled at off=255 against a truth of 155, squeezing sigma ~12%
-# narrow, which corrupts the truncation width and inflates rms_frac. So we measure the
-# continuum from the FULL frame (outside the bump) and bound `off` to it.
-#
-# This is invisible on the saved .xls traces: they are low-visibility (bump ~25 counts over
-# a ~145 baseline) and fit correctly at every window with either optimizer. The bug only
-# bites bright/high-contrast live data. Do not trust those files to catch it.
+# --- Baseline anchor for the envelope offset ---
+# ZOOM holds no pure-baseline points, so the continuum is measured from the full frame and
+# the envelope offset is bounded to it (U_base +- K*D).
 ANCHOR_EXCLUDE_NM = 14.0   # |lambda - bump centre| beyond which the frame is continuum
-ANCHOR_K = 0.5             # admissible offset band = U_base +- K*D. Holds across a 5x
-                           # brightness range with no retuning (U_base predicts the
-                           # converged truth to 0.7 counts on the high-vis trace).
+ANCHOR_K = 0.5             # admissible offset band = U_base +- K*D
 ANCHOR_MIN_PTS = 40        # below this much continuum, decline to anchor (stay unbounded)
 
 # --- Wing truncation before the Hilbert transform ---
-# Keep only the high-visibility core where the envelope contrast (upper-lower gap) is
-# >= min + THRESHOLD*(max-min); higher => tighter crop. Swept over 4 tuning
-# seeds x seven values 0.10..0.45: pass rate rises MONOTONICALLY as we crop tighter up
-# to a broad flat plateau at 0.35-0.45 (~98.6%, vs 97.7% at the old 0.25), i.e. the
-# low-SNR fringe wings hurt the phase fit more than their extra lever-arm helps. 0.40 is
-# the plateau centre; held out on 3 fresh seeds it stays ahead (99.0% vs 98.8%) and it
-# leaves real-data cores healthy (~150-185 pts) with the da17 null unmoved (@799.53).
-TRUNC_THRESHOLD = 0.30  # (was 0.40) fraction of peak envelope contrast kept as the core.
-                        # Eased off from 0.40: the tighter crop shortened the lever arm enough
-                        # to fail trust on 2020607181645 AND clipped clean cores enough that
-                        # their faded blue-edge visibility read as a lead-in dead run, firing
-                        # the knife on a clean trace. 0.30 keeps the arm; the knife now removes
-                        # the dead sliver, so the contrast crop no longer has to.
+TRUNC_THRESHOLD = 0.30  # fraction of peak envelope contrast kept as the high-visibility core
 
-# --- Truncated-arm detection (DIAGNOSTIC ONLY -- never feeds the fit) ---------
-# One interferometer arm clipped (slit / aperture / shaper mask) removes a spectral
-# tail of THAT arm. The fringes are the cross term 2*A_a*A_b*cos(Phi), so in the band
-# where A_b = 0 the oscillation stops ABRUPTLY and only the un-clipped arm's smooth
-# Gaussian tail survives (the DC also steps down by A_b^2, but at the real ~7%
-# visibility that step is ~1.7 counts -- comparable to read noise, so we do NOT rely
-# on it). We detect the fringe collapse: a run of samples where the measured local
-# fringe peak-to-peak has died relative to the fitted envelope gap (U-L, which still
-# predicts fringes there), running out to the edge of the detectable region.
-#
-# The confounder is a NULL: where the instantaneous frequency crosses zero the fringe
-# is ALSO locally flat, over a half-width ~sqrt(pi/2|c2|) that can reach several nm.
-# Two things separate a null from a clip, and we require BOTH:
-#   (a) PINNING -- at a null the trace is parked on an envelope (|n| ~ 1); a clipped
-#       band sits strictly INSIDE them (the lone arm's power A_a^2 lies between the
-#       trough and crest levels), so |n| is well below 1.
-#   (b) EDGE-TOUCHING -- a null is interior (fringes resume on both sides); a clipped
-#       tail runs from its edge out to the boundary of the detectable region.
-# Detection is deliberately confined to where fringes are detectable AT ALL: the
-# envelope gap must beat the read noise by TRUNCDET_SNR_GAP, otherwise noise-only
-# wings would read as "fringes missing" on every trace.
-TRUNCDET_WIN_PERIODS = 1.0    # sliding window = this many fringe periods (>=1 so a live
-                              # window's variance sees a full crest->trough swing)
-TRUNCDET_WIN_MIN_NM = 0.45    # floor/cap on that window (nm), for very high/low frequencies
-TRUNCDET_WIN_MAX_NM = 4.0     # >= the slowest period we generate (0.3 cyc/nm = 3.3 nm)
-TRUNCDET_LADDER = 5           # fixed window sizes spanning MIN..MAX; each sample uses the
-                              # rung nearest its own local period
+# --- Truncated-arm detection (DIAGNOSTIC ONLY -- never feeds the fit) ---
+# Detect a clipped arm (fringes collapse abruptly to one arm's smooth Gaussian tail) vs a
+# null (fringes locally flat but interior). Requires BOTH pinning (|n| well below 1, unlike a
+# null's |n| ~ 1) and edge-touching, only where the envelope gap beats read noise.
+TRUNCDET_WIN_PERIODS = 1.0    # sliding window = this many fringe periods
+TRUNCDET_WIN_MIN_NM = 0.45    # floor on that window (nm)
+TRUNCDET_WIN_MAX_NM = 4.0     # cap on that window (nm)
+TRUNCDET_LADDER = 5           # fixed window sizes spanning MIN..MAX; each sample uses the nearest
 TRUNCDET_FLOC_NM = 4.0        # window for the local zero-crossing rate (the local period)
-TRUNCDET_HYST_SIGMA = 2.0     # Schmitt-trigger rails (x sigma) for counting those
-                              # crossings, so read noise cannot chatter a slow fringe's
-                              # crossing into several and read 3x the true frequency
-TRUNCDET_DC_WIN_NM = 1.0      # rolling-median window that blunts the fringe before the
-                              # stiff Gaussian DC fit (the fit is what does the work)
-TRUNCDET_DC_PASSES = 3        # times to RE-FIT that Gaussian DC with the fringe-free band
-                              # excluded. The docstring's "clip moves the DC by only
-                              # ~9%" is a LOW-VISIBILITY approximation: the step is
-                              # b^2/(a^2+b^2) of the bump, ~5% at contrast k=0.4 but ~28%
-                              # at k=0.9. A symmetric Gaussian fit through a coherent 28%
-                              # one-sided step slides its centre toward the surviving arm,
-                              # so bump under-predicts on the clipped side (clip MISSED)
-                              # and over-predicts opposite (clip reported on the WRONG
-                              # side) -- the measured bright-trace failure. soft_l1 absorbs
-                              # scattered outliers, not a coherent block, so we drop the
-                              # block and re-fit instead. Bootstraps from a MISSED clip
-                              # because the excluded set is read off h_meas (DC-free), not
-                              # off the possibly-empty dead mask.
-TRUNCDET_DCREFIT_SIGMA = 3.0  # a sample INSIDE the hump whose fringe amplitude h_meas is
-                              # below this*sigma carries no fringe -- it is the clipped
-                              # band (or a null) -- so it is excluded from the DC re-fit.
-                              # Wings (low bump) stay in to anchor the Gaussian offset.
-TRUNCDET_DCREFIT_TOL = 0.01   # re-fit has converged when the bump moves less than this
-                              # fraction of its peak between passes
+TRUNCDET_HYST_SIGMA = 2.0     # Schmitt-trigger rails (x sigma) for counting crossings
+TRUNCDET_DC_WIN_NM = 1.0      # rolling-median window that blunts the fringe before the DC fit
+TRUNCDET_DC_PASSES = 3        # times to re-fit the Gaussian DC with the fringe-free band excluded
+TRUNCDET_DCREFIT_SIGMA = 3.0  # fringe amplitude below this*sigma inside the hump => excluded from DC re-fit
+TRUNCDET_DCREFIT_TOL = 0.01   # DC re-fit converged when the bump moves less than this fraction of peak
 TRUNCDET_DEAD_FRAC = 0.35     # measured fringe amplitude < this * predicted => locally dead
-TRUNCDET_PIN = 0.75           # p90|y-DC| >= this * h_ref => the fringe still reaches its
-                              # crest nearby, so it is ALIVE (a null parks at ~1*h; a
-                              # clipped band sits at only b/(2a) ~ 0.16*h). One-way veto.
-TRUNCDET_VETO_SIGMA = 2.0     # ...and the veto's swing must also clear this * sigma, so
-                              # noise (p90 ~ 1.645 sigma) cannot vote itself alive. It is
-                              # boxed in from both sides and there is little room to tune:
-                              # noise sets a floor of 1.645, while at the live boundary a
-                              # GENUINE fringe only reaches p90 ~ h_ref = SNR_GAP/2 = 2.5
-                              # sigma, so anything at/above 2.5 stops real slow fringes
-                              # from vetoing themselves alive and turns them into false
-                              # positives (measured: 3.0 doubled them, all at f1 < 1.6).
-TRUNCDET_MAJORITY_NM = 0.6    # de-speckle: a sample is dead if most of this span is
-TRUNCDET_EDGE_TOL_NM = 2.0    # slack when asking whether a dead run touches an edge.
-                              # NOT a fudge: right AT the live boundary the predicted fringe
-                              # is only ~SNR_GAP/2 = 2.5 sigma, so v is at its noisiest there
-                              # and the first nm or so of a genuine dead band reads "alive"
-                              # by accident. The run therefore starts INSIDE the live edge
-                              # and a strict test discards it -- the detector finds the clip
-                              # and then throws the answer away. Measured on one such trace
-                              # (clip 1.5 nm blue of 802): v = 0.140 across the dead band vs
-                              # 0.961 outside it, i.e. the physics separates cleanly, yet the
-                              # run began 1.63 nm inside the live edge and 0.5 nm of slack
-                              # rejected it. This tolerance is the width of that unmeasurable
-                              # band. Swept on near-core clips (1-4 nm, the ones the fit core
-                              # can feel), detection / false positives / FPs reaching the core:
-                              #   0.5 -> 68.0% / 31.2% / 0      2.0 -> 93.2% / 35.8% / 0
-                              #   1.0 -> 80.2% / 33.3% / 0      3.0 -> 94.5% / 36.2% / 0
-                              #   1.5 -> 88.0% / 34.2% / 0      4.0 -> 94.8% / 36.2% / 0
-                              # 2.0 is the knee. The FP cost is real but free in the only
-                              # sense that matters: those FPs still land outside the
-                              # 40%-contrast core, so they remove no phase information.
-TRUNCDET_CUT_PAD_NM = 0.25    # extra guard band added to the reported clip edge, on top
-                              # of the w/2 smearing correction, before the fit drops those
-                              # samples: keeping one fringe-free point costs far more than
-                              # dropping a few good ones
+TRUNCDET_PIN = 0.75           # p90|y-DC| >= this * h_ref => fringe still reaches its crest (ALIVE veto)
+TRUNCDET_VETO_SIGMA = 2.0     # ...and that swing must also clear this * sigma
+TRUNCDET_MAJORITY_NM = 0.6    # de-speckle span: a sample is dead if most of this span is
+TRUNCDET_EDGE_TOL_NM = 2.0    # slack when asking whether a dead run touches an edge
+TRUNCDET_CUT_PAD_NM = 0.25    # extra guard band added to the reported clip edge before dropping samples
 TRUNCDET_K_BUMP_FRAC = 0.25   # gauge the contrast k where bump >= this * peak bump
-TRUNCDET_K_PCT = 90           # ...as this percentile of h/bump there (not the median:
-                              # a clipped band's zeros must not drag k down)
-TRUNCDET_K_ITERS = 2          # then refine k as the median over the samples that look
-                              # live, which survives a mostly-clipped trace
-TRUNCDET_ALL_FRAC = 0.9       # a dead run covering this much of the detectable region
-                              # is reported as "all", not as one side
+TRUNCDET_K_PCT = 90           # ...as this percentile of h/bump there
+TRUNCDET_K_ITERS = 2          # then refine k as the median over the samples that look live
+TRUNCDET_ALL_FRAC = 0.9       # a dead run covering this much of the region is reported as "all"
 TRUNCDET_MIN_RUN_NM = 0.7     # shortest edge-touching dead run that counts as truncation
-TRUNCDET_SNR_GAP = 5.0        # only test where model gap >= this * noise sigma. A dead
-                              # window's noise-subtracted amplitude still fluctuates up to
-                              # ~0.7 sigma, so v_dead ~ 0.7*sigma/half stays under
-                              # DEAD_FRAC only while gap >~ 4*sigma. The real traces run
-                              # gap/sigma = 4.3 (15.95ga) to 12.9 (da17), i.e. this gate
-                              # is what the instrument actually supports -- not a knob to
-                              # loosen. Below it the answer is "unknown", not "none".
+TRUNCDET_SNR_GAP = 5.0        # only test where model gap >= this * noise sigma (else "unknown")
 TRUNCDET_NOISE_GAP_FRAC = 0.25  # noise is sampled from this lowest quantile of model gap
 
-# Which arms the OPTICS can physically clip. On this setup only the left (blue) arm can be
-# occluded, and will stay that way for the foreseeable future (operator, 2026-07-20). That
-# is not a tuning preference -- it is a fact about the hardware, so a RIGHT-side detection
-# is not a marginal call to be thresholded, it is a KNOWN FALSE POSITIVE with probability 1.
-# Measured the same day: on a confirmed-clean beam the detector reported a right cut at
-# ~808.5 nm on 42/195 frames, and during a real LEFT clip it reported side="both" (real
-# left + phantom right at ~811 nm) on 17% of frames -- every one of those right edges sat
-# in the red wing where the Gaussian envelope has rolled off and fringe contrast is
-# naturally low, which the dead-fringe test misreads as a clip. Rather than chase that with
-# a wing-aware threshold, we use the physical constraint: suppress right-side detection
-# outright. Set this back to ("left", "right") if the interferometer is ever rebuilt so the
-# red arm can be clipped -- at which point the wing false-positive must be solved properly.
+# Only the left (blue) arm can be optically clipped on this setup, so a right-side detection is
+# a known false positive and is suppressed. Restore ("left", "right") if the red arm can ever
+# be clipped.
 PHYSICAL_CUT_SIDES = ("left",)
 
-# --- Envelope-centre pin ----------------------------------------------------------
-# The upper-envelope Gaussian mean muU is the anchor the cubic phase is expanded about
-# (l0 tracks it). Left-clipping the beam pushes the *intensity* peak rightward -- measured
-# 2026-07-20, muU walks from ~802.2 on a clean frame to ~802.9 under a left clip -- and the
-# phase reported back at the fixed reference then inherits noise from an anchor that has
-# wandered ~0.7 nm away with uncertain curvature (phase@802 scatter 0.72 rad vs a 0.314
-# budget). Pinning muU to a narrow band around a KNOWN centre stops the clip from dragging
-# the anchor. It is a band, not a hard value, so a clean frame still fits its own centre;
-# it is narrow because the beam centre does not move on this setup -- only the clip's effect
-# on the intensity peak does, and that is exactly what we are refusing to follow.
-#
-# ENV_CENTRE_DEFAULT is only the default: the operator drags it live (it is not derivable
-# from a truncated stream, and a wrong pin is visible and correctable on the chart). 802.0
-# is the nominal beam centre. ENV_CENTRE_TOL is the half-width of the pin.
+# --- Envelope-centre pin ---
+# Pin the upper-envelope mean muU (the cubic's basis origin) to a narrow band around a known
+# centre, so a one-sided clip cannot drag the anchor. Operator-dragged; default is the nominal
+# beam centre.
 ENV_CENTRE_DEFAULT = 802.0
 ENV_CENTRE_TOL = 0.1
 
-# --- Null localization (symmetry / two-sided prominence of the Hilbert |f|) ---
-# The Hilbert instantaneous frequency is UNSIGNED (== |f|); a genuine null is a V
-# in |f| that rises on BOTH sides of an interior minimum. We smooth |f|, find that
-# minimum, and require the V to be prominent enough on each side. A monotonic (no
-# in-window null) trace has |f| rising on one side only, so the two-sided
-# prominence collapses -- that is how "no null exists" is detected, instead of the
-# old argmin+fold that FABRICATED a null on every trace.
+# --- Null localization (two-sided prominence of the Hilbert |f|) ---
+# A genuine null is a V in |f| prominent on BOTH sides of an interior minimum; a monotonic
+# trace's prominence collapses, which is how "no null" is detected.
 SMOOTH_FRAC = 0.06    # gaussian sigma for smoothing |f|, as a fraction of core length
-MAX_NULL_CAND = 3     # how many candidate nulls (deepest interior |f| minima, i.e.
-                      # zero-derivative dips) to try as anchors; each competes as a
-                      # "with-null" seed against the "no-null" seed and the SSE decides,
-                      # so an inaccurate or false candidate cannot poison the fit
+MAX_NULL_CAND = 3     # candidate nulls (deepest interior |f| minima) to try as anchors
 
-# --- Two-trim + null-flip seed core (replaces BIC/order selection) -------------
-# The seed for the full-signal fit is chosen by the two-trim scheme, validated on the
-# synthetic grid (endtrim_synth.py, 100%/216) and on the six real traces: the contrast
-# crop above already removed the low-visibility wings (trim 1); here we take the Hilbert
-# phase, drop the top/bottom PHASE_TRIM of its VALUE range (trim 2) to cut the folded
-# null plateau, and polyfit a quadratic seed of the surviving one-sided arm. That seed
-# is right whenever the phase is (near-)monotonic. Where the fringe frequency crosses a
-# zero-path null the monotonic Hilbert phase FOLDS, so for each |f| dip we also build a
-# SIGNED parabolic seed (fit_freq_null + recover_offset) that carries the real chirp
-# through the null, and take that "flip" only if it cuts the fringe SSE by >= the margin.
-PHASE_TRIM = 0.15       # phase-VALUE trim fraction (validated value; endtrim_synth TRIM)
+# --- Two-trim + null-flip seed core ---
+# Phase-value trim + quadratic polyfit of the one-sided arm (correct when the phase is
+# monotonic), plus a signed parabolic seed per |f| dip that carries the chirp through a null,
+# taken only when it cuts the fringe SSE by >= the margin.
+PHASE_TRIM = 0.15       # phase-VALUE trim fraction (cuts the folded null plateau)
 FLIP_SSE_MARGIN = 0.15  # take a null flip only if it cuts fringe SSE by >= this fraction
 ALIVE_WIN_FRAC = 0.07   # rolling-RMS window (fraction of core) for the fringe-alive mask
-ALIVE_THR = 0.45        # keep samples whose local fringe RMS exceeds this (n rides
-                        # [-1,1] so a live fringe has RMS ~0.7; post-clip noise is below)
-# --- Truncated-END trim (before Hilbert): the OSCILLATION mask ----------------
-# fringe_alive keys on the MAGNITUDE of n (rolling RMS), which a truncated arm defeats:
-# past the clip only one arm survives, so with the envelopes mis-estimated across the
-# collapsed gap n sits PINNED near +-1 (high |n|) while it no longer OSCILLATES. Measured
-# on a real left-clip: the dead band reads rolling-|n| ~0.9 (higher than the live core)
-# yet its local oscillation is ~0.05. So the end-trim keys on oscillation -- the rolling
-# STD of n about its local mean -- not magnitude. A genuine null reads low oscillation too,
-# but it is LOW-|n| (n passes through 0) and, decisively, INTERIOR (fringes resume past it),
-# so trimming only edge-touching dead runs leaves it untouched. Threshold is a low floor: a
-# dead band is ~0.05, a null bottom ~0.11, the weakest real fringe ~0.25, so 0.15 sits in
-# the gap and only trims genuinely oscillation-free ends.
+ALIVE_THR = 0.45        # keep samples whose local fringe RMS exceeds this
+
+# --- Truncated-END trim (before Hilbert): the OSCILLATION mask ---
+# Key on oscillation (rolling STD of n about its local mean), not magnitude: a truncated arm
+# sits pinned near +-1 but stops oscillating. Trim only edge-touching dead runs, so an interior
+# null is left untouched.
 OSC_WIN_FRAC = 0.07     # rolling-std window (fraction of core) for the oscillation measure
 OSC_DEAD_THR = 0.15     # below this local oscillation, a sample carries no live fringe
-MAX_FLIP_CAND = 2       # deepest null candidates to try flipping (each costs one fit)
+MAX_FLIP_CAND = 2       # deepest null candidates to try flipping
 
-# --- Scan-free deterministic pipeline (replaces the recovery scan) -------------
-# The derivative "coarse cut" idea was tried and DROPPED (2026-07-19): measured net-negative
-# in testing -- it over-crops good traces into false-drops (even after the smoothing
-# and one-sided-envelope fixes it added 16 false-drops vs no coarse cut on the realistic
-# test suite) and it never fixed the truncation corner it was built for. The scan-free path
-# is: full-window envelopes -> contrast crop -> oscillation end-trim -> Hilbert -> TRUNCATION
-# TRIM -> seed/fit. On the realistic suite this beats the shipped scan (99.6% vs 98.8%, fewer
-# wrong) with no 12 s scan. Truncation is handled by trimming the core; two methods, both
-# built for comparison (TRUNC_METHOD):
-SCANFREE = False        # master flag: True routes analyze()/_analyze_once through the
-                        # deterministic scan-free path and SKIPS the recovery scan.
-TRUNC_METHOD = "phase"  # "phase" | "knife" | "none":
-                        #   phase = conditional phase-VALUE trim (baseline both ends, more on
-                        #           a detected dead side); reuses the validated phase-trim idea.
-                        #   knife = knife-edge cut detector (the physical cut is 0.2-0.3 nm
-                        #           wide, so find that sharp oscillation edge with a dead zone
-                        #           beyond it and cut there).
-                        #   none  = no truncation handling (the plain end-trimmed core).
+# --- Truncation handling ---
+# SCANFREE routes through a deterministic scan-free path (off; see docs). TRUNC_METHOD selects
+# how the core is trimmed: "phase" (conditional phase-value trim, active), "knife" (edge
+# detector), or "none".
+SCANFREE = False
+TRUNC_METHOD = "phase"
 # -- conditional phase trim (TRUNC_METHOD="phase") --
-PHASE_TRIM_BASE = 0.05  # baseline phase-VALUE trim at BOTH ends. The flat dead zone accrues
-                        # ~no phase, so the legacy 15% both-ends trim wasted good signal; 5%
-                        # is a light residue clean-up.
-PHASE_TRIM_DEAD = 0.25  # phase-VALUE trim at an end with a DETECTED dead region (the clip).
-PHASE_DEAD_RATIO = 0.45 # an end is "dead" if its local oscillation is below this * the core
-                        # median oscillation.
-PHASE_DEAD_FRAC = 0.12  # fraction of the core at each end examined for the dead test.
+PHASE_TRIM_BASE = 0.05  # baseline phase-VALUE trim at BOTH ends
+PHASE_TRIM_DEAD = 0.25  # phase-VALUE trim at an end with a DETECTED dead region (the clip)
+PHASE_DEAD_RATIO = 0.45 # an end is "dead" if its local oscillation is below this * core median
+PHASE_DEAD_FRAC = 0.12  # fraction of the core at each end examined for the dead test
 # -- knife-edge cut detector (TRUNC_METHOD="knife") --
-KNIFE_MIN_NM = 0.12     # the knife-edge cut is physically ~0.2-0.3 nm wide; accept a high->
-KNIFE_MAX_NM = 0.55     # dead oscillation transition whose width falls in this range.
+KNIFE_MIN_NM = 0.12     # accept a high->dead oscillation transition this wide (min)
+KNIFE_MAX_NM = 0.55     # ...to this wide (max); the physical cut is ~0.2-0.3 nm
 KNIFE_DEAD_RATIO = 0.30 # beyond the edge, oscillation must fall below this * core median...
-KNIFE_MIN_DEAD_NM = 1.0 # ...over a dead run at least this long, reaching the window edge.
-KNIFE_DEEPEN_NM = 0.50  # once the sharp edge is found, cut this much FURTHER into the live
-                        # side. The knife cut lands at the FIRST live sample, but the first
-                        # ~0.3-0.5 nm past it is a weak transition sliver (low contrast,
-                        # dragged envelope) that pulls the fit. Cutting to the first CLEAN
-                        # fringe (measured: trunc2020 needs ~800.2, edge is at 799.8) keeps
-                        # the knife's precise null-safe detection but drops the sliver.
+KNIFE_MIN_DEAD_NM = 1.0 # ...over a dead run at least this long, reaching the window edge
+KNIFE_DEEPEN_NM = 0.50  # cut this much further into the live side, past the transition sliver
 
-# --- Phase-order selection (BIC, replaces ridge regularization) ---------------
-# Order q means the instantaneous frequency is a degree-(q-1) polynomial: phase = c0..cq
-# (q=1 carrier / q=2 chirp / q=3 +TOD). Instead of a hand-tuned ridge, BIC = n·ln(SSE/n)
-# + k·ln(n) penalizes extra terms, so spurious TOD is rejected automatically -- no tuning
-# knob. Applied only when the frequency is one-signed (no null); at a null TOD is
-# unidentifiable and the order is capped at 2 (see core_seed_fit).
+# --- Phase-order selection (BIC) ---
+# BIC (n*ln(SSE/n) + k*ln(n)) picks the phase order, so spurious TOD is rejected without a
+# tuning knob. Applied only when the frequency is one-signed; at a null, order is capped at 2.
 
-# --- Soft null penalty (on the |f| V-fit that provides the null-flip seed) -------
-# The null seed fits the Hilbert |f| with a frequency polynomial whose value at the
-# anchor is softly pulled to zero, so the seed genuinely has its null at the located
-# minimum. Soft (a penalty, not a hard constraint) so real data still moves it.
+# --- Soft null penalty (on the |f| V-fit that provides the null-flip seed) ---
 NULL_PEN_FREQ = 3.0   # weight of the f(u=0)->0 penalty in the |f| (cycles/nm) fit
 
 # --- Final full raw-signal fit (cubic/TOD phase, envelopes held fixed) ---
 SIGNAL_LOSS_FRAC = 1.0  # soft-L1 scale as a fraction of the local half-amplitude (counts)
-# After the frozen-envelope phase fit, OPTIONALLY re-solve the phase AND both envelope
-# Gaussians jointly (joint_env_refine): the frozen quantile envelope never sees the fringe,
-# so its troughs ride above the raw counts (a `half` error r2_fringe is blind to). Freeing
-# the envelope lifts the RAW reconstruction (r2_sig) markedly.
-#
-# DISABLED by default -- measured 2026-07-19 on a truncation safety sweep: it is a clean win
-# on UNTRUNCATED traces (0 new wrong, r2_sig 0.988->0.995),
-# but on TRUNCATED traces the freed envelope absorbs the missing-arm misfit and PASSES the
-# trust gate while the phase is actually wrong (+23 confidently-wrong on the dim sweep), and
-# it suppresses the recovery scan that used to catch them (missed 196->295). The truncated
-# corner's pretty 0.938->0.996 is in that false-confidence bucket -- a mirage, not recovery.
-# Safe use requires gating to traces the FROZEN fit already _explains AND side=='none' (so it
-# can never change a recovery decision); that needs a 2nd pass or a tail refactor. Left off
-# pending that decision. See joint_env_refine + joint_env_fit_figs.py / envelope_candidates.
-JOINT_ENV_FIT = False
-# Pipeline B (envelope -> knife -> refit): after the knife locates the dead sliver, refit the
-# Gaussian envelopes on the full window MINUS that deadzone. The prelim envelope is fit on the
-# full window (contaminated by the sliver on a truncated trace); the knife then gives the dead
-# boundary, and this single refit puts the envelope on the correct domain -- replacing the
-# recovery scan with one clean pass. Fit on full-minus-deadzone (NOT the narrow contrast core,
-# which degenerates the gap Gaussian). Only fires when the knife actually found a cut.
-DEADZONE_REFIT = False
+# Optional refinements, both OFF (see docs -- disabled experiments):
+JOINT_ENV_FIT = False   # re-solve phase + both envelope Gaussians jointly
+DEADZONE_REFIT = False  # refit envelopes on the full window minus the knife deadzone
 
-# DEAD END, measured 2026-07-19 -- do not re-add a global-kernel Hilbert detrend.
-# The idea was sound: n = (y-mid)/half should be zero-mean, and in the tails `half` is small
-# so envelope error becomes a large offset in n, which the Hilbert transform mixes into the
-# phase. Implemented as n - gaussian_filter1d(n, sigma) with sigma from the mean
-# zero-crossing period. Result on the seven real traces: SIX were bit-identical (the full
-# fit dominates the seed, same finding as the flip-scan null experiment), and the seventh,
-# da_15.95ga_-75, COLLAPSED -- r2_fringe 0.645 -> -0.116.
-# Mechanism: that trace has a null, so its local period runs 4.2 samples in the blue third
-# to 8.0 in the middle. ONE global kernel cannot be "about one period" everywhere -- at
-# sigma=5.3 it was 0.8x the local period in the blue third, where it tracked the fringe and
-# ate 14.7% of the fringe RMS, while removing only 1.4% in the middle where the baseline
-# actually lives. Any retry needs a LOCAL, chirp-following kernel, and must first show that
-# the seed matters at all: six of seven traces say it does not.
-
-# --- Accuracy spec / trust gate ---------------------------------------------
-# The accuracy the pipeline is REQUIRED to deliver (the accuracy tolerances:
-# 1% relative on the frequency c1 and chirp c2 with small absolute floors near zero, a
-# mod-2pi budget on c0, absolute on TOD). The fit's own covariance, propagated to the
-# spectral centre, is checked against this: a trace that cannot meet it is reported as
-# "underdetermined" rather than handed over as a number that looks like all the others.
-# This matters for truncated traces, where a clip costs lever arm and the coefficients
-# get genuinely underdetermined WITHOUT the residual showing it (R^2 stays ~0.96).
+# --- Accuracy spec / trust gate ---
+# The fit covariance, propagated to the reference, is checked against this spec; a trace that
+# cannot meet it is reported "underdetermined" rather than handed over as a normal-looking
+# number (a clip costs lever arm without the residual showing it).
 TRUST_REL = 0.01        # relative spec on c1, c2
 TRUST_FLOOR_C1 = 0.05   # rad/nm     absolute floor near c1 = 0
 TRUST_FLOOR_C2 = 0.02   # rad/nm^2   absolute floor near c2 = 0
-TRUST_TOL_C0 = 0.314    # rad        (0.05 * 2pi, the phase-stabilization budget)
-                        # Was 0.126 (2% of 2pi), which was never checked against what the
-                        # loop actually needs -- and it was the BINDING term on real traces.
-                        # Measured 3*sigma/tol on the seven real traces: da_15.95ga_-55.29
-                        # failed at c0=2.03 and da_15.95ga_-75 at c0=1.49, i.e. both real
-                        # rejections were the PHASE tolerance, not curvature. (The synthetic
-                        # gallery's "all 11 wrong fail on c2, never c0" is a synth-only
-                        # result; do not generalise it to real data.)
-                        # 5% of 2pi is the honest spec, per the user 2026-07-19: the beam
-                        # already jitters more than 2% shot to shot even while stabilized,
-                        # and phase stabilization was never meant to suppress that noise. It
-                        # exists to stop the slow drift that SMEARS phase across a long scan
-                        # until the information is wiped out entirely. A gate tuned an order
-                        # of magnitude below the jitter it lives in rejects frames for an
-                        # error the loop does not care about.
+TRUST_TOL_C0 = 0.314    # rad        phase-stabilization budget (5% of 2pi)
 TRUST_TOL_C3 = 0.006    # rad/nm^3   noise-limited TOD floor
 
-# --- Accuracy gate: is the reference INSIDE the data that supports it? -------------
-# `trust_at` is a PRECISION test -- propagated covariance against the spec above. It is
-# blind to the failure mode measured on real truncated data 2026-07-20, which is a BIAS:
-# when one arm is clipped the fitted core shrinks and its centroid `l0` slides off the
-# operator's reference, and the phase quoted back at that reference then splits into two
-# populations that the covariance cannot tell apart. Measured over 58 consecutive FITDIAG
-# frames from one run, grouped by whether the core had displaced:
-#
-#     phase @ 802 nm (what the loop consumes)   4.128 rad   vs   2.734 rad
-#     |ref - l0| / core half-span                0.15-0.29   vs   0.00-0.04
-#
-# A 1.40 rad step, on frames that ALL reported trust=True, rms_frac ~0.10, inl 97-100%.
-# Nothing in the residual or the covariance objects, because the fit is precisely
-# explaining a core that has moved. This constant is the missing accuracy term: the
-# reference must sit near the middle of the support, not merely inside it.
-#
-# 0.12 sits in the gap the two measured populations leave (0.04 -> 0.15) with margin on
-# both sides. It is a SEPARATION threshold read off real data, not a derived quantity --
-# re-measure it if the spectrometer window or the core crop changes.
+# --- Accuracy gate: is the reference INSIDE the data that supports it? ---
+# A BIAS the covariance is blind to: a clip shifts the fitted core centroid l0 off the
+# reference and the phase there splits into two populations. Separation threshold read off
+# real data -- re-measure it if the spectrometer window or the core crop changes.
 REF_MAX_OFFSET_FRAC = 0.12
 
-TRUST_NSIG = 3.0        # require NSIG * sigma to fit inside the spec.
-                        # CALIBRATED, not derived. The Gauss-Newton covariance is an
-                        # under-estimate of the true error here for two reasons it cannot
-                        # see: the envelopes (mid/half) are held FIXED through the phase
-                        # fit, so their error biases the phase without ever entering the
-                        # covariance; and the phase noise is not the white intensity noise
-                        # the SSE/dof scaling assumes. NSIG absorbs both.
-                        #
-                        # This knob IS the accuracy/yield trade, and both sides are specced:
-                        # accuracy of REPORTED fits >= 98%, and <= 5% of the fits that would
-                        # have been RIGHT may be thrown away (user, 2026-07-16). Swept over
-                        # the full operating space (2470 fits,
-                        # brightness continuum x carrier x legal clips, two seeds pooled) --
-                        # accuracy / false-drop rate (declined-but-would-have-passed, as a
-                        # fraction of all good fits):
-                        #     2.00 -> 97.97% /  0.8%     3.50 -> 98.89% /  6.2%
-                        #     2.50 -> 98.31% /  2.0%     4.00 -> 98.99% /  9.0%
-                        #     3.00 -> 98.54% /  3.7%  <- shipped: margin on BOTH bars
-                        #     3.25 -> 98.69% /  4.9%     5.00 -> 99.31% / 15.0%
-                        # 3.25 also passes but sits ON the 5% line with no headroom for
-                        # seed-to-seed variation, so 3.0 is the defensible pick.
-                        #
-                        # Do NOT chase 99.9% with this knob. It saturates while the yield
-                        # collapses: 16.0 throws away TWO THIRDS of all good fits and STILL
-                        # misses 99.9% (1 wrong in 726, where counting error alone is
-                        # +-0.14%). The residual ~1-1.5% is not something the gate can see --
-                        # it is real TOD at the identifiability floor (true c3 = +-0.005)
-                        # that BIC declines to model, whose un-modelled cubic then biases c1
-                        # by ~0.06-0.10 rad/nm; that only breaks the spec when c1 is SMALL,
-                        # because the tolerance is max(1%*|c1|, 0.05). Half of those have an
-                        # in-window null, where order is capped at 2 BY DESIGN since TOD is
-                        # unidentifiable at a null. Getting past it means revisiting the BIC
-                        # order selection -- and buying spurious-TOD failures on the ~1/3 of
-                        # traces whose true c3 is genuinely 0 -- not tightening this gate.
+TRUST_NSIG = 3.0        # require NSIG * sigma to fit inside the spec; the accuracy/yield trade
 
-# --- Adaptive phase reference ------------------------------------------------
-# The phase is reported at a REFERENCE wavelength. The default is the intensity centroid
-# muU (~802 nm): that is where the pulse energy is and what phase stabilization asks about.
-# But a clip near the core leaves 802 sitting a nm or two from the edge of the surviving
-# fringes, and the phase there stops being supported by data -- measured, a cut 1-2 nm from
-# 802 drops reported accuracy to ~87-90% and makes the trust gate decline ~40% of fits it
-# would otherwise have got right.
-#
-# So when the primary reference is untrustworthy we fall back to the CORE CENTROID l0 =
-# mean(core), which is both the fit's own basis origin (d = 0, so no covariance is
-# propagated and the answer is as well-conditioned as the data allow) and, for a one-sided
-# clip, automatically the point furthest from the cut. The reference actually used is
-# reported in R["ref_wl"], and R["ref_fallback"] says whether it moved.
-#
-# Switching reference is not free for the app -- a stabilization loop locked to one
-# wavelength must not chatter between two -- so the app passes a ReferencePolicy that
-# requires REF_HYST consecutive traces before switching EITHER way. A caller that passes no
-# policy switches immediately (per user: "for testing you can immediately do the fallback").
+# --- Adaptive phase reference ---
+# Phase is reported at a reference wavelength (default the intensity centroid ~802 nm); when a
+# clip leaves it unsupported, ref_wl falls back to the core centroid l0 (R["ref_fallback"]
+# flags it). A ReferencePolicy adds hysteresis so a locked loop cannot chatter; no policy
+# switches immediately.
 REF_HYST = 5          # consecutive traces agreeing before the app changes reference
 
 # --- Frequency plot ---
 FREQ_YLIM = 6         # frequency-axis cap (cycles/nm)
 
-# --- Spectral fringe frequency -> generated RF frequency ----------------------
-# Dispersive time-mapping calibration (user, 2026-07-19): 9 nm of spectrum maps to ~320 ps
-# of delay, assumed LINEAR over the band. So a spectral fringe of period P nm becomes a
-# temporal beat of period P * (320/9) ps, and the RF frequency it generates is the
-# reciprocal of that:
-#     f_RF [GHz] = f [cycles/nm] * (9 nm / 320 ps) = f * 28.125
-# The "roughly" in the calibration is the dominant error here -- it is a stated ~1 sig fig,
-# so do not report this to a precision the calibration cannot carry (see format_ghz).
+# --- Spectral fringe frequency -> generated RF frequency ---
+# Dispersive time-mapping calibration: 9 nm ~ 320 ps, linear => 28.125 GHz per cycle/nm. This
+# is ~1 sig fig, so do not report to a precision it cannot carry (see format_ghz).
 NM_PER_PS = 9.0 / 320.0          # 0.028125 nm/ps
 GHZ_PER_CYC_PER_NM = 1e3 * NM_PER_PS   # 28.125 GHz per (cycle/nm)
 
-# The band the range is quoted over: 802 +- 9 nm. This deliberately EXTRAPOLATES beyond the
-# fitted core (typically ~150-185 points over 6-9 nm), because the question the readout
-# answers is "what RF does this shot generate across the pulse", not "what did we fit".
-# Extrapolating a cubic is exactly where a badly-determined c2/c3 shows up, multiplied by
-# d^2/d^3 -- which is why the readout must be gated on shape_ok, not trust_ok.
+# The band the RF range is quoted over (802 +- 9 nm), deliberately extrapolating past the
+# fitted core -- hence gated on shape_ok.
 RF_BAND_CENTRE_NM = 802.0
 RF_BAND_HALFWIDTH_NM = 9.0
 
@@ -1755,16 +1457,11 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
     try:
         use_scanfree = SCANFREE if scanfree is None else scanfree
         if use_scanfree:
-            # ===== Scan-free deterministic pipeline (replaces the 12 s recovery scan) =====
-            # On the realistic synth suite this BEATS the scan (99.6% vs 98.8%, fewer wrong)
-            # with no scan. Pipeline: full-window envelopes -> contrast crop -> oscillation
-            # end-trim -> Hilbert -> TRUNCATION TRIM -> seed/fit.
-            #
-            # The derivative "coarse cut" was tried and DROPPED (2026-07-19): net-negative in
-            # testing (it over-crops good traces into false-drops -- +16 vs no coarse
-            # cut even on the realistic suite) and it never fixed the truncation corner it was
-            # built for. Truncation is now handled by trimming the CORE; TRUNC_METHOD selects
-            # "phase" (conditional_phase_trim) or "knife" (knife_edge_cut).
+            # ===== Scan-free deterministic pipeline (replaces the recovery scan) =====
+            # Pipeline: full-window envelopes -> contrast crop -> oscillation end-trim ->
+            # Hilbert -> TRUNCATION TRIM -> seed/fit. Truncation is handled by trimming the
+            # CORE; TRUNC_METHOD selects "phase" (conditional_phase_trim) or "knife"
+            # (knife_edge_cut).
             #
             # ENVELOPES ON THE FULL WINDOW. pU (intensity bump) survives a clip and needs its
             # wings to pin mu/sigma (a narrowed domain sent mu to 927 nm). pLn (contrast gap)

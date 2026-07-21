@@ -2,25 +2,9 @@
 
 **There is no math in this file, and none may be added.** All analysis lives in
 ``fringe_core.py`` (the single source of truth); this module only translates between the
-app's frozen dataclasses and that module's ``analyze()``.
-
-That separation is the whole point. Until 2026-07-16 this file carried a hand-maintained
-second copy of the math, and every bug found that day was drift between the two copies:
-
-  * ``fit_ftol=1e-4`` was passed as L-BFGS-B's *relative* ``ftol`` (its default is 2.22e-9),
-    so the envelope fit quit after 19 iterations and returned offset **255** against a truth
-    of **155** on the real bright trace — squeezing sigma ~12% narrow and inflating
-    ``rms_frac``, i.e. feeding the accept gate that was rejecting live frames;
-  * ``cubic_init = [C, 0.0, A, 0.0]`` forced the carrier ``c1 = 0``, and the soft-L1 fit
-    never climbed out: measured, this copy reported c1 of -0.15/-4.03/-3.02/-0.39 on four
-    real traces where ``fringe_core`` reads 6.65/23.81/8.20/7.68. The carrier — the quantity
-    phase stabilization locks to — was wrong on **every trace**;
-  * the baseline anchor, the truncated-arm detector, BIC phase-order selection and the trust
-    gate simply never arrived.
-
-None of that was a hard bug to write; it was inevitable given two copies. ``analyze_trace``
-now delegates to ``fringe_core`` and nothing else. If you need to change the analysis, change
-``fringe_core.py`` — never re-implement any of it here.
+app's frozen dataclasses and that module's ``analyze()``. If you need to change the analysis,
+change ``fringe_core.py`` — never re-implement any of it here. (Why a single copy: see
+docs/phase_stabilization_fit.md.)
 """
 from __future__ import annotations
 
@@ -46,17 +30,9 @@ ClipCache = fc.ClipCache
 class FitTunables:
     """User-editable inputs. Everything else is a calibrated constant in ``fringe_core``.
 
-    **The defaults are IMPORTED from ``fringe_core``, never written out here.** Copying a
-    calibrated number into this file is the same drift bug as copying the math: a stale
-    ``trunc_threshold = 0.40`` restated here while ``fringe_core`` had recalibrated
-    ``TRUNC_THRESHOLD`` to 0.30 threw the carrier off by up to 24.6 rad/nm on a real trace —
-    the same math fed a different constant is a different analysis. If you need another knob,
-    alias the module constant; never retype its value.
-
-    The knobs the old folded-chirp fitter needed (``phase_loss_scale``, ``init_smooth_div``,
-    ``inlier_nsigma``, ``fit_ftol``) are GONE: that pipeline is gone. ``fit_ftol`` in
-    particular must not come back — it was the L-BFGS-B units bug, and the envelope fit is
-    Nelder-Mead now precisely because a kinked loss makes it unconditionally safe.
+    Defaults are IMPORTED from ``fringe_core``, never restated here: a stale constant copied
+    into this file is a different analysis from the same math. To expose another knob, alias
+    the module constant; never retype its value.
     """
 
     trunc_threshold: float = fc.TRUNC_THRESHOLD
@@ -65,18 +41,9 @@ class FitTunables:
                                     # and the record of why it last moved.
     trust_nsig: float = fc.TRUST_NSIG
                                     # require THIS * sigma to fit inside the accuracy spec
-                                    # before the phase is reported at all. This is the
-                                    # accuracy/yield trade, measured over the full operating
-                                    # space (2470 fits, two seeds) as accuracy of reported
-                                    # fits / fraction of good fits thrown away:
-                                    #   2.0 -> 97.97% /  0.8%     4.0 -> 98.99% /  9.0%
-                                    #   3.0 -> 98.54% /  3.7%     5.0 -> 99.31% / 15.0%
-                                    #   3.25-> 98.69% /  4.9%    16.0 -> 99.86% / 69.5%
-                                    # 3.0 is the spec point (>=98% accurate, <=5% dropped)
-                                    # with margin on both. Loosen toward 2.0 while aligning
-                                    # if you want every frame to commit; do NOT push past
-                                    # ~5 for accuracy -- it saturates while the yield
-                                    # collapses. See fringe_core's TRUST_NSIG comment.
+                                    # before the phase is reported. The accuracy/yield trade;
+                                    # loosen toward 2.0 to commit more frames. See
+                                    # fringe_core.TRUST_NSIG (and docs) for the calibration.
 
 
 @dataclass(frozen=True)
@@ -99,37 +66,26 @@ class FringeFitResult:
     inlier_pct: float                         # fraction of core samples within 3*MAD (%)
     has_null: bool                            # frequency null lies inside the core
 
-    # --- v3 additions ------------------------------------------------------------------
     status: str = "ok"                        # "ok" | "underdetermined" | "dead_window" |
                                               # "too_few" | "nonfinite" | "error"
     trust_ok: bool = True                     # the data can support the PHASE at ref_wl.
                                               # c0 only -- the one quantity the loop acts on.
     shape_ok: bool = True                     # ...and the data can support the CARRIER and
-                                              # CHIRP (c1..c3). Separate because only things
-                                              # that evaluate the fit AWAY from ref_wl need
-                                              # it: the chart overlay and the GHz frequency
-                                              # readout, which extrapolate across 793-811 nm
-                                              # where a wrong c2 enters as d^2. Measured on
-                                              # 1240 test traces: 11 of the 13 fits the
-                                              # four-coefficient grader calls "wrong" have a
-                                              # CORRECT phase and fail only on shape, and
-                                              # shape_ok flags 8 of those 11. Gating the loop
-                                              # on shape threw those frames away for an error
-                                              # it does not care about. Do NOT fold this back
-                                              # into trust_ok or accepts().
+                                              # CHIRP (c1..c3). Separate because only consumers
+                                              # that evaluate the fit AWAY from ref_wl need it
+                                              # (the chart overlay and the RF readout). Do NOT
+                                              # fold this into trust_ok or accepts().
     ref_wl: float = float("nan")              # WHERE the phase is trustworthy. READ THIS --
                                               # never assume 802: a clip near the core moves
                                               # it to the core centroid.
     ref_fallback: bool = False                # True => ref_wl moved off the spectral centre
     ref_offset_nm: float = 0.0                # |ref_primary - l0|: how far the fitted core
-                                              # sits from the reference the phase is wanted
-                                              # at. The ACCURACY gate's input.
+                                              # sits from the reference. The ACCURACY gate's input.
     ref_offset_frac: float = 0.0              # ...as a fraction of the core half-span.
-    ref_offset_ok: bool = True                # False => the core drifted off the reference,
-                                              # so the phase there would be biased by the
-                                              # crop rather than measured. Enforced by
-                                              # StabilizationConfig.accepts, NOT by the fit:
-                                              # see fringe_core.REF_MAX_OFFSET_FRAC.
+    ref_offset_ok: bool = True                # False => the core drifted off the reference, so
+                                              # the phase there is biased by the crop. Enforced
+                                              # by StabilizationConfig.accepts, not the fit; see
+                                              # fringe_core.REF_MAX_OFFSET_FRAC.
     ref_offset_msg: str = ""                  # ...spelled out, for whoever drops the frame
     csig_sigma: tuple[float, float, float, float] = (0.0,) * 4   # 1-sigma on c0..c3 at ref_wl
     trunc_side: str = "none"                  # clipped arm: none/left/right/both/all/unknown
@@ -188,24 +144,19 @@ def analyze_trace(
 
     ``anchor`` is the ``(U_base, D)`` continuum measurement from
     ``fringe_core.baseline_anchor()`` on the **FULL frame**, taken BEFORE this window was
-    cut — the analysis window is +-3.1 sigma around the bump and contains no continuum at
-    all, so the envelope offset has nothing to pin it and the tau-quantile loss floats it
-    upward. ``PhaseTracker`` measures it before windowing and passes it down. Omitting it is
-    safe on dim traces and wrong on bright ones (offset 164.9 vs a truth of 155.0).
+    cut — the analysis window contains no continuum, so the envelope offset has nothing to
+    pin it. ``PhaseTracker`` measures it before windowing and passes it down. Omitting it is
+    safe on dim traces and wrong on bright ones.
 
     ``ref_policy`` is a ``ReferencePolicy`` carried ACROSS frames by the caller, so the
     reported reference cannot chatter between two wavelengths. Omit it and the reference
     falls back immediately.
 
-    ``clip_cache`` is a ``ClipCache``, likewise carried across frames by the caller. It
-    remembers the knife edge in WAVELENGTH so a clipped frame does not have to re-run the
-    ~645 ms recovery scan to rediscover a knife that has not moved. Omitting it was the
-    live bug found 2026-07-20: the cache was fully implemented here and never passed, so
-    every frame scanned cold, the scan is under a wall-clock budget, and the edge was
-    therefore found on some frames and missed on others within the same second -- which
-    reads as an intermittent detector and is really an unwired cache. The cache can only
-    ever be consulted on a frame whose UNCUT fit already failed ``_explains``, so a stale
-    edge cannot silently steer a clean frame; see ``fringe_core._analyze_cached``.
+    ``clip_cache`` is a ``ClipCache`` carried across frames by the caller: it remembers the
+    knife edge in WAVELENGTH so a clipped frame need not re-run the ~645 ms recovery scan to
+    rediscover a knife that has not moved. It is consulted only on a frame whose uncut fit
+    already failed ``_explains``, so a stale edge cannot steer a clean frame; see
+    ``fringe_core._analyze_cached``. This cache MUST be passed for stable clip detection.
     """
     try:
         R = fc.analyze(

@@ -7,40 +7,17 @@ import numpy as np
 from base_core.math.enums import AngleUnit
 from base_core.math.models import Angle
 
-PHASE_TOLERANCE = Angle(10, AngleUnit.DEG)
+PHASE_TOLERANCE = Angle(10, AngleUnit.DEG)   # dead-band: ignore sub-tolerance phase error
 CONVERSION_CONST = 1 / 4
 CORRECTION_SIGN = -1
-# Fraction of the measured error corrected per frame. Corrections are relative, so the
-# loop integrates and this alone sets its bandwidth: ~1/LOOP_GAIN frames to pull in.
-# Deliberately slow. The phase noise is faster than the ~0.5 s measure-and-move cycle
-# and so cannot be tracked; chasing it just injects it into the stage. We correct
-# long-term drift and average the noise away. This also keeps the loop overdamped
-# despite the dead time, which a gain of 1 would not.
-#
-# This is only the DEFAULT -- the operator tunes it live from the config panel
-# (StabilizationConfig.loop_gain), because the right value depends on the dead time,
-# which depends on the spectrometer's integration/averaging settings. Raise it toward 1
-# and the dead time will make the loop ring; that is the failure this default avoids.
+# Fraction of the measured error corrected per frame. Corrections are relative, so the loop
+# integrates and this alone sets its bandwidth (~1/LOOP_GAIN frames to pull in). Deliberately
+# slow/overdamped for the ~0.5 s dead time; the operator tunes it live via loop_gain. See docs.
 LOOP_GAIN = 0.05
-# Bounds for the operator's live edit. 0 would silently kill the loop; negative would be
-# positive feedback (the correction drives the phase further off, every frame). >1 is
-# over-correction on its face: more than the whole measured error, per frame, into a loop
-# that already has ~0.5 s of dead time.
-GAIN_MIN, GAIN_MAX = 0.01, 1.0
-# Hard ceiling on a SINGLE correction, in degrees of plate.
-#
-# Note what this is and is not. A single step is already bounded: `phase_error` is wrapped
-# to (-pi, pi], so the largest step the arithmetic below can produce is
-# 180/4 * gain = 45*gain degrees -- 2.25 deg at the default gain, and this cap never binds
-# there. It binds only when the operator has wound `loop_gain` toward GAIN_MAX, where a
-# single frame could otherwise ask for 45 deg, i.e. half a wave of phase in one move on a
-# loop that already has ~0.5 s of dead time.
-#
-# It is therefore NOT the fix for a plate that winds through whole turns: that failure is
-# an ACCUMULATION of many small, correctly-sized steps that all point the same way, and no
-# per-step cap can see it. The accumulation limit lives where the absolute position is
-# known -- `RgvHandle.RGV_MAX_DEG`. This is only the guard against one frame moving the
-# plate a long way on a bad number.
+GAIN_MIN, GAIN_MAX = 0.01, 1.0   # bounds for the live edit (0 kills the loop, <0 is positive feedback)
+# Hard ceiling on a SINGLE correction (degrees of plate). Binds only when the gain is wound
+# toward GAIN_MAX. It does NOT bound an accumulation of same-sign steps -- that limit lives
+# where absolute position is known (RgvHandle.RGV_MAX_DEG).
 MAX_STEP_DEG = 5.0
 
 
@@ -77,10 +54,8 @@ class PhaseCorrector:
 
     @gain.setter
     def gain(self, value: float) -> None:
-        # Clamped, not validated: this arrives from a live UI edit mid-run, and a stray
-        # 0 (loop silently dead) or a negative (positive feedback -- runs the phase away
-        # and keeps going) must not reach the stage. The UI enforces the same bounds; this
-        # is the one that matters, because it is the one the hardware is behind.
+        # Clamped, not validated: arrives from a live UI edit mid-run, and a stray 0 or
+        # negative must not reach the stage.
         self._gain = min(max(float(value), GAIN_MIN), GAIN_MAX)
 
     def update(self, phase: Angle) -> CorrectionResult | None:
@@ -99,9 +74,6 @@ class PhaseCorrector:
 
     def _convert_phase_to_hwp(self, phase: Angle) -> Angle:
         hwp_deg = CORRECTION_SIGN * phase.Deg * CONVERSION_CONST * self._gain
-        # Clamped, not rejected: a step this large still points the right way, and
-        # refusing it would stall the loop exactly when it has the most to correct.
-        # See MAX_STEP_DEG -- this does not bind at the default gain.
-        hwp_deg = min(max(hwp_deg, -MAX_STEP_DEG), MAX_STEP_DEG)
+        hwp_deg = min(max(hwp_deg, -MAX_STEP_DEG), MAX_STEP_DEG)   # clamp, don't reject
         # wrap=False: an increment is not a point on the circle.
         return Angle(hwp_deg, AngleUnit.DEG, wrap=False)

@@ -34,23 +34,14 @@ class PhaseTracker:
     ``current_phase`` is None until the first accepted fit, then holds the last
     committed value. ``update`` returns True only when a fresh fit committed.
 
-    Three things are stateful across frames, and only these three:
-      * the baseline anchor is measured on the FULL spectrum before windowing (the analysis
-        window holds no continuum at all, so the envelope offset has nothing to pin it and
-        the quantile loss floats it upward -- offset 255 against a truth of 155 on real
-        bright data). It is re-measured every frame; nothing is carried.
-      * ``_ref_policy`` carries the phase-reference hysteresis. It exists so a stabilization
-        loop locked to one wavelength cannot chatter between two when a clip sits near the
-        core.
-      * ``_clip_cache`` remembers the knife edge in WAVELENGTH, so a clipped frame need not
-        re-run the ~645 ms recovery scan to rediscover an edge that has not moved. Until
-        2026-07-20 this was never constructed and never passed down, so every clipped frame
-        scanned cold under a wall-clock budget and the edge was found on some frames and
-        missed on others seconds apart -- an intermittent-looking detector that was really
-        an unwired cache.
-    The FIT itself remains cold and seed-independent on every shot: neither the policy nor
-    the cache seeds the optimiser, and the cache is consulted ONLY on a frame whose uncut
-    fit already failed to explain the trace.
+    Two things are carried across frames (only these two; the fit itself stays cold and
+    seed-independent -- neither seeds the optimiser):
+      * ``_ref_policy`` -- phase-reference hysteresis, so a loop locked to one wavelength
+        cannot chatter between two when a clip sits near the core.
+      * ``_clip_cache`` -- the knife edge in WAVELENGTH, so a clipped frame need not re-run
+        the recovery scan to rediscover an edge that has not moved. Consulted only on a frame
+        whose uncut fit already failed to explain the trace.
+    The baseline anchor is re-measured on the full spectrum every frame (nothing carried).
     """
 
     current_phase: Angle | None = None

@@ -24,26 +24,18 @@ from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import LO
 @dataclass
 class FringeFitParams(PrimitiveSerde):
     # --- tunables (user-editable inputs to fringe_fit.analyze_trace) ---
-    # The v3 analysis owns its own calibrated constants (see fringe_core); only these two
-    # are user-facing. The old folded-chirp knobs (ratio, sigma_init, phase_loss_scale,
-    # signal_loss_frac, init_smooth_div) are gone with that pipeline -- from_primitive
-    # ignores them, so configs persisted before this change still load.
-    # Defaults are IMPORTED from fringe_core, not retyped -- a hardcoded 0.40 here while
-    # fringe_core had recalibrated to 0.30 is exactly the kind of stale-constant drift that
-    # throws the carrier off. Persisted configs still override these on load.
+    # Only these two are user-facing; the analysis owns its own calibrated constants (see
+    # fringe_core). Defaults are IMPORTED from fringe_core, never retyped (a stale constant
+    # here is a different analysis). from_primitive ignores unknown keys, so older persisted
+    # configs still load.
     trunc_threshold: float = fc.TRUNC_THRESHOLD   # high-visibility core keep-level
-    trust_nsig: float = fc.TRUST_NSIG  # accuracy/yield trade; see FitTunables.trust_nsig.
-                                       # 3.0 = >=98% of reported fits correct, <=5% of good
-                                       # fits declined. Lower to commit more frames while
-                                       # aligning; raising past ~5 buys little accuracy and
-                                       # costs a lot of yield.
+    trust_nsig: float = fc.TRUST_NSIG  # accuracy/yield trade; lower to commit more frames.
+                                       # See FitTunables.trust_nsig and docs.
     lambda_ref: Length = field(default_factory=lambda: Length(802.0, Prefix.NANO))
-    # --- operator-dragged analysis geometry (see fringe_core) ---
-    # env_center: the envelope/phase anchor, pinned so a one-sided clip cannot drag it (the
-    # fit's origin l0 is set here and muU is bounded to +-ENV_CENTRE_TOL of it). Dragged live
-    # on the chart; default is the nominal beam centre. manual_cut_left: the operator-dragged
-    # clip edge (nm) -- fringes below it are excluded from the fit. None => no manual cut, and
-    # since the auto-detector is unreliable here, no cut at all. Only left cuts are physical.
+    # --- operator-dragged analysis geometry (see fringe_core / docs) ---
+    # env_center: the envelope/phase anchor, pinned so a one-sided clip cannot drag the fit
+    # origin l0. manual_cut_left: operator-dragged clip edge (nm); fringes below it are excluded.
+    # None => no manual cut (and, since the auto-detector is unreliable here, no cut at all).
     env_center: float = fc.ENV_CENTRE_DEFAULT      # nm
     manual_cut_left: float | None = None           # nm, or None
 
@@ -184,39 +176,20 @@ class StabilizationConfig(PrimitiveSerde):
                                         # whatever this is set to.
 
     def accepts(self, r: FringeFitResult) -> bool:
-        """Per-shot quality gate.
+        """Per-shot quality gate. See docs/phase_stabilization_fit.md for the rationale.
 
-        `trust_ok` is the important one and it is NOT redundant with the residual gates: a
-        clipped trace costs lever arm and the phase at the reference goes genuinely
-        underdetermined while the fit still reconstructs at R^2 ~ 0.96. The residual cannot
-        see that -- only the propagated covariance can. Without this clause the app would
-        commit confident-looking phases it has no basis for, which is exactly the failure
-        mode the trust gate exists to stop. Tune it via params.trust_nsig, not by removing it.
-
-        `trust_ok` now covers the PHASE ONLY (c0 at ref_wl). That is deliberate and it is the
-        whole fix for the over-rejection: the loop corrects phase at one wavelength and never
-        reads the carrier or chirp, so gating on those threw away frames for an error it does
-        not act on. Measured over 1240 test traces, 11 of the 13 fits that fail a
-        four-coefficient grader have a CORRECT phase. Phase-only accuracy of committed fits is
-        99.84% with 0.0% of good fits declined, against 3.7% declined under the fused gate.
-
-        `shape_ok` (c1..c3) is therefore NOT checked here. It exists for consumers that
-        evaluate the fit away from ref_wl -- the chart overlay and the GHz frequency-range
-        readout -- and those must check it themselves. Folding it back in here would
-        reintroduce exactly the rejections this change removed.
-
-        `ref_offset_ok` is the ACCURACY clause, and it is the one thing here that the fit's
-        own statistics cannot express. `trust_ok` asks whether the phase at the reference is
-        PRECISE; this asks whether it is where the data actually is. When a clip shrinks the
-        core its centroid slides off the reference, and the phase quoted back there splits
-        into two populations 1.4 rad apart -- on frames with trust_ok=True, rms_frac ~0.10
-        and 97-100% inliers. Nothing else in this gate can see that, and 1.4 rad is four and
-        a half times the 0.314 rad the trust gate exists to enforce. See
-        fringe_core.REF_MAX_OFFSET_FRAC for the measurement and the threshold.
-
-        It is checked HERE rather than inside the fit on purpose: folding it into `trust_ok`
-        made `_explains` fail, which sent every clipped frame into a multi-second recovery
-        scan that could not fix it. Dropping the frame is the whole remedy.
+        Three clauses beyond the residual gates:
+          * ``trust_ok`` -- the phase at the reference is PRECISE (c0 only, the one quantity
+            the loop acts on). Not redundant with the residual: a clip costs lever arm and c0
+            goes underdetermined while the fit still reconstructs at R^2 ~ 0.96. Tune via
+            params.trust_nsig, do not remove.
+          * ``ref_offset_ok`` -- an ACCURACY (bias) clause the fit's own statistics cannot
+            express: a clip slides the core centroid off the reference and biases the phase
+            there. Checked here rather than in the fit so it drops the frame instead of
+            triggering the recovery scan.
+        ``shape_ok`` (c1..c3) is deliberately NOT checked here -- it is for consumers that
+        evaluate the fit away from ref_wl (the overlay, the RF readout), which check it
+        themselves. Folding it in re-introduces the over-rejection this gate avoids.
         """
         return (r.accepted
                 and r.trust_ok

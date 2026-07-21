@@ -27,15 +27,11 @@ log = logging.getLogger(__name__)
 WORKER_ID = "phase_tracking"
 CONSUMER_ID = "phase_tracking"
 
-# Consecutive failed fits before the loop stops driving the plate (fitting continues, so the
-# overlay stays live for the operator to drag against). At ~2-4 fps this is ~1-2 s of solid
-# failure -- long enough not to trip on a single bad frame, short enough that a real clip
-# stops corrections before the integrator walks the stage far.
+# Consecutive failed fits before the loop stops driving the plate (~1-2 s at 2-4 fps). See
+# docs for the auto-pause behaviour.
 AUTOPAUSE_FAILS = 5
-# While auto-paused the fit is skipped so the raw stream runs smoothly; this is how often a
-# single probe fit is still attempted, to notice the clip has been dragged out (or the beam
-# recovered) and resume. 1 s is imperceptible on the stream and recovers within a frame or
-# two of the fix. An operator drag resumes instantly regardless (see _on_set_config).
+# While auto-paused, attempt a single probe fit only this often, so the raw stream stays smooth
+# while still noticing a recovery. An operator config change resumes immediately regardless.
 AUTOPAUSE_RETRY_S = 1.0
 
 
@@ -114,12 +110,9 @@ class PhaseStabilizationWorker(ThreadedWorker):
             if msg.item_id != self._latest_item_id:
                 self._skipped_since_fit += 1
                 return
-            # While auto-paused, do NOT fit every frame: the fit is the heavy step
-            # (~180-400 ms) and running it on a clip it cannot solve just starves the raw
-            # spectrum stream the operator is trying to read while dragging the markers.
-            # Instead PROBE once every AUTOPAUSE_RETRY_S -- enough to notice the operator
-            # (or the beam) has fixed the clip and auto-resume, cheap enough to leave the
-            # stream smooth. A config change (a drag) resumes immediately via _on_set_config.
+            # While auto-paused, probe only once every AUTOPAUSE_RETRY_S instead of fitting
+            # every frame (the fit is heavy, ~180-400 ms), so the raw stream stays readable
+            # while the operator drags the markers.
             if self._autopaused:
                 now = time.perf_counter()
                 if now - self._last_probe_t < AUTOPAUSE_RETRY_S:
@@ -147,13 +140,8 @@ class PhaseStabilizationWorker(ThreadedWorker):
                     if result is not None:
                         self._notify(CorrectionAvailable(angle=result.angle, sign=result.sign))
             else:
-                # No commit. After enough consecutive failures, auto-pause: stop driving the
-                # plate AND stop fitting every frame (the probe in _process_spectrum keeps a
-                # slow retry going). A sustained failure means the data cannot support a phase
-                # -- a clip the operator has not yet dragged out -- and both correcting on
-                # nothing (winds the plate) and fitting flat out (starves the stream) are
-                # wrong. The overlay holds its last good fit; the operator drags the geometry
-                # and a probe fit -- or their drag -- auto-resumes.
+                # No commit. After AUTOPAUSE_FAILS in a row, auto-pause: stop driving the plate
+                # and drop to a slow probe (see docs). The overlay holds its last good fit.
                 self._consec_fail += 1
                 if not self._autopaused and self._consec_fail >= AUTOPAUSE_FAILS:
                     self._autopaused = True
@@ -171,9 +159,8 @@ class PhaseStabilizationWorker(ThreadedWorker):
     @worker_thread
     def _on_set_config(self, msg: SetStabilizationConfig) -> None:
         self._config = msg.config
-        # A new config is the operator acting -- typically dragging the clip edge or envelope
-        # centre precisely to break an auto-pause. Clear the pause and the failure streak so
-        # the very next frame is fit at full rate, instead of waiting out a probe interval.
+        # A new config means the operator is acting; clear any auto-pause and the failure
+        # streak so the next frame is fit at full rate.
         if self._autopaused:
             self._autopaused = False
             log.warning("AUTORESUME: config changed; fitting resumed at full rate")
@@ -182,9 +169,7 @@ class PhaseStabilizationWorker(ThreadedWorker):
         if self._tracker is not None:
             self._tracker = PhaseTracker(self._config)
         if self._corrector is not None:
-            # Retuned in place, not reconstructed: gain is the knob the operator turns
-            # WHILE watching the loop settle, and a fresh PhaseCorrector would be a
-            # behaviour change mid-run for a value they did not touch.
+            # Retuned in place, not reconstructed: gain is tuned live while the loop settles.
             self._corrector.target_phase = self._config.set_phase
             self._corrector.gain = self._config.loop_gain
         self._notify(ConfigSynced(config=self._config))
