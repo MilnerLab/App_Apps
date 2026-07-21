@@ -55,6 +55,11 @@ class XcorrConfig:
     """
 
     # --- probe (axis 1) — the scanned axis -----------------------------------
+    # The *base* sweep — the grating-independent delay axis. The commanded position
+    # is base + grating + probe_intercept_mm (§4.2): the probe overlap tracks the
+    # grating one-to-one, so the same base sweep lands at a different physical place
+    # at every grating step. Only the corrected position is validated against
+    # AXIS_LIMITS.
     probe_start_mm: float
     probe_stop_mm: float
     probe_step_mm: float
@@ -76,6 +81,48 @@ class XcorrConfig:
     delay_slope: float = 0.0
     #: Constant offset of the correction, mm.
     delay_intercept_mm: float = 0.0
+
+    #: Grating-tracking offset of the probe, mm. The probe overlap moves one-to-one
+    #: with the grating (the geometric path change is shared), so the commanded probe
+    #: is ``probe_base + grating + probe_intercept_mm``. The 1:1 grating term is
+    #: physical and fixed; only this intercept is configurable — it is the overlap
+    #: offset at grating = 0, and its correct-for-now value is 110 mm.
+    probe_intercept_mm: float = 110.0
+
+    # --- adaptive probe step (Nyquist-matched, per setpoint) -----------------
+    # ``probe_step_mm`` is the *finest* step. With adaptive stepping on, each
+    # setpoint's step is instead matched to the highest frequency present there, so
+    # a low-frequency setpoint is sampled coarsely and takes far fewer points. The
+    # highest instantaneous frequency at a setpoint is modelled (rough calibration,
+    # XCORR_SPEC) as:
+    #
+    #     f_max = central + bandwidth / 2                                  [Hz]
+    #     central   = freq_per_delay_ghz_per_mm    * |delay_base_mm|       [GHz]
+    #     bandwidth = freq_bw_ghz_per_grating_mm   * |grating - grating_zero_mm|
+    #
+    # and the step from the double-pass Nyquist limit, oversampled for safety:
+    #
+    #     step = c / (4 * f_max) / probe_oversample,
+    #            clamped to [probe_step_mm, probe_step_max_mm].
+    #
+    #: Turn on per-setpoint Nyquist-matched stepping. Off → every setpoint uses
+    #: ``probe_step_mm`` verbatim (the original fixed-grid behaviour).
+    adaptive_probe_step: bool = False
+    #: Samples per Nyquist interval. 1.0 = exactly Nyquist; 2.0 (the default) gives
+    #: ~4 samples per fringe for a clean Hilbert envelope and reaches the 0.2 mm floor
+    #: at ~188 GHz, so everything above that clamps to the floor.
+    probe_oversample: float = 2.0
+    #: Coarsest allowed step, mm — used at/near zero frequency where the carrier
+    #: vanishes and only the envelope needs sampling. 1.0 mm keeps the low-frequency
+    #: setpoints dense enough that the Hilbert envelope stays smooth (5 mm left it
+    #: visibly rough) — at oversample 2 this costs only ~2% more points than a 5 mm cap.
+    probe_step_max_mm: float = 1.0
+    #: Central frequency vs delay offset: GHz per mm of ``delay_base`` (0 offset = 0 Hz).
+    freq_per_delay_ghz_per_mm: float = 81.5
+    #: Bandwidth vs acceleration: GHz per mm of grating travel away from zero separation.
+    freq_bw_ghz_per_grating_mm: float = 1.905
+    #: Grating position of zero separation / zero bandwidth, mm (matches the default 30.1).
+    grating_zero_mm: float = 30.1
 
     out_dir: Path = Path(".")
 

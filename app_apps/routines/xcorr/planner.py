@@ -40,6 +40,20 @@ class Setpoint:
     delay_mm: float
     delay_base_mm: float
     delay_correction_mm: float
+    #: Added to every probe *base* position at this setpoint to get the commanded
+    #: probe position: ``grating_mm + probe_intercept_mm``. The probe overlap tracks
+    #: the grating one-to-one, so this shifts the whole base sweep per grating step.
+    probe_offset_mm: float
+    #: This setpoint's probe *base* sweep — the grating-independent delay axis. Its
+    #: step is Nyquist-matched to this setpoint's own top frequency when adaptive
+    #: stepping is on, so different setpoints can have different densities (and point
+    #: counts). Commanded position per point is ``base + probe_offset_mm``.
+    probe_base_mm: tuple[float, ...]
+    #: The step used to build ``probe_base_mm`` — recorded for provenance.
+    probe_step_mm: float
+    #: The modelled highest instantaneous frequency at this setpoint, GHz — what the
+    #: step was matched to. Zero at zero separation and zero delay offset.
+    max_freq_ghz: float
 
     @property
     def group_name(self) -> str:
@@ -62,10 +76,10 @@ class Setpoint:
 class ScanPlan:
     """Every position the run will command, in the order it will command them."""
 
-    #: Flattened outer×inner grid, in execution order.
+    #: Flattened outer×inner grid, in execution order. Each setpoint carries its own
+    #: probe sweep (``Setpoint.probe_base_mm``) — sweeps are no longer shared, because
+    #: adaptive stepping can give each setpoint a different density.
     setpoints: tuple[Setpoint, ...]
-    #: The probe sweep, identical at every setpoint.
-    probe_mm: tuple[float, ...]
     #: ``"grating"`` or ``"delay"`` — which axis got the outer loop, and why.
     outer_axis: str
     outer_reason: str
@@ -74,8 +88,18 @@ class ScanPlan:
 
     @property
     def n_points(self) -> int:
-        """Total probe points in the run — the basis for any ETA."""
-        return len(self.setpoints) * len(self.probe_mm)
+        """Total probe points across the whole run — the basis for any ETA.
+
+        Summed per setpoint, since adaptive stepping means setpoints can differ in
+        how many probe points they carry.
+        """
+        return sum(len(sp.probe_base_mm) for sp in self.setpoints)
+
+    @property
+    def probe_step_range_mm(self) -> tuple[float, float]:
+        """(finest, coarsest) probe step actually used across the run."""
+        steps = [sp.probe_step_mm for sp in self.setpoints]
+        return (min(steps), max(steps))
 
 
 def expand_range(start: float, stop: float, step: float, *, name: str) -> tuple[float, ...]:
@@ -104,6 +128,61 @@ def expand_range(start: float, stop: float, step: float, *, name: str) -> tuple[
     return tuple(start + direction * step * i for i in range(count + 1))
 
 
+#: Speed of light in mm/s — for the double-pass Nyquist step.
+_C_MM_PER_S = 299_792_458_000.0
+
+
+def max_frequency_hz(cfg: XcorrConfig, grating_mm: float, delay_base_mm: float) -> float:
+    """Modelled highest instantaneous frequency at a setpoint, in Hz.
+
+    ``central + bandwidth/2`` from the rough calibration in :class:`XcorrConfig`.
+    Central frequency is set by the delay offset (zero at ``delay_base = 0``);
+    bandwidth by the acceleration, i.e. how far the grating is from zero separation.
+    """
+    central_ghz = cfg.freq_per_delay_ghz_per_mm * abs(delay_base_mm)
+    bandwidth_ghz = cfg.freq_bw_ghz_per_grating_mm * abs(grating_mm - cfg.grating_zero_mm)
+    return (central_ghz + bandwidth_ghz / 2.0) * 1e9
+
+
+def probe_step_for(cfg: XcorrConfig, grating_mm: float, delay_base_mm: float) -> float:
+    """The probe step, mm, for one setpoint.
+
+    Fixed at ``probe_step_mm`` unless adaptive stepping is on, in which case it is the
+    double-pass Nyquist step ``c/(4 f)`` oversampled by ``probe_oversample`` and
+    clamped to ``[probe_step_mm, probe_step_max_mm]``. At zero frequency the carrier
+    vanishes and the step is capped at ``probe_step_max_mm``.
+    """
+    if not cfg.adaptive_probe_step:
+        return cfg.probe_step_mm
+    f = max_frequency_hz(cfg, grating_mm, delay_base_mm)
+    if f <= 0.0:
+        return cfg.probe_step_max_mm
+    step = _C_MM_PER_S / (4.0 * f) / cfg.probe_oversample
+    return min(max(step, cfg.probe_step_mm), cfg.probe_step_max_mm)
+
+
+def _build_setpoint(
+    cfg: XcorrConfig, grating_mm: float, delay_base_mm: float, gi: int, di: int
+) -> "Setpoint":
+    """Assemble one setpoint, including its Nyquist-matched probe sweep."""
+    step = probe_step_for(cfg, grating_mm, delay_base_mm)
+    probe_base = expand_range(cfg.probe_start_mm, cfg.probe_stop_mm, step, name="probe")
+    f_ghz = max_frequency_hz(cfg, grating_mm, delay_base_mm) / 1e9
+    correction = cfg.delay_slope * grating_mm + cfg.delay_intercept_mm
+    return Setpoint(
+        grating_index=gi,
+        delay_index=di,
+        grating_mm=grating_mm,
+        delay_mm=delay_base_mm + correction,
+        delay_base_mm=delay_base_mm,
+        delay_correction_mm=correction,
+        probe_offset_mm=grating_mm + cfg.probe_intercept_mm,
+        probe_base_mm=probe_base,
+        probe_step_mm=step,
+        max_freq_ghz=f_ghz,
+    )
+
+
 def _check_limits(positions: tuple[float, ...], role: str, label: str) -> None:
     lo, hi = AXIS_LIMITS[role]
     for i, p in enumerate(positions):
@@ -120,7 +199,6 @@ def plan_scan(cfg: XcorrConfig) -> ScanPlan:
     Every setpoint in the returned plan is known to be inside its stage's soft
     limits, so the routine never has to check again mid-run.
     """
-    probe = expand_range(cfg.probe_start_mm, cfg.probe_stop_mm, cfg.probe_step_mm, name="probe")
     grating = expand_range(
         cfg.grating_start_mm, cfg.grating_stop_mm, cfg.grating_step_mm, name="grating"
     )
@@ -130,19 +208,33 @@ def plan_scan(cfg: XcorrConfig) -> ScanPlan:
 
     if cfg.n_traces < 1:
         raise PlanError(f"n_traces must be >= 1, got {cfg.n_traces}")
+    if cfg.adaptive_probe_step and cfg.probe_step_max_mm < cfg.probe_step_mm:
+        raise PlanError(
+            f"probe_step_max_mm ({cfg.probe_step_max_mm}) is finer than the floor "
+            f"probe_step_mm ({cfg.probe_step_mm}); the clamp is inverted."
+        )
 
-    _check_limits(probe, "probe", "probe")
     _check_limits(grating, "grating", "grating")
 
-    # Only the *corrected* delay is ever commanded, so only it is worth validating.
-    # A base range that is legal on its own but illegal once corrected is exactly
-    # the mistake this catches.
-    corrected = tuple(
+    # Only the *corrected* positions are ever commanded, so only they are worth
+    # validating. The probe step affects density, not the endpoints, so validating
+    # the [start, stop] extremes against every grating covers every commanded probe
+    # position regardless of adaptive stepping. A base range that is legal on its own
+    # but illegal once the grating tracking is applied is exactly what this catches.
+    probe_extremes = (cfg.probe_start_mm, cfg.probe_stop_mm)
+    corrected_probe = tuple(
+        e + g + cfg.probe_intercept_mm
+        for g in grating
+        for e in probe_extremes
+    )
+    _check_limits(corrected_probe, "probe", "grating-tracked probe")
+
+    corrected_delay = tuple(
         base + cfg.delay_slope * g + cfg.delay_intercept_mm
         for g in grating
         for base in delay_base
     )
-    _check_limits(corrected, "delay", "grating-corrected delay")
+    _check_limits(corrected_delay, "delay", "grating-corrected delay")
 
     warnings = _plan_warnings(cfg, grating, delay_base)
 
@@ -169,20 +261,12 @@ def plan_scan(cfg: XcorrConfig) -> ScanPlan:
     )
 
     setpoints = tuple(
-        Setpoint(
-            grating_index=gi,
-            delay_index=di,
-            grating_mm=grating[gi],
-            delay_mm=delay_base[di] + cfg.delay_slope * grating[gi] + cfg.delay_intercept_mm,
-            delay_base_mm=delay_base[di],
-            delay_correction_mm=cfg.delay_slope * grating[gi] + cfg.delay_intercept_mm,
-        )
+        _build_setpoint(cfg, grating[gi], delay_base[di], gi, di)
         for gi, di in pairs
     )
 
     return ScanPlan(
         setpoints=setpoints,
-        probe_mm=probe,
         outer_axis=outer_axis,
         outer_reason=reason,
         warnings=warnings,

@@ -179,6 +179,8 @@ class XcorrRoutine(BaseRoutine):
 
     def _scan(self, plan: ScanPlan, writer: XcorrH5Writer) -> None:
         """The grid walk. Every exit path leaves the current group flushed."""
+        n_points = plan.n_points
+        points_done = 0
         for si, sp in enumerate(plan.setpoints):
             if self._abort.is_set():
                 log.info("XCORR aborted before setpoint %d/%d", si + 1, len(plan.setpoints))
@@ -187,9 +189,10 @@ class XcorrRoutine(BaseRoutine):
             utc_start = now_utc_iso()
             log.info(
                 "XCORR setpoint %d/%d: grating=%.4f mm, delay=%.4f mm (base %.4f + "
-                "correction %.4f)",
+                "correction %.4f); %d probe pts @ %.3f mm (f_max=%.1f GHz)",
                 si + 1, len(plan.setpoints), sp.grating_mm, sp.delay_mm,
                 sp.delay_base_mm, sp.delay_correction_mm,
+                len(sp.probe_base_mm), sp.probe_step_mm, sp.max_freq_ghz,
             )
 
             # Grating first, then delay: the delay position is a function of the
@@ -197,7 +200,8 @@ class XcorrRoutine(BaseRoutine):
             self._move(self._grating, sp.grating_mm, "grating")
             self._move(self._delay, sp.delay_mm, "delay")
 
-            rows, aborted = self._sweep_probe(plan, si, sp)
+            rows, aborted = self._sweep_probe(plan, si, sp, points_done, n_points)
+            points_done += len(rows)
 
             writer.write_group(
                 sp,
@@ -220,32 +224,43 @@ class XcorrRoutine(BaseRoutine):
         plan: ScanPlan,
         si: int,
         sp: Setpoint,
+        points_done: int,
+        n_points: int,
     ) -> tuple[list[tuple[float, float, float, int]], bool]:
         """Sweep the probe axis at one (grating, delay) combination.
 
-        Returns the rows collected and whether the sweep was cut short by an abort.
+        ``points_done`` is the run-wide count completed before this setpoint, so the
+        published progress is monotonic across setpoints even when their sweeps differ
+        in length. Returns the rows collected and whether an abort cut it short.
         """
+        n_probe = len(sp.probe_base_mm)
         rows: list[tuple[float, float, float, int]] = []
-        for pi, p in enumerate(plan.probe_mm):
+        for pi, p_base in enumerate(sp.probe_base_mm):
             if self._abort.is_set():
                 log.info(
                     "XCORR aborted at probe point %d/%d of setpoint %d",
-                    pi + 1, len(plan.probe_mm), si + 1,
+                    pi + 1, n_probe, si + 1,
                 )
                 return rows, True
 
-            self._move(self._probe, p, "probe")
-            mean, std, n = self._acquire_point(p)
-            rows.append((p, mean, std, n))
+            # The probe overlap tracks the grating: the base sweep is the delay axis,
+            # but the stage is commanded to base + grating + intercept (planner has
+            # already validated every such position against the soft limits).
+            p_cmd = p_base + sp.probe_offset_mm
+            self._move(self._probe, p_cmd, "probe")
+            mean, std, n = self._acquire_point(p_cmd)
+            rows.append((p_cmd, mean, std, n))
 
             self._bus.publish(XcorrProgress(
                 setpoint_index=si,
                 n_setpoints=len(plan.setpoints),
                 probe_index=pi,
-                n_probe=len(plan.probe_mm),
+                n_probe=n_probe,
+                points_done=points_done + pi + 1,
+                n_points=n_points,
                 grating_mm=sp.grating_mm,
                 delay_mm=sp.delay_mm,
-                probe_mm=p,
+                probe_mm=p_cmd,
                 v_mean_pos=mean,
             ))
         return rows, False

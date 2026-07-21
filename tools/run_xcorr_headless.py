@@ -60,7 +60,16 @@ log = logging.getLogger("run_xcorr_headless")
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--probe", nargs=3, type=float, metavar=("START", "STOP", "STEP"),
-                   default=[74.0, 76.0, 0.5], help="probe (axis 1) sweep, mm")
+                   default=[74.0, 76.0, 0.5],
+                   help="probe (axis 1) BASE sweep, mm (commanded = base + grating + intercept)")
+    p.add_argument("--probe-intercept", type=float, default=110.0,
+                   help="probe grating-tracking offset at grating=0, mm")
+    p.add_argument("--adaptive-step", action="store_true",
+                   help="Nyquist-match the probe step per setpoint (probe STEP becomes the floor)")
+    p.add_argument("--oversample", type=float, default=2.0,
+                   help="samples per Nyquist interval when --adaptive-step (default 2.0)")
+    p.add_argument("--step-max", type=float, default=1.0,
+                   help="coarsest probe step, mm, used near zero frequency (default 1.0)")
     p.add_argument("--grating", nargs=3, type=float, metavar=("START", "STOP", "STEP"),
                    default=[-30.0, -20.0, 10.0], help="grating (axis 3) range, mm")
     p.add_argument("--delay", nargs=3, type=float, metavar=("START", "STOP", "STEP"),
@@ -84,6 +93,10 @@ def build_config(a: argparse.Namespace) -> XcorrConfig:
         delay_base_start_mm=a.delay[0], delay_base_stop_mm=a.delay[1], delay_base_step_mm=a.delay[2],
         delay_slope=a.slope,
         delay_intercept_mm=a.intercept,
+        probe_intercept_mm=a.probe_intercept,
+        adaptive_probe_step=a.adaptive_step,
+        probe_oversample=a.oversample,
+        probe_step_max_mm=a.step_max,
         out_dir=a.out_dir,
         n_traces=a.n_traces,
         settle_s=a.settle,
@@ -201,19 +214,25 @@ def _plan_only(cfg: XcorrConfig) -> int:
         log.error("plan rejected: %s", exc)
         return 2
 
+    fine, coarse = plan.probe_step_range_mm
     print(f"setpoints      : {len(plan.setpoints)}")
-    print(f"probe points   : {len(plan.probe_mm)}")
+    print(f"probe step     : {fine:.3f} .. {coarse:.3f} mm")
     print(f"total points   : {plan.n_points}")
     print(f"outer axis     : {plan.outer_axis}  ({plan.outer_reason})")
     for w in plan.warnings:
         print(f"WARNING        : {w}")
     print()
     for i, s in enumerate(plan.setpoints):
+        p_lo = s.probe_base_mm[0] + s.probe_offset_mm
+        p_hi = s.probe_base_mm[-1] + s.probe_offset_mm
         print(f"  [{i:3d}] {s.group_name}  grating={s.grating_mm:9.4f}  "
               f"delay={s.delay_mm:9.4f}  (base {s.delay_base_mm:.4f} "
-              f"{s.delay_correction_mm:+.4f})")
-    print(f"\n  probe: {plan.probe_mm[0]:.4f} .. {plan.probe_mm[-1]:.4f} mm "
-          f"({len(plan.probe_mm)} points)")
+              f"{s.delay_correction_mm:+.4f})  f_max={s.max_freq_ghz:6.1f}GHz  "
+              f"step={s.probe_step_mm:.3f}  n={len(s.probe_base_mm):4d}  "
+              f"probe[{p_lo:8.3f}..{p_hi:8.3f}]")
+    fine, coarse = plan.probe_step_range_mm
+    print(f"\n  probe: [{cfg.probe_start_mm:.3f} .. {cfg.probe_stop_mm:.3f}] mm base span; "
+          f"step {fine:.3f}..{coarse:.3f} mm; commanded = base + grating + intercept")
     return 0
 
 

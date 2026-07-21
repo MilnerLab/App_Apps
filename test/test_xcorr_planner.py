@@ -25,7 +25,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app_apps.routines.xcorr.config import XcorrConfig  # noqa: E402
-from app_apps.routines.xcorr.planner import PlanError, expand_range, plan_scan  # noqa: E402
+from app_apps.routines.xcorr.planner import (  # noqa: E402
+    PlanError,
+    expand_range,
+    max_frequency_hz,
+    plan_scan,
+    probe_step_for,
+)
 
 
 # --- tiny harness ---------------------------------------------------------
@@ -92,8 +98,40 @@ def test_expand_range_rejects_non_positive_step():
 # --- limit validation (R2/S1) ---------------------------------------------
 
 def test_probe_beyond_soft_limit_is_refused_naming_the_offender():
-    cfg = make_cfg(probe_start_mm=280.0, probe_stop_mm=300.0, probe_step_mm=10.0)
+    # Neutralise the grating tracking (grating=0, intercept=0) so the base sweep is
+    # commanded verbatim and the offending value is the raw probe position.
+    cfg = make_cfg(
+        probe_start_mm=280.0, probe_stop_mm=300.0, probe_step_mm=10.0,
+        grating_start_mm=0.0, grating_stop_mm=0.0, grating_step_mm=1.0,
+        probe_intercept_mm=0.0,
+    )
     raises(PlanError, lambda: plan_scan(cfg), "probe", "300.0000", "290.5")
+
+
+def test_probe_made_illegal_by_grating_tracking_is_caught():
+    """The base sweep is inside the probe limits, but grating + intercept pushes it out.
+
+    The probe analogue of the delay-correction check: validating the base range alone
+    would pass a sweep the stage cannot actually reach once it tracks the grating.
+    """
+    cfg = make_cfg(
+        probe_start_mm=170.0, probe_stop_mm=170.0, probe_step_mm=1.0,   # legal alone
+        grating_start_mm=30.0, grating_stop_mm=30.0, grating_step_mm=1.0,
+        probe_intercept_mm=110.0,                                       # 170+30+110=310
+    )
+    raises(PlanError, lambda: plan_scan(cfg), "grating-tracked probe")
+
+
+def test_probe_offset_tracks_grating_one_to_one():
+    cfg = make_cfg(
+        probe_start_mm=0.0, probe_stop_mm=10.0, probe_step_mm=5.0,
+        grating_start_mm=-20.0, grating_stop_mm=0.0, grating_step_mm=10.0,
+        probe_intercept_mm=110.0,
+    )
+    plan = plan_scan(cfg)
+    for s in plan.setpoints:
+        assert s.probe_base_mm == (0.0, 5.0, 10.0)  # base sweep is grating-independent
+        assert approx(s.probe_offset_mm, s.grating_mm + 110.0)
 
 
 def test_grating_beyond_soft_limit_is_refused():
@@ -116,8 +154,12 @@ def test_legal_delay_base_made_illegal_by_the_correction_is_caught():
 
 
 def test_endpoint_exactly_on_a_limit_is_accepted():
-    cfg = make_cfg(probe_start_mm=-9.5, probe_stop_mm=290.5, probe_step_mm=100.0)
-    assert approx(plan_scan(cfg).probe_mm[0], -9.5)
+    cfg = make_cfg(
+        probe_start_mm=-9.5, probe_stop_mm=290.5, probe_step_mm=100.0,
+        grating_start_mm=0.0, grating_stop_mm=0.0, grating_step_mm=1.0,
+        probe_intercept_mm=0.0,
+    )
+    assert approx(plan_scan(cfg).setpoints[0].probe_base_mm[0], -9.5)
 
 
 def test_n_traces_must_be_at_least_one():
@@ -180,7 +222,7 @@ def test_grid_is_fully_flattened_and_counted():
     )
     plan = plan_scan(cfg)
     assert len(plan.setpoints) == 4, len(plan.setpoints)
-    assert len(plan.probe_mm) == 5, len(plan.probe_mm)
+    assert all(len(sp.probe_base_mm) == 5 for sp in plan.setpoints)
     assert plan.n_points == 20
 
 
@@ -237,6 +279,65 @@ def test_physical_slope_does_not_warn():
         delay_slope=0.005,  # 0.05 mm per 10 mm — the real correction
     )
     assert plan_scan(cfg).warnings == ()
+
+
+# --- frequency model & adaptive probe step --------------------------------
+
+def test_frequency_model_central_and_bandwidth():
+    cfg = make_cfg()
+    # zero separation, zero offset -> zero frequency
+    assert approx(max_frequency_hz(cfg, 30.1, 0.0), 0.0)
+    # central only: 81.5 GHz/mm * 1 mm offset
+    assert approx(max_frequency_hz(cfg, 30.1, 1.0), 81.5e9)
+    # bandwidth only: 1.905 GHz/mm * 105 mm, halved
+    assert approx(max_frequency_hz(cfg, -74.9, 0.0), (1.905 * 105.0 / 2.0) * 1e9)
+
+
+def test_non_adaptive_uses_the_fixed_step_at_every_setpoint():
+    plan = plan_scan(make_cfg(probe_step_mm=2.5))  # adaptive off by default
+    assert all(approx(sp.probe_step_mm, 2.5) for sp in plan.setpoints)
+    # sweeps are identical when the step is fixed
+    first = plan.setpoints[0].probe_base_mm
+    assert all(sp.probe_base_mm == first for sp in plan.setpoints)
+
+
+def test_adaptive_step_caps_at_zero_frequency():
+    cfg = make_cfg(adaptive_probe_step=True, probe_step_mm=0.2, probe_step_max_mm=5.0)
+    assert approx(probe_step_for(cfg, 30.1, 0.0), 5.0)  # no carrier -> coarsest
+
+
+def test_adaptive_step_clamps_to_floor_at_high_frequency():
+    cfg = make_cfg(adaptive_probe_step=True, probe_step_mm=0.2, probe_oversample=1.5)
+    # ~344 GHz — Nyquist step falls below the 0.2 mm floor, so it clamps up.
+    assert approx(probe_step_for(cfg, -74.9, 3.0), 0.2)
+
+
+def test_adaptive_step_is_between_floor_and_cap_mid_band():
+    cfg = make_cfg(adaptive_probe_step=True, probe_step_mm=0.2, probe_step_max_mm=5.0,
+                   probe_oversample=1.5)
+    step = probe_step_for(cfg, 30.1, 1.0)  # 81.5 GHz
+    assert 0.2 < step < 5.0, step
+    # coarser than a low-freq point is finer? high freq -> finer step
+    assert probe_step_for(cfg, 30.1, 1.0) < probe_step_for(cfg, 30.1, 0.2)
+
+
+def test_adaptive_stepping_cuts_total_points_on_a_low_frequency_run():
+    common = dict(
+        probe_start_mm=0.0, probe_stop_mm=100.0, probe_step_mm=0.2,
+        grating_start_mm=30.1, grating_stop_mm=30.1, grating_step_mm=1.0,
+        delay_base_start_mm=0.0, delay_base_stop_mm=0.0, delay_base_step_mm=1.0,
+    )
+    fixed = plan_scan(make_cfg(**common))
+    adaptive = plan_scan(make_cfg(adaptive_probe_step=True, probe_step_max_mm=5.0, **common))
+    assert adaptive.n_points < fixed.n_points
+    # zero-frequency setpoint collapses to the 5 mm cap: 100/5 + 1 = 21 pts vs 501
+    assert adaptive.n_points == 21, adaptive.n_points
+    assert fixed.n_points == 501, fixed.n_points
+
+
+def test_adaptive_rejects_inverted_step_clamp():
+    cfg = make_cfg(adaptive_probe_step=True, probe_step_mm=1.0, probe_step_max_mm=0.5)
+    raises(PlanError, lambda: plan_scan(cfg), "inverted")
 
 
 # --- runner ---------------------------------------------------------------

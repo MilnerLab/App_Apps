@@ -13,9 +13,9 @@ Layout (§6.1)::
     ├─ /provenance/{esp301,scope}
     └─ /scans/g####_d####/  one group per (grating, delay) combination
         ├─ (attrs) grating_mm, delay_mm, delay_base_mm, delay_correction_mm,
-        │          grating_index, delay_index, n_traces_per_point,
-        │          utc_start, utc_end, status
-        ├─ probe_mm      float64[n]
+        │          probe_offset_mm, probe_step_mm, max_freq_ghz, grating_index,
+        │          delay_index, n_traces_per_point, utc_start, utc_end, status
+        ├─ probe_mm      float64[n]   (commanded; base = probe_mm - probe_offset_mm)
         ├─ v_mean_pos    float64[n]
         ├─ v_std         float64[n]
         └─ n_traces      int32[n]
@@ -147,8 +147,12 @@ class XcorrH5Writer:
         g.attrs["outer_axis"] = plan.outer_axis
         g.attrs["outer_reason"] = plan.outer_reason
         g.attrs["n_setpoints"] = len(plan.setpoints)
-        g.attrs["n_probe_points"] = len(plan.probe_mm)
         g.attrs["n_points_total"] = plan.n_points
+        # Probe point count is per-setpoint under adaptive stepping, so record the
+        # step range rather than a single count (which no longer exists run-wide).
+        fine, coarse = plan.probe_step_range_mm
+        g.attrs["probe_step_min_mm"] = fine
+        g.attrs["probe_step_max_mm"] = coarse
         g.attrs["plan_warnings"] = list(plan.warnings)
         self.file.flush()
 
@@ -193,6 +197,12 @@ class XcorrH5Writer:
         g.attrs["delay_mm"] = setpoint.delay_mm
         g.attrs["delay_base_mm"] = setpoint.delay_base_mm
         g.attrs["delay_correction_mm"] = setpoint.delay_correction_mm
+        # probe_mm holds the *commanded* positions; subtract this to recover the
+        # grating-independent base delay axis (probe_offset = grating + intercept).
+        g.attrs["probe_offset_mm"] = setpoint.probe_offset_mm
+        # This setpoint's Nyquist-matched sampling and the frequency it was matched to.
+        g.attrs["probe_step_mm"] = setpoint.probe_step_mm
+        g.attrs["max_freq_ghz"] = setpoint.max_freq_ghz
         g.attrs["grating_index"] = setpoint.grating_index
         g.attrs["delay_index"] = setpoint.delay_index
         g.attrs["n_traces_per_point"] = n_traces_per_point

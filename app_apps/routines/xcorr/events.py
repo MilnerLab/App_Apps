@@ -12,24 +12,24 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class XcorrProgress:
-    """Published once per completed probe point."""
+    """Published once per completed probe point.
+
+    ``points_done`` / ``n_points`` are carried explicitly rather than derived: with
+    adaptive stepping each setpoint can have a different number of probe points, so
+    ``setpoint_index * n_probe`` no longer gives a run-wide count. ``n_probe`` is the
+    count for *this* setpoint.
+    """
 
     setpoint_index: int
     n_setpoints: int
     probe_index: int
     n_probe: int
+    points_done: int
+    n_points: int
     grating_mm: float
     delay_mm: float
     probe_mm: float
     v_mean_pos: float
-
-    @property
-    def points_done(self) -> int:
-        return self.setpoint_index * self.n_probe + self.probe_index + 1
-
-    @property
-    def n_points(self) -> int:
-        return self.n_setpoints * self.n_probe
 
 
 @dataclass(frozen=True)
