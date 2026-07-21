@@ -27,6 +27,21 @@ LOOP_GAIN = 0.05
 # over-correction on its face: more than the whole measured error, per frame, into a loop
 # that already has ~0.5 s of dead time.
 GAIN_MIN, GAIN_MAX = 0.01, 1.0
+# Hard ceiling on a SINGLE correction, in degrees of plate.
+#
+# Note what this is and is not. A single step is already bounded: `phase_error` is wrapped
+# to (-pi, pi], so the largest step the arithmetic below can produce is
+# 180/4 * gain = 45*gain degrees -- 2.25 deg at the default gain, and this cap never binds
+# there. It binds only when the operator has wound `loop_gain` toward GAIN_MAX, where a
+# single frame could otherwise ask for 45 deg, i.e. half a wave of phase in one move on a
+# loop that already has ~0.5 s of dead time.
+#
+# It is therefore NOT the fix for a plate that winds through whole turns: that failure is
+# an ACCUMULATION of many small, correctly-sized steps that all point the same way, and no
+# per-step cap can see it. The accumulation limit lives where the absolute position is
+# known -- `RgvHandle.RGV_MAX_DEG`. This is only the guard against one frame moving the
+# plate a long way on a bad number.
+MAX_STEP_DEG = 5.0
 
 
 @dataclass(frozen=True)
@@ -84,5 +99,9 @@ class PhaseCorrector:
 
     def _convert_phase_to_hwp(self, phase: Angle) -> Angle:
         hwp_deg = CORRECTION_SIGN * phase.Deg * CONVERSION_CONST * self._gain
+        # Clamped, not rejected: a step this large still points the right way, and
+        # refusing it would stall the loop exactly when it has the most to correct.
+        # See MAX_STEP_DEG -- this does not bind at the default gain.
+        hwp_deg = min(max(hwp_deg, -MAX_STEP_DEG), MAX_STEP_DEG)
         # wrap=False: an increment is not a point on the circle.
         return Angle(hwp_deg, AngleUnit.DEG, wrap=False)

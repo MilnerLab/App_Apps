@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from base_core.framework.events.event_bus import EventBus
 from base_core.ipc.message import OKReply
 from base_core.ipc.worker_handle import BaseWorkerHandle
@@ -19,6 +21,20 @@ from app_apps.io.control_readout.rgv.events import (
     RequestRotateRGV,
     RgvWorkerStateChanged,
 )
+
+log = logging.getLogger(__name__)
+
+# Travel limit of the RGV100BL, in degrees either side of home. Until 2026-07-20 this
+# number existed only as a COMMENT here and nothing enforced it: `_on_request_rotate`
+# accumulated unbounded increments and handed whatever came out straight to `move_to`.
+# The phase loop emits a correction on every committed frame (~4/s), so a fault that
+# keeps the sign constant -- a biased phase readout, an inverted CORRECTION_SIGN, a
+# spectrometer that stops producing usable frames mid-move -- winds the plate steadily
+# with nothing to stop it. Operators saw the plate take itself through multiple full
+# turns. Whatever starts that, a rotator asked to leave its own travel range is ALWAYS
+# a fault, so it is refused here: this is the last point in the chain that knows what
+# the hardware can physically do.
+RGV_MAX_DEG = 168.0
 
 
 class RgvHandle(BaseWorkerHandle):
@@ -61,8 +77,24 @@ class RgvHandle(BaseWorkerHandle):
         # event.angle is a *relative* increment; translate to an absolute target
         # against the last known plate position (the worker moves absolutely).
         base = self._current_angle if self._current_angle is not None else Angle(0, AngleUnit.DEG)
-        # wrap=False: this is a position on the ±168° stage, not a circular angle.
-        target = Angle(base.Deg + event.angle.Deg, AngleUnit.DEG, wrap=False)
+        # wrap=False: this is a position on the ±RGV_MAX_DEG stage, not a circular angle.
+        # Wrapping here would be the worst possible failure -- a plate at +170° would come
+        # back as -190° and the stage would drive most of a turn the WRONG way to reach it.
+        want = base.Deg + event.angle.Deg
+        clamped = min(max(want, -RGV_MAX_DEG), RGV_MAX_DEG)
+        if clamped != want:
+            # Loud, and every time: the loop is asking for travel the stage does not have,
+            # which means the phase readout feeding it is wrong (or the sample drifted far
+            # enough that the plate genuinely cannot follow). Silently saturating would
+            # leave the loop pushing against a wall with the chart showing an error that
+            # never closes -- which is exactly the symptom that is hard to diagnose.
+            log.warning(
+                "RGV travel limit: correction %+.3f deg from %.3f deg wants %.3f deg, "
+                "outside +-%.1f deg. Clamped to %.3f. The phase loop is winding the plate "
+                "-- check the fringe fit before re-running.",
+                event.angle.Deg, base.Deg, want, RGV_MAX_DEG, clamped,
+            )
+        target = Angle(clamped, AngleUnit.DEG, wrap=False)
         # Optimistic: keeps back-to-back corrections accumulating before the
         # read-back lands. Overwritten by the true angle in _on_angle_update.
         self._current_angle = target

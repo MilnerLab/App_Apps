@@ -38,6 +38,14 @@ class FringeFitParams(PrimitiveSerde):
                                        # aligning; raising past ~5 buys little accuracy and
                                        # costs a lot of yield.
     lambda_ref: Length = field(default_factory=lambda: Length(802.0, Prefix.NANO))
+    # --- operator-dragged analysis geometry (see fringe_core) ---
+    # env_center: the envelope/phase anchor, pinned so a one-sided clip cannot drag it (the
+    # fit's origin l0 is set here and muU is bounded to +-ENV_CENTRE_TOL of it). Dragged live
+    # on the chart; default is the nominal beam centre. manual_cut_left: the operator-dragged
+    # clip edge (nm) -- fringes below it are excluded from the fit. None => no manual cut, and
+    # since the auto-detector is unreliable here, no cut at all. Only left cuts are physical.
+    env_center: float = fc.ENV_CENTRE_DEFAULT      # nm
+    manual_cut_left: float | None = None           # nm, or None
 
     # --- committed fit outputs (results; drive the overlay + phase readout) ---
     pU: list[float] = field(default_factory=lambda: [0.0, 0.0, 1.0, 0.0])   # upper env Gaussian
@@ -141,8 +149,8 @@ class FringeFitParams(PrimitiveSerde):
                 kwargs[f.name] = [float(x) for x in v[f.name]]
             elif f.name in ("ref_fallback", "shape_ok"):
                 kwargs[f.name] = bool(v[f.name])
-            elif f.name in ("cut_left", "cut_right"):
-                # Genuinely optional: None means no knife edge was found on that side.
+            elif f.name in ("cut_left", "cut_right", "manual_cut_left"):
+                # Genuinely optional: None means no knife edge / no manual cut on that side.
                 # These must NOT go through float() -- that is what broke the decode.
                 kwargs[f.name] = None if v[f.name] is None else float(v[f.name])
             else:
@@ -196,9 +204,23 @@ class StabilizationConfig(PrimitiveSerde):
         evaluate the fit away from ref_wl -- the chart overlay and the GHz frequency-range
         readout -- and those must check it themselves. Folding it back in here would
         reintroduce exactly the rejections this change removed.
+
+        `ref_offset_ok` is the ACCURACY clause, and it is the one thing here that the fit's
+        own statistics cannot express. `trust_ok` asks whether the phase at the reference is
+        PRECISE; this asks whether it is where the data actually is. When a clip shrinks the
+        core its centroid slides off the reference, and the phase quoted back there splits
+        into two populations 1.4 rad apart -- on frames with trust_ok=True, rms_frac ~0.10
+        and 97-100% inliers. Nothing else in this gate can see that, and 1.4 rad is four and
+        a half times the 0.314 rad the trust gate exists to enforce. See
+        fringe_core.REF_MAX_OFFSET_FRAC for the measurement and the threshold.
+
+        It is checked HERE rather than inside the fit on purpose: folding it into `trust_ok`
+        made `_explains` fail, which sent every clipped frame into a multi-second recovery
+        scan that could not fix it. Dropping the frame is the whole remedy.
         """
         return (r.accepted
                 and r.trust_ok
+                and r.ref_offset_ok
                 and r.rms_frac < self.rms_frac_threshold
                 and r.inlier_pct > self.inlier_threshold)
 

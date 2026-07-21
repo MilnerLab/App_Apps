@@ -42,6 +42,19 @@ class ConfigSynced(Message):
 
 @register
 @dataclass(frozen=True)
+class StabilizationAutoPaused(Message):
+    """The loop stopped sending corrections after too many consecutive failed fits.
+
+    Fitting and the overlay keep running (so the operator can see the spectrum and drag the
+    envelope centre / clip edge to recover); only the corrections to the plate are held.
+    ``paused`` False is the resume signal, emitted when a fit commits again.
+    """
+    paused: bool = True
+    consecutive_failures: int = 0
+
+
+@register
+@dataclass(frozen=True)
 class SetStabilizationConfig(Request[OKReply]):
     config: StabilizationConfig = None  # type: ignore[assignment]
 

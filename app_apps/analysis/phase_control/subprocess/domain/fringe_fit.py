@@ -29,7 +29,6 @@ file across whole. Do not patch this side.
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -44,6 +43,7 @@ phase_poly = fc.phase_poly
 signal_model = fc.signal_model
 baseline_anchor = fc.baseline_anchor
 ReferencePolicy = fc.ReferencePolicy
+ClipCache = fc.ClipCache
 
 
 @dataclass(frozen=True)
@@ -126,6 +126,16 @@ class FringeFitResult:
                                               # never assume 802: a clip near the core moves
                                               # it to the core centroid.
     ref_fallback: bool = False                # True => ref_wl moved off the spectral centre
+    ref_offset_nm: float = 0.0                # |ref_primary - l0|: how far the fitted core
+                                              # sits from the reference the phase is wanted
+                                              # at. The ACCURACY gate's input.
+    ref_offset_frac: float = 0.0              # ...as a fraction of the core half-span.
+    ref_offset_ok: bool = True                # False => the core drifted off the reference,
+                                              # so the phase there would be biased by the
+                                              # crop rather than measured. Enforced by
+                                              # StabilizationConfig.accepts, NOT by the fit:
+                                              # see fringe_core.REF_MAX_OFFSET_FRAC.
+    ref_offset_msg: str = ""                  # ...spelled out, for whoever drops the frame
     csig_sigma: tuple[float, float, float, float] = (0.0,) * 4   # 1-sigma on c0..c3 at ref_wl
     trunc_side: str = "none"                  # clipped arm: none/left/right/both/all/unknown
     trunc_hits_core: bool = False             # the clip landed where the phase wanted to be
@@ -168,6 +178,9 @@ def analyze_trace(
     anchor: tuple[float, float] | None = None,
     ref_policy: fc.ReferencePolicy | None = None,
     lambda_ref_nm: float | None = None,
+    clip_cache: fc.ClipCache | None = None,
+    env_center: float | None = None,
+    manual_cut_left: float | None = None,
 ) -> FringeFitResult:
     """Fit one already-windowed trace. Always a cold, independent fit.
 
@@ -188,23 +201,32 @@ def analyze_trace(
     ``ref_policy`` is a ``ReferencePolicy`` carried ACROSS frames by the caller, so the
     reported reference cannot chatter between two wavelengths. Omit it and the reference
     falls back immediately.
+
+    ``clip_cache`` is a ``ClipCache``, likewise carried across frames by the caller. It
+    remembers the knife edge in WAVELENGTH so a clipped frame does not have to re-run the
+    ~645 ms recovery scan to rediscover a knife that has not moved. Omitting it was the
+    live bug found 2026-07-20: the cache was fully implemented here and never passed, so
+    every frame scanned cold, the scan is under a wall-clock budget, and the edge was
+    therefore found on some frames and missed on others within the same second -- which
+    reads as an intermittent detector and is really an unwired cache. The cache can only
+    ever be consulted on a frame whose UNCUT fit already failed ``_explains``, so a stale
+    edge cannot silently steer a clean frame; see ``fringe_core._analyze_cached``.
     """
-    t_wall0 = time.perf_counter()
     try:
         R = fc.analyze(
             np.asarray(wl, dtype=float), np.asarray(intensity, dtype=float),
             anchor=anchor, ref_policy=ref_policy,
             trust_nsig=t.trust_nsig, trunc_threshold=t.trunc_threshold,
-            ref_primary=lambda_ref_nm,
+            ref_primary=lambda_ref_nm, clip_cache=clip_cache,
+            env_center=env_center, manual_cut_left=manual_cut_left,
         )
     except Exception as e:  # fringe_core already guards its own internals; belt and braces
-        log.warning("FITDIAG rejected: %s: %s", type(e).__name__, e)
+        log.exception("analyze_trace failed: %s", type(e).__name__)
         return rejected("error", f"{type(e).__name__}: {e}")
 
     status = R.get("status", "error")
     if R.get("csig") is None:
         # Degenerate trace (dead window / too few points / non-finite). Not an error.
-        log.warning("FITDIAG rejected [%s]: %s", status, R.get("msg", ""))
         return rejected(status, R.get("msg", ""))
 
     half = np.asarray(R["half"], float)
@@ -219,45 +241,6 @@ def analyze_trace(
     trunc = R.get("trunc") or {}
     applied_lo, applied_hi = fc.applied_cuts(trunc)
     ref_wl = float(R["ref_wl"])
-
-    t_wall = (time.perf_counter() - t_wall0) * 1e3
-
-    if log.isEnabledFor(logging.WARNING):
-        # Log `csig_at_centre`, NOT `csig`. They are the SAME fit expressed about different
-        # origins: `csig` sits at the polynomial's internal origin, which moves with the
-        # fitted core, so plotting it frame to frame produces a two-cluster split that looks
-        # like a fit instability and is not one. `csig_at_centre` is the answer at `ref_wl`
-        # -- the number the loop actually locks to.
-        c = R.get("csig_at_centre")
-        c = R["csig"] if c is None else c
-        # `t_run` is timed INSIDE the winning fit, so on a recovering frame it EXCLUDES the
-        # candidates the recovery scan rejected -- measured 5x under-report (43 vs 212 ms).
-        # `wall` is the honest per-frame cost; keep both, the gap IS the recovery cost.
-        log.warning(
-            "FITDIAG core=%d span=%.1fnm q=%d null=%s | c@ref=[%.4g,%.4g,%.4g,%.4g] "
-            "| ref=%.2fnm%s l0=%.2f trust=%s shape=%s | trunc=%s%s%s%s%s%s "
-            "| rms=%.1f rms_frac=%.3f inl=%.0f%% fit=%.0fms trunc=%.0fms wall=%.0fms",
-            len(R["x"]), float(R["x"][-1] - R["x"][0]), R["order"], R["has_null"],
-            c[0], c[1], c[2], c[3], ref_wl,
-            " (MOVED off centre)" if R["ref_fallback"] else "",
-            float(R.get("l0", float("nan"))),
-            R["trust_ok"], R.get("shape_ok", "?"), trunc.get("side", "?"),
-            # HITS-CORE = the clip landed where the phase wanted to be fit (shorter lever
-            # arm). HITS-FIT = dead samples are actually IN the fitted set. Both are logged
-            # because which one predicts a bad frame on hardware is an OPEN QUESTION, and
-            # this run is what answers it.
-            " CUT[%s,%s]" % ("" if applied_lo is None else "%.2f" % applied_lo,
-                             "" if applied_hi is None else "%.2f" % applied_hi)
-            if (applied_lo is not None or applied_hi is not None) else "",
-            " HITS-CORE" if trunc.get("hits_core") else "",
-            " HITS-FIT" if trunc.get("hits_fit") else "",
-            " RECOVERED" if R.get("recovered") else "",
-            # Did the hits_core trigger fire, and did its improvement guard accept the cut?
-            " HC-CUT" if R.get("hc_scan") else (" HC-DECLINED" if R.get("hc_scan_declined")
-                                                else ""),
-            rms_sig, rms_frac, inlier_pct, R.get("t_run", float("nan")),
-            R.get("t_trunc", float("nan")), t_wall,
-        )
 
     return FringeFitResult(
         accepted=True,
@@ -275,6 +258,10 @@ def analyze_trace(
         shape_ok=bool(R.get("shape_ok", False)),
         ref_wl=ref_wl,
         ref_fallback=bool(R["ref_fallback"]),
+        ref_offset_nm=float(R.get("ref_offset_nm", 0.0)),
+        ref_offset_frac=float(R.get("ref_offset_frac", 0.0)),
+        ref_offset_ok=bool(R.get("ref_offset_ok", True)),
+        ref_offset_msg=str(R.get("ref_offset_msg", "")),
         csig_sigma=tuple(float(v) for v in R["csig_sigma"]),  # type: ignore[arg-type]
         trunc_side=str(trunc.get("side", "unknown")),
         trunc_hits_core=bool(trunc.get("hits_core", False)),

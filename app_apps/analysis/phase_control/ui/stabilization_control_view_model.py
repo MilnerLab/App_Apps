@@ -14,7 +14,11 @@ from base_core.math.models import Angle
 from base_core.quantities.constants import SPEED_OF_LIGHT
 from base_core.quantities.enums import Prefix
 from base_qt.app.dispatcher import QtDispatcher
-from app_apps.analysis.phase_control.events import PhaseTrackingStateChanged, StabilizationConfigChanged
+from app_apps.analysis.phase_control.events import (
+    PhaseTrackingStateChanged,
+    StabilizationAutoPauseChanged,
+    StabilizationConfigChanged,
+)
 from app_apps.analysis.phase_control.subprocess.domain import fringe_core as fc
 from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import display_curve
 
@@ -28,6 +32,7 @@ class StabilizationControlViewModel(QObject):
     config_updated = Signal()              # subprocess synced new fit params
     plot_mode_changed = Signal(bool)       # plot-in-frequency toggled
     set_phase_curve_changed = Signal(bool)  # red set-phase overlay toggled
+    auto_pause_changed = Signal(bool, int)  # loop auto-paused / resumed (paused, fails)
 
     def __init__(
         self,
@@ -44,13 +49,21 @@ class StabilizationControlViewModel(QObject):
         self._plot_item: pg.PlotItem | None = None
         self._set_phase_series: pg.PlotDataItem | None = None
         self._current_phase_series: pg.PlotDataItem | None = None
+        self._upper_env_series: pg.PlotDataItem | None = None
+        self._lower_env_series: pg.PlotDataItem | None = None
         self._rf_label: pg.TextItem | None = None
         self._knife_lines: list[pg.InfiniteLine] = []
+        # Operator-dragged geometry: the envelope/phase centre pin and the manual clip edge.
+        self._env_center_line: pg.InfiniteLine | None = None
+        self._cut_line: pg.InfiniteLine | None = None
+        self._autopaused = False
         self._active = False
         self._plot_frequency = False
         self._show_set_phase = True
+        self._autopause_label: pg.TextItem | None = None
         self._unsub = bus.subscribe(PhaseTrackingStateChanged, self._on_state_changed)
         self._unsub_cfg = bus.subscribe(StabilizationConfigChanged, self._on_config_updated)
+        self._unsub_ap = bus.subscribe(StabilizationAutoPauseChanged, self._on_auto_pause)
 
     def set_chart(self, plot_item: pg.PlotItem) -> None:
         self._plot_item = plot_item
@@ -75,6 +88,13 @@ class StabilizationControlViewModel(QObject):
         self._rf_label = pg.TextItem(color=QColor("white"), anchor=(0, 0))
         self._rf_label.setZValue(100)
 
+        # Auto-pause banner: red, pinned top-centre in SCREEN coords (same reason as the RF
+        # label -- the y axis rescales per frame). Hidden until the worker reports it stopped
+        # driving the plate; tells the operator to drag the clip edge / centre to recover.
+        self._autopause_label = pg.TextItem(color=QColor("red"), anchor=(0.5, 0))
+        self._autopause_label.setZValue(101)
+        self._autopause_label.setVisible(False)
+
         # Knife-edge markers: where the clip was CUT, i.e. the boundary of the data the
         # committed fit actually rests on. Two lines, one per side; a one-sided clip shows
         # one, an unclipped frame shows none. Cosmetic pen for the same reason as the curves
@@ -96,6 +116,36 @@ class StabilizationControlViewModel(QObject):
             line.setZValue(50)
             line.setVisible(False)
             self._knife_lines.append(line)
+
+        # Fitted envelopes: the upper (intensity bump) and lower (bump minus contrast gap)
+        # Gaussians the fringes ride between. Dim cyan, thin -- context for the operator, not
+        # the headline. The fit rides between them; drawing them makes a bad envelope centre
+        # or a clip visible directly instead of inferred from the phase curves.
+        up_pen = QPen(QColor(0, 200, 200, 130)); up_pen.setCosmetic(True)
+        lo_pen = QPen(QColor(0, 200, 200, 130)); lo_pen.setCosmetic(True)
+        self._upper_env_series = pg.PlotDataItem(pen=up_pen)
+        self._lower_env_series = pg.PlotDataItem(pen=lo_pen)
+
+        # Draggable envelope centre (the phase anchor pin). YELLOW solid, movable: the
+        # operator drags it to the beam centre and the fit is anchored there, so a one-sided
+        # clip cannot pull it. Released -> committed to config.params.env_center and pushed.
+        ec_pen = QPen(QColor("yellow")); ec_pen.setCosmetic(True)
+        self._env_center_line = pg.InfiniteLine(
+            angle=90, movable=True, pen=ec_pen, label="envelope centre",
+            labelOpts={"color": "yellow", "position": 0.06, "movable": False})
+        self._env_center_line.setZValue(60)
+        self._env_center_line.sigPositionChangeFinished.connect(self._on_env_center_moved)
+
+        # Draggable manual clip edge. MAGENTA dashed, movable: drag it to where the beam is
+        # clipped and everything blueward is excluded from the fit. Only left cuts are
+        # physical here. Released -> committed to config.params.manual_cut_left and pushed.
+        cut_pen = QPen(QColor("magenta")); cut_pen.setStyle(Qt.PenStyle.DashLine)
+        cut_pen.setCosmetic(True)
+        self._cut_line = pg.InfiniteLine(
+            angle=90, movable=True, pen=cut_pen, label="clip edge (drag)",
+            labelOpts={"color": "magenta", "position": 0.12, "movable": False})
+        self._cut_line.setZValue(60)
+        self._cut_line.sigPositionChangeFinished.connect(self._on_cut_moved)
 
     def set_active(self, active: bool) -> None:
         """Attach/detach the spectrum_fit overlay curves to the shared chart."""
@@ -141,28 +191,42 @@ class StabilizationControlViewModel(QObject):
     def _attach_curves(self) -> None:
         if self._plot_item is None or self._set_phase_series is None or self._current_phase_series is None:
             return
-        for series in (self._set_phase_series, self._current_phase_series):
+        for series in (self._set_phase_series, self._current_phase_series,
+                       self._upper_env_series, self._lower_env_series):
             # Excluded from auto-range so the view stays driven by the live spectrum,
             # not by whatever the fit curves happen to be before a config is applied.
             self._plot_item.addItem(series, ignoreBounds=True)
         for line in self._knife_lines:
             self._plot_item.addItem(line, ignoreBounds=True)
+        for line in (self._env_center_line, self._cut_line):
+            if line is not None:
+                self._plot_item.addItem(line, ignoreBounds=True)
         # Re-attaching builds fresh items; carry the operator's choice across.
         self._set_phase_series.setVisible(self._show_set_phase)
         if self._rf_label is not None:
             self._rf_label.setParentItem(self._plot_item.getViewBox())
             self._rf_label.setPos(10, 6)          # screen px inset from the top-left
+        if self._autopause_label is not None:
+            vb = self._plot_item.getViewBox()
+            self._autopause_label.setParentItem(vb)
+            self._autopause_label.setPos(vb.width() * 0.5, 6)
 
     def _detach_curves(self) -> None:
         if self._plot_item is None:
             return
-        for series in (self._set_phase_series, self._current_phase_series):
+        for series in (self._set_phase_series, self._current_phase_series,
+                       self._upper_env_series, self._lower_env_series):
             if series is not None:
                 self._plot_item.removeItem(series)
         for line in self._knife_lines:
             self._plot_item.removeItem(line)
+        for line in (self._env_center_line, self._cut_line):
+            if line is not None:
+                self._plot_item.removeItem(line)
         if self._rf_label is not None:
             self._rf_label.setParentItem(None)
+        if self._autopause_label is not None:
+            self._autopause_label.setParentItem(None)
 
     def _update_curves(self, rescale: bool = False) -> None:
         if not self._active:
@@ -195,8 +259,14 @@ class StabilizationControlViewModel(QObject):
 
         self._set_phase_series.setData(x, set_phase_curve)
         self._current_phase_series.setData(x, current_phase_curve)
+        # The envelopes the fringes ride between: upper = mid+half, lower = mid-half.
+        if self._upper_env_series is not None:
+            self._upper_env_series.setData(x, mid + half)
+        if self._lower_env_series is not None:
+            self._lower_env_series.setData(x, mid - half)
         self._update_rf_label()
         self._update_knife_lines()
+        self._update_geometry_lines()
 
         if rescale and self._plot_item is not None:
             x_lo, x_hi = float(x.min()), float(x.max())
@@ -219,6 +289,55 @@ class StabilizationControlViewModel(QObject):
         lambda_ref = self._config.params.lambda_ref.value(Prefix.NANO)
         return float(2.0 * np.pi * SPEED_OF_LIGHT / wl_nm * 1e-3
                      - 2.0 * np.pi * SPEED_OF_LIGHT / lambda_ref * 1e-3)
+
+    def _update_geometry_lines(self) -> None:
+        """Position the two DRAGGABLE markers from config, without re-triggering a push.
+
+        Only meaningful in wavelength mode: both are wavelength-space geometry, and dragging
+        them in a detuning axis would be a different, confusing gesture. In frequency mode
+        they are hidden and the operator switches back to nm to adjust them.
+        """
+        p = self._config.params
+        wl_mode = not self._plot_frequency
+        if self._env_center_line is not None:
+            self._env_center_line.setVisible(wl_mode)
+            if wl_mode:
+                # blockSignals so setValue does not read back as a user drag and echo a push.
+                self._env_center_line.blockSignals(True)
+                self._env_center_line.setValue(float(p.env_center))
+                self._env_center_line.blockSignals(False)
+                self._env_center_line.setMovable(True)
+        if self._cut_line is not None:
+            self._cut_line.setVisible(wl_mode)
+            if wl_mode:
+                # No manual cut yet -> park the handle just inside the blue window edge so it
+                # is grabbable; it applies nothing until the operator drags it inward.
+                default = self._config.wavelength_range.min.value(Prefix.NANO) + 1.0
+                pos = default if p.manual_cut_left is None else float(p.manual_cut_left)
+                self._cut_line.blockSignals(True)
+                self._cut_line.setValue(pos)
+                self._cut_line.blockSignals(False)
+                self._cut_line.setMovable(True)
+
+    def _on_env_center_moved(self) -> None:
+        """Operator released the envelope-centre handle: pin the fit there and push."""
+        if self._env_center_line is None:
+            return
+        self._config.params.env_center = float(self._env_center_line.value())
+        self._handle.set_config(self._config)
+
+    def _on_cut_moved(self) -> None:
+        """Operator released the clip-edge handle: set the manual left cut and push.
+
+        Dragging it back to (or past) the blue window edge clears the cut -- that is the
+        gesture for "no clip", so a cut can be removed as directly as it was made.
+        """
+        if self._cut_line is None:
+            return
+        val = float(self._cut_line.value())
+        win_lo = self._config.wavelength_range.min.value(Prefix.NANO)
+        self._config.params.manual_cut_left = None if val <= win_lo + 0.2 else val
+        self._handle.set_config(self._config)
 
     def _update_knife_lines(self) -> None:
         """Place the knife-edge markers: whichever edge the fit ACTUALLY CUT ON, and only that.
@@ -294,5 +413,17 @@ class StabilizationControlViewModel(QObject):
         def _apply() -> None:
             self._update_curves()
             self.config_updated.emit()
+
+        self._dispatcher.post(_apply)
+
+    def _on_auto_pause(self, ev: StabilizationAutoPauseChanged) -> None:
+        def _apply() -> None:
+            self._autopaused = ev.paused
+            if self._autopause_label is not None:
+                self._autopause_label.setText(
+                    "⏸ LOOP AUTO-PAUSED after %d failed fits — drag the clip edge / "
+                    "envelope centre to recover" % ev.consecutive_failures if ev.paused else "")
+                self._autopause_label.setVisible(ev.paused)
+            self.auto_pause_changed.emit(ev.paused, ev.consecutive_failures)
 
         self._dispatcher.post(_apply)

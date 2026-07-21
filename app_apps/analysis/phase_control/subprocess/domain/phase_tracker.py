@@ -9,6 +9,7 @@ import numpy as np
 from base_core.math.models import Angle
 from base_core.quantities.enums import Prefix
 from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import (
+    ClipCache,
     ReferencePolicy,
     analyze_trace,
     baseline_anchor,
@@ -33,15 +34,23 @@ class PhaseTracker:
     ``current_phase`` is None until the first accepted fit, then holds the last
     committed value. ``update`` returns True only when a fresh fit committed.
 
-    Two things are stateful across frames, and only these two:
+    Three things are stateful across frames, and only these three:
       * the baseline anchor is measured on the FULL spectrum before windowing (the analysis
         window holds no continuum at all, so the envelope offset has nothing to pin it and
         the quantile loss floats it upward -- offset 255 against a truth of 155 on real
         bright data). It is re-measured every frame; nothing is carried.
-      * ``_ref_policy`` carries the phase-reference hysteresis, which is the ONLY state that
-        persists between frames. It exists so a stabilization loop locked to one wavelength
-        cannot chatter between two when a clip sits near the core.
-    The FIT itself remains cold and seed-independent on every shot.
+      * ``_ref_policy`` carries the phase-reference hysteresis. It exists so a stabilization
+        loop locked to one wavelength cannot chatter between two when a clip sits near the
+        core.
+      * ``_clip_cache`` remembers the knife edge in WAVELENGTH, so a clipped frame need not
+        re-run the ~645 ms recovery scan to rediscover an edge that has not moved. Until
+        2026-07-20 this was never constructed and never passed down, so every clipped frame
+        scanned cold under a wall-clock budget and the edge was found on some frames and
+        missed on others seconds apart -- an intermittent-looking detector that was really
+        an unwired cache.
+    The FIT itself remains cold and seed-independent on every shot: neither the policy nor
+    the cache seeds the optimiser, and the cache is consulted ONLY on a frame whose uncut
+    fit already failed to explain the trace.
     """
 
     current_phase: Angle | None = None
@@ -49,11 +58,12 @@ class PhaseTracker:
     def __init__(self, config: StabilizationConfig) -> None:
         self._config = config
         self._ref_policy = ReferencePolicy()
+        self._clip_cache = ClipCache()
 
     def update(self, wavelengths_nm: np.ndarray, intensities: np.ndarray,
                skipped: int = 0) -> bool:
         """Fit one spectrum. ``skipped`` = frames coalesced away since the last
-        fit (drop-stale), reported in the log line. Returns True on a fresh commit."""
+        fit (drop-stale), reported if a fit throws. Returns True on a fresh commit."""
         wl_full = np.asarray(wavelengths_nm, dtype=float)
         inten_full = np.asarray(intensities, dtype=float)
         # Measure the continuum BEFORE windowing -- this is the whole point of the anchor.
@@ -61,11 +71,14 @@ class PhaseTracker:
         wl, inten = self._window(wl_full, inten_full)
 
         lam_ref = self._config.params.lambda_ref.value(Prefix.NANO)
+        env_center = self._config.params.env_center
+        manual_cut_left = self._config.params.manual_cut_left
         t0 = time.perf_counter()
         try:
             result = analyze_trace(wl, inten, self._config.params.tunables(),
                                    anchor=anchor, ref_policy=self._ref_policy,
-                                   lambda_ref_nm=lam_ref)
+                                   lambda_ref_nm=lam_ref, clip_cache=self._clip_cache,
+                                   env_center=env_center, manual_cut_left=manual_cut_left)
         except Exception:
             # A fresh fit can still fail on a degenerate frame. There is no seed state to
             # unwind (every fit is cold and independent), so just log and let the next
@@ -73,7 +86,6 @@ class PhaseTracker:
             ms = (time.perf_counter() - t0) * 1e3
             log.exception("fit ERROR skip=%d %.0fms", skipped, ms)
             return False
-        ms = (time.perf_counter() - t0) * 1e3
 
         if self._config.accepts(result):
             # Report the phase where the fit says it is SUPPORTED. That is lambda_ref
@@ -82,16 +94,8 @@ class PhaseTracker:
             phase_ref = result.phase_at(result.ref_wl)
             self._config.params.commit(result, phase_ref)
             self.current_phase = Angle(phase_ref % _TWO_PI)
-            log.info("fit ok  phi=%.3frad @%.2fnm%s rms=%.0f inl=%.0f%% skip=%d %.0fms",
-                     phase_ref % _TWO_PI, result.ref_wl,
-                     " (REF MOVED)" if result.ref_fallback else "",
-                     result.rms_sig, result.inlier_pct, skipped, ms)
             return True
 
-        rms = "inf" if not np.isfinite(result.rms_sig) else f"{result.rms_sig:.0f}"
-        log.info("fit REJECT [%s] rms=%s inl=%.0f%% trust=%s skip=%d %.0fms  %s",
-                 result.status, rms, result.inlier_pct, result.trust_ok, skipped, ms,
-                 result.msg)
         return False
 
     def _window(self, wavelengths_nm: np.ndarray,

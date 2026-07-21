@@ -184,6 +184,37 @@ TRUNCDET_SNR_GAP = 5.0        # only test where model gap >= this * noise sigma.
                               # loosen. Below it the answer is "unknown", not "none".
 TRUNCDET_NOISE_GAP_FRAC = 0.25  # noise is sampled from this lowest quantile of model gap
 
+# Which arms the OPTICS can physically clip. On this setup only the left (blue) arm can be
+# occluded, and will stay that way for the foreseeable future (operator, 2026-07-20). That
+# is not a tuning preference -- it is a fact about the hardware, so a RIGHT-side detection
+# is not a marginal call to be thresholded, it is a KNOWN FALSE POSITIVE with probability 1.
+# Measured the same day: on a confirmed-clean beam the detector reported a right cut at
+# ~808.5 nm on 42/195 frames, and during a real LEFT clip it reported side="both" (real
+# left + phantom right at ~811 nm) on 17% of frames -- every one of those right edges sat
+# in the red wing where the Gaussian envelope has rolled off and fringe contrast is
+# naturally low, which the dead-fringe test misreads as a clip. Rather than chase that with
+# a wing-aware threshold, we use the physical constraint: suppress right-side detection
+# outright. Set this back to ("left", "right") if the interferometer is ever rebuilt so the
+# red arm can be clipped -- at which point the wing false-positive must be solved properly.
+PHYSICAL_CUT_SIDES = ("left",)
+
+# --- Envelope-centre pin ----------------------------------------------------------
+# The upper-envelope Gaussian mean muU is the anchor the cubic phase is expanded about
+# (l0 tracks it). Left-clipping the beam pushes the *intensity* peak rightward -- measured
+# 2026-07-20, muU walks from ~802.2 on a clean frame to ~802.9 under a left clip -- and the
+# phase reported back at the fixed reference then inherits noise from an anchor that has
+# wandered ~0.7 nm away with uncertain curvature (phase@802 scatter 0.72 rad vs a 0.314
+# budget). Pinning muU to a narrow band around a KNOWN centre stops the clip from dragging
+# the anchor. It is a band, not a hard value, so a clean frame still fits its own centre;
+# it is narrow because the beam centre does not move on this setup -- only the clip's effect
+# on the intensity peak does, and that is exactly what we are refusing to follow.
+#
+# ENV_CENTRE_DEFAULT is only the default: the operator drags it live (it is not derivable
+# from a truncated stream, and a wrong pin is visible and correctable on the chart). 802.0
+# is the nominal beam centre. ENV_CENTRE_TOL is the half-width of the pin.
+ENV_CENTRE_DEFAULT = 802.0
+ENV_CENTRE_TOL = 0.1
+
 # --- Null localization (symmetry / two-sided prominence of the Hilbert |f|) ---
 # The Hilbert instantaneous frequency is UNSIGNED (== |f|); a genuine null is a V
 # in |f| that rises on BOTH sides of an interior minimum. We smooth |f|, find that
@@ -344,6 +375,28 @@ TRUST_TOL_C0 = 0.314    # rad        (0.05 * 2pi, the phase-stabilization budget
                         # of magnitude below the jitter it lives in rejects frames for an
                         # error the loop does not care about.
 TRUST_TOL_C3 = 0.006    # rad/nm^3   noise-limited TOD floor
+
+# --- Accuracy gate: is the reference INSIDE the data that supports it? -------------
+# `trust_at` is a PRECISION test -- propagated covariance against the spec above. It is
+# blind to the failure mode measured on real truncated data 2026-07-20, which is a BIAS:
+# when one arm is clipped the fitted core shrinks and its centroid `l0` slides off the
+# operator's reference, and the phase quoted back at that reference then splits into two
+# populations that the covariance cannot tell apart. Measured over 58 consecutive FITDIAG
+# frames from one run, grouped by whether the core had displaced:
+#
+#     phase @ 802 nm (what the loop consumes)   4.128 rad   vs   2.734 rad
+#     |ref - l0| / core half-span                0.15-0.29   vs   0.00-0.04
+#
+# A 1.40 rad step, on frames that ALL reported trust=True, rms_frac ~0.10, inl 97-100%.
+# Nothing in the residual or the covariance objects, because the fit is precisely
+# explaining a core that has moved. This constant is the missing accuracy term: the
+# reference must sit near the middle of the support, not merely inside it.
+#
+# 0.12 sits in the gap the two measured populations leave (0.04 -> 0.15) with margin on
+# both sides. It is a SEPARATION threshold read off real data, not a derived quantity --
+# re-measure it if the spectrometer window or the core crop changes.
+REF_MAX_OFFSET_FRAC = 0.12
+
 TRUST_NSIG = 3.0        # require NSIG * sigma to fit inside the spec.
                         # CALIBRATED, not derived. The Gauss-Newton covariance is an
                         # under-estimate of the true error here for two reasons it cannot
@@ -571,13 +624,18 @@ def pinball_grad(p, x, y):
     return -np.array([np.sum(w * dg_da), np.sum(w * dg_dmu),
                       np.sum(w * dg_dsig), float(np.sum(w))])
 
-def fit_upper_envelope(x, y, off_bounds=None):
+def fit_upper_envelope(x, y, off_bounds=None, mu_bounds=None):
     """Gaussian hugging the upper envelope of the fringes: warm start from a symmetric L2
     fit, then refine under the asymmetric pinball loss.
 
     `off_bounds` bounds the offset to the continuum measured off the full frame (see
     baseline_anchor). Inside ZOOM there is no baseline to pin it, and the tau-quantile
     loss exploits that by floating the offset up.
+
+    `mu_bounds` pins the Gaussian mean (the envelope centre) to a narrow band -- the
+    operator's dragged ENV_CENTRE +- ENV_CENTRE_TOL. See ENV_CENTRE_DEFAULT: a one-sided
+    clip drags the intensity peak, and following it moves the phase anchor; pinning mu
+    holds it. None leaves the centre free, which is the standalone/harness behaviour.
 
     The refinement is Nelder-Mead. This once used L-BFGS-B on the analytic subgradient,
     which really did stop at loss 7182.5 after 19 iterations (off=255.1, sigma=3.41) where
@@ -611,10 +669,13 @@ def fit_upper_envelope(x, y, off_bounds=None):
         # but it must not take the whole analysis down with a RuntimeError.
         pass
     bounds = None
-    if off_bounds is not None:
+    if off_bounds is not None or mu_bounds is not None:
         p0 = list(p0)
-        p0[3] = float(np.clip(p0[3], *off_bounds))   # start inside the band
-        bounds = [(-np.inf, np.inf)] * 3 + [tuple(off_bounds)]
+        mb = tuple(mu_bounds) if mu_bounds is not None else (-np.inf, np.inf)
+        ob = tuple(off_bounds) if off_bounds is not None else (-np.inf, np.inf)
+        p0[1] = float(np.clip(p0[1], *mb))           # start the centre inside its band
+        p0[3] = float(np.clip(p0[3], *ob))           # ...and the offset inside its band
+        bounds = [(-np.inf, np.inf), mb, (-np.inf, np.inf), ob]
     res = minimize(pinball_loss, p0, args=(x, y), method="Nelder-Mead", bounds=bounds,
                    options={"maxiter": FIT_MAXITER, "maxfev": FIT_MAXITER,
                             "xatol": FIT_XATOL, "fatol": FIT_FATOL})
@@ -1475,6 +1536,18 @@ def detect_truncation(x, y):
     T["right_nm"] = right_n * dx
     hit_l = T["left_nm"] >= TRUNCDET_MIN_RUN_NM
     hit_r = T["right_nm"] >= TRUNCDET_MIN_RUN_NM
+    # A right-side detection is a known false positive on this hardware (see
+    # PHYSICAL_CUT_SIDES): the red arm cannot be clipped, so drop the right run before it
+    # can become a side or a cut. Done HERE, at the single point where side is decided, so
+    # every downstream consumer -- applied_cuts, hits_core, the recovery-scan side, the clip
+    # cache -- inherits a consistent "no right cut" without each needing its own guard. The
+    # "all" branch is deliberately left intact: nothing-oscillates-anywhere is a genuinely
+    # dead trace, not a phantom red-wing edge, and it must still be reported.
+    if "right" not in PHYSICAL_CUT_SIDES and not (
+            max(left_n, right_n) >= TRUNCDET_ALL_FRAC * n_live):
+        hit_r = False
+        T["cut_right"] = None
+        T["right_nm"] = 0.0
     if max(left_n, right_n) >= TRUNCDET_ALL_FRAC * n_live:   # nothing oscillates anywhere
         T.update(side="all", detected=True, msg="no fringes in the detectable region")
     elif hit_l and hit_r:
@@ -1631,7 +1704,7 @@ def applied_cuts(trunc):
 
 def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
                   trunc_threshold=None, ref_primary=None, force_trunc=None,
-                  scanfree=None, trunc_method=None):
+                  scanfree=None, trunc_method=None, env_center=None):
     """Run the full recovery pipeline on one in-window trace.
 
     `trust_nsig` / `trunc_threshold` override TRUST_NSIG / TRUNC_THRESHOLD for this call
@@ -1667,6 +1740,11 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
     y = np.asarray(y, float)
     R = {"status": "ok", "msg": ""}
 
+    # The operator's envelope-centre pin, as a (lo, hi) band for the upper-envelope mean.
+    # None => the centre is free (standalone/harness). See ENV_CENTRE_DEFAULT.
+    mu_bounds = (None if env_center is None
+                 else (float(env_center) - ENV_CENTRE_TOL, float(env_center) + ENV_CENTRE_TOL))
+
     # --- Contract guards ---------------------------------------------------------
     if len(x) < 16:
         return {"status": "too_few", "msg": f"only {len(x)} pts in window", "csig": None}
@@ -1700,7 +1778,7 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
             n_full = len(x); x_all, y_all = x.copy(), y.copy()
             trunc = {"side": "none", "detected": False, "dead": None, "live": None,
                      "cut_left": None, "cut_right": None, "msg": "scan-free"}
-            pU = fit_upper_envelope(x, y, off_bounds=anchor_bounds(anchor))
+            pU = fit_upper_envelope(x, y, off_bounds=anchor_bounds(anchor), mu_bounds=mu_bounds)
             pLn = fit_upper_envelope(x, -(y - gauss(x, *pU)))
             aLn, muLn, sLn, offLn = pLn
             peak_gap = abs(aLn + offLn)
@@ -1845,7 +1923,7 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
             # Only pU is anchored. pLn is fit to the NEGATED RESIDUAL, whose "baseline" is not
             # the continuum at all, so the U_base/P5 statistic does not transfer to it -- that
             # needs its own derivation and is deliberately left unbounded rather than guessed.
-            pU = fit_upper_envelope(xw, yw, off_bounds=anchor_bounds(anchor))
+            pU = fit_upper_envelope(xw, yw, off_bounds=anchor_bounds(anchor), mu_bounds=mu_bounds)
             resid_env = yw - gauss(xw, *pU)
             pLn = fit_upper_envelope(xw, -resid_env)  # upper envelope of the negated residual
 
@@ -1924,7 +2002,16 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
         f_inst = np.gradient(phase, dx) / (2 * np.pi)
 
         # --- Null candidates (zero-derivative dips of smoothed |f|) ---------------
-        origin = float(np.mean(x))        # polynomial basis origin (well-conditioned)
+        # Polynomial basis origin = the phase anchor l0. Free, it is mean(x) -- but mean(x)
+        # is the centroid of the SURVIVING samples, so a left clip drops the left points and
+        # drags the anchor right (measured 802.0 -> 802.85), and the phase reported back at a
+        # fixed reference is then an extrapolation from a moving origin with uncertain
+        # curvature (scatter 0.72 rad vs a 0.314 budget). When the operator pins the centre,
+        # anchor there instead: phase@ref becomes c0 directly, no lever arm, no extrapolation.
+        # mean(x) was chosen for CONDITIONING, and env_centre sits inside the data, so the fit
+        # stays just as well-posed. This -- not the muU bound -- is what actually holds the
+        # phase; the muU pin keeps the envelope Gaussian consistent with it.
+        origin = float(np.mean(x)) if env_center is None else float(env_center)
         u = x - origin
         fs = smooth_absf(x, f_inst)
         cands = null_candidates(x, fs)    # [(prominence, x_null), ...], deepest first
@@ -2029,12 +2116,44 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
         ok_fallback, sig_fallback, b_fallback, shape_fallback = trust_at(
             csig, cov, 0.0, nsig=trust_nsig)                              # d=0 at l0
 
+        # ACCURACY measurement, alongside the precision gate above. See
+        # REF_MAX_OFFSET_FRAC: a displaced core biases the phase at the reference by
+        # ~1.4 rad while every precision statistic stays clean, so the covariance can
+        # never catch it.
+        #
+        # MEASURED here, ENFORCED in the app's accept gate (StabilizationConfig.accepts) --
+        # deliberately not folded into `trust_ok`. Tried that first and it was wrong on
+        # hardware: `trust_ok` feeds `_explains`, so a displaced core read as "this fit does
+        # not explain the trace" and every such frame was sent into the recovery scan. The
+        # scan searches for a CUT, which cannot fix a core that is merely off-centre, so it
+        # burned the full CLIPCACHE_BUDGET_MS and returned the same answer. Measured on the
+        # live run of 2026-07-20: median wall 271 ms with p90 736 ms and a worst frame of
+        # 7.5 s, throughput 2.1 f/s against 3.9 f/s before -- the loop's dead time doubled
+        # to buy nothing. "The data cannot support the phase HERE" and "the model does not
+        # explain the trace" are different claims and only the second one warrants a scan.
+        half_span = 0.5 * float(x[-1] - x[0])
+        ref_offset = abs(ref_primary - float(l0))
+        ref_offset_frac = ref_offset / half_span if half_span > 0 else np.inf
+        ref_offset_ok = bool(ref_offset_frac <= REF_MAX_OFFSET_FRAC)
+
         # No policy => switch immediately (standalone + harness). A policy => the app's
         # hysteresis decides, and it only gets to choose the fallback if that is in fact
         # trustworthy -- hysteresis may delay a switch, never fabricate a good verdict.
         use_fallback = (ref_policy.update(ok_primary) if ref_policy is not None
                         else not ok_primary)
         use_fallback = bool(use_fallback and ok_fallback)
+
+        # ...but a DISPLACED-CORE failure must not be answered by moving the reference to
+        # l0. The control loop locks to whatever `ref_wl` says, and l0 is exactly the
+        # quantity that just moved -- it wobbles ~1 nm frame to frame as the contrast crop
+        # breathes (see ClipCache's docstring), and at the measured carrier of ~8.17 rad/nm
+        # a 0.5 nm wobble in the reference IS 4 rad of phase. Falling back would hand the
+        # loop a bigger error than the bias we are rejecting, dressed as a good frame.
+        # So: when the reference is unsupportable because the core drifted off it, report
+        # the frame as underdetermined and let the accept gate DROP it. Dropping is cheap
+        # (the loop is integrating at gain ~0.05 over ~20 frames); a wrong number is not.
+        if not ref_offset_ok:
+            use_fallback = False
 
         if use_fallback:
             ref_wl, trust_ok, shape_ok = float(l0), ok_fallback, shape_fallback
@@ -2061,6 +2180,18 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
     # failed. A fit whose SHAPE is untrustworthy but whose phase is fine stays status "ok"
     # and reports shape_ok=False; that is a usable frame for the loop and an unusable one
     # for the frequency readout, and conflating the two is what over-rejected real frames.
+    # NB a displaced core does NOT set a failing status here -- it is an accept-gate
+    # concern, not a "this fit failed" concern; see the ref_offset_ok block above. The
+    # message is still built so whoever drops the frame can say why.
+    if ref_offset_ok:
+        R["ref_offset_msg"] = ""
+    else:
+        R["ref_offset_msg"] = (
+            f"core displaced off the reference: |{ref_primary:.2f} - {l0:.2f}| = "
+            f"{ref_offset:.2f} nm = {ref_offset_frac:.0%} of the {half_span:.2f} nm "
+            f"core half-span (max {REF_MAX_OFFSET_FRAC:.0%}); the phase at "
+            f"{ref_primary:.2f} nm would be biased by the crop, not measured")
+
     if not trust_ok:
         R["status"] = "underdetermined"
         where = "the core centroid" if use_fallback else "the spectral centre"
@@ -2089,6 +2220,10 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
         # csig_at_centre is ALWAYS at ref_wl -- read ref_wl, never assume 802.
         ref_wl=ref_wl, ref_fallback=use_fallback, ref_primary=ref_primary,
         trust_primary_ok=ok_primary, trust_fallback_ok=ok_fallback,
+        # How far the fitted core sits from the reference, as a fraction of its own
+        # half-span. The accuracy gate's input, logged so a run can be audited.
+        ref_offset_nm=ref_offset, ref_offset_frac=ref_offset_frac,
+        ref_offset_ok=ref_offset_ok, ref_offset_msg=R.get("ref_offset_msg", ""),
         shape_ok=shape_ok, shape_primary_ok=shape_primary,
         shape_fallback_ok=shape_fallback,
     ))
@@ -2097,7 +2232,7 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
 
 def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold=None,
             ref_primary=None, recover=True, scanfree=None, trunc_method=None,
-            clip_cache=None):
+            clip_cache=None, env_center=None, manual_cut_left=None):
     """Fit one trace, and if the model cannot explain it, find the cut that can.
 
     Fit normally first. If that explains the trace (`_explains`), return it -- this is the
@@ -2119,14 +2254,31 @@ def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold
     ["cut_right"] carry it, so a caller cannot tell a scanned cut from a detected one and
     does not need to.
     """
+    # MANUAL truncation short-circuits everything. The operator has dragged the clip edge
+    # on the chart, and that is assumed robust (2026-07-20) -- far more reliable than the
+    # auto-detector, which we measured barely seeing the real left clip while hallucinating
+    # right cuts. So when a manual cut is supplied we skip the detector, the recovery scan
+    # AND the clip cache: there is nothing to search for, the answer is one deterministic
+    # fit on the operator-selected domain. env_center (the dragged envelope pin) rides along.
+    if manual_cut_left is not None:
+        ft = {"side": "left", "detected": True, "cut_left": float(manual_cut_left),
+              "cut_right": None, "dead": None, "live": None, "left_nm": 0.0,
+              "right_nm": 0.0, "x_lo": None, "x_hi": None, "msg": "manual cut"}
+        R = _analyze_once(x, y, anchor=anchor, ref_policy=ref_policy, trust_nsig=trust_nsig,
+                          trunc_threshold=trunc_threshold, ref_primary=ref_primary,
+                          force_trunc=ft, env_center=env_center)
+        R["recovered"] = False
+        R["rms_frac"] = _rms_frac(R)
+        return R
+
     use_scanfree_0 = SCANFREE if scanfree is None else scanfree
     if clip_cache is not None and recover and not use_scanfree_0:
         return _analyze_cached(x, y, clip_cache, anchor=anchor, ref_policy=ref_policy,
                                trust_nsig=trust_nsig, trunc_threshold=trunc_threshold,
-                               ref_primary=ref_primary)
+                               ref_primary=ref_primary, env_center=env_center)
     R = _analyze_once(x, y, anchor=anchor, ref_policy=ref_policy, trust_nsig=trust_nsig,
                       trunc_threshold=trunc_threshold, ref_primary=ref_primary,
-                      scanfree=scanfree, trunc_method=trunc_method)
+                      scanfree=scanfree, trunc_method=trunc_method, env_center=env_center)
     R["recovered"] = False
     R["rms_frac"] = _rms_frac(R)
     # Scan-free pipeline: the deterministic fit is the ONLY fit path (PLAN constraint #1/#2).
@@ -2142,7 +2294,7 @@ def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold
         return R
     R2 = _recovery_scan(x, y, R, anchor=anchor, ref_policy=ref_policy,
                         trust_nsig=trust_nsig, trunc_threshold=trunc_threshold,
-                        ref_primary=ref_primary)
+                        ref_primary=ref_primary, env_center=env_center)
     if R2 is None:
         return R
     if on_suspicion and not (_rms_frac(R2) < TRUNCREC_HC_IMPROVE * _rms_frac(R)):
@@ -2153,7 +2305,7 @@ def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold
 
 
 def _recovery_scan(x, y, R, anchor=None, ref_policy=None, trust_nsig=None,
-                   trunc_threshold=None, ref_primary=None, deadline=None):
+                   trunc_threshold=None, ref_primary=None, deadline=None, env_center=None):
     """Scan candidate cuts until one explains the trace. Returns the recovered R, or None.
 
     Split out of `analyze` so the clip cache can fall back to the EXACT same search
@@ -2204,7 +2356,8 @@ def _recovery_scan(x, y, R, anchor=None, ref_policy=None, trust_nsig=None,
             try:
                 R2 = _analyze_once(x, y, anchor=anchor, ref_policy=None,
                                    trust_nsig=trust_nsig, trunc_threshold=trunc_threshold,
-                                   ref_primary=ref_primary, force_trunc=ft)
+                                   ref_primary=ref_primary, force_trunc=ft,
+                                   env_center=env_center)
             except Exception:
                 continue
             R2["rms_frac"] = _rms_frac(R2)
@@ -2228,7 +2381,8 @@ def _recovery_scan(x, y, R, anchor=None, ref_policy=None, trust_nsig=None,
         try:
             R3 = _analyze_once(x, y, anchor=anchor, ref_policy=ref_policy,
                                trust_nsig=trust_nsig, trunc_threshold=trunc_threshold,
-                               ref_primary=ref_primary, force_trunc=ft)
+                               ref_primary=ref_primary, force_trunc=ft,
+                               env_center=env_center)
             R3["rms_frac"] = _rms_frac(R3)
             if _explains(R3):
                 R2 = R3
@@ -2476,7 +2630,7 @@ class ClipCache:
 
 
 def _analyze_cached(x, y, cache, anchor=None, ref_policy=None, trust_nsig=None,
-                    trunc_threshold=None, ref_primary=None):
+                    trunc_threshold=None, ref_primary=None, env_center=None):
     """`analyze` with a clip cache. Same contract, same return dict (+ R["clip_cache"]).
 
     Order of operations, and why:
@@ -2517,7 +2671,7 @@ def _analyze_cached(x, y, cache, anchor=None, ref_policy=None, trust_nsig=None,
     deadline = t0 + cache.budget_ms * 1e-3
     cache.frames += 1
     kw = dict(anchor=anchor, trust_nsig=trust_nsig, trunc_threshold=trunc_threshold,
-              ref_primary=ref_primary)
+              ref_primary=ref_primary, env_center=env_center)
 
     t_d0 = time.perf_counter()
     try:

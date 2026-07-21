@@ -14,6 +14,7 @@ from app_apps.analysis.phase_control.subprocess.messages import (
     ProcessSpectrum,
     SpectrumProcessed,
     SetStabilizationConfig,
+    StabilizationAutoPaused,
 )
 
 if TYPE_CHECKING:
@@ -25,6 +26,17 @@ log = logging.getLogger(__name__)
 
 WORKER_ID = "phase_tracking"
 CONSUMER_ID = "phase_tracking"
+
+# Consecutive failed fits before the loop stops driving the plate (fitting continues, so the
+# overlay stays live for the operator to drag against). At ~2-4 fps this is ~1-2 s of solid
+# failure -- long enough not to trip on a single bad frame, short enough that a real clip
+# stops corrections before the integrator walks the stage far.
+AUTOPAUSE_FAILS = 5
+# While auto-paused the fit is skipped so the raw stream runs smoothly; this is how often a
+# single probe fit is still attempted, to notice the clip has been dragged out (or the beam
+# recovered) and resume. 1 s is imperceptible on the stream and recovers within a frame or
+# two of the fix. An operator drag resumes instantly regardless (see _on_set_config).
+AUTOPAUSE_RETRY_S = 1.0
 
 
 class PhaseStabilizationWorker(ThreadedWorker):
@@ -41,14 +53,14 @@ class PhaseStabilizationWorker(ThreadedWorker):
         self._tracker: PhaseTracker | None = None
         self._corrector: PhaseCorrector | None = None
         self._paused = True
+        # Auto-pause state: after AUTOPAUSE_FAILS consecutive failures the loop stops both
+        # correcting AND fitting (fitting resumes as a slow probe), distinct from _paused
+        # (the operator's explicit pause).
+        self._consec_fail = 0
+        self._autopaused = False
+        self._last_probe_t = 0.0      # last auto-pause probe-fit time (perf_counter)
         self._latest_item_id = -1     # newest arrival (drop-stale coalescing)
         self._skipped_since_fit = 0   # frames coalesced away since the last real fit
-        # --- throughput diagnostics (periodic THROUGHPUT log) ---
-        self._tp_t0 = time.perf_counter()
-        self._tp_fit = 0              # frames actually fit in the window
-        self._tp_skip = 0            # frames coalesced/dropped in the window
-        self._tp_commit = 0          # fits that passed the gate in the window
-        self._tp_fit_ms = 0.0        # summed fit wall time in the window
 
     def _setup(self) -> None:
         self._unsubs.append(self._bus.subscribe(SetStabilizationConfig, self._on_set_config))
@@ -61,6 +73,8 @@ class PhaseStabilizationWorker(ThreadedWorker):
         self._corrector.gain = self._config.loop_gain
         self._latest_item_id = -1
         self._skipped_since_fit = 0
+        self._consec_fail = 0
+        self._autopaused = False
         self._paused = False
 
     def _pause(self) -> None:
@@ -91,44 +105,64 @@ class PhaseStabilizationWorker(ThreadedWorker):
         # Worker thread, serial. A running fit is never interrupted, so an
         # in-progress cold attempt always completes.
         try:
-            if self._paused or self._tracker is None or self._corrector is None:
+            if self._tracker is None or self._corrector is None:
+                return
+            if self._paused:
                 return
             # Drop-stale: if a newer spectrum arrived while this one queued, skip
             # the fit (still acked below) so we only ever fit the freshest frame.
             if msg.item_id != self._latest_item_id:
                 self._skipped_since_fit += 1
-                self._tp_skip += 1
                 return
+            # While auto-paused, do NOT fit every frame: the fit is the heavy step
+            # (~180-400 ms) and running it on a clip it cannot solve just starves the raw
+            # spectrum stream the operator is trying to read while dragging the markers.
+            # Instead PROBE once every AUTOPAUSE_RETRY_S -- enough to notice the operator
+            # (or the beam) has fixed the clip and auto-resume, cheap enough to leave the
+            # stream smooth. A config change (a drag) resumes immediately via _on_set_config.
+            if self._autopaused:
+                now = time.perf_counter()
+                if now - self._last_probe_t < AUTOPAUSE_RETRY_S:
+                    self._skipped_since_fit += 1
+                    return
+                self._last_probe_t = now
             buf = self._get_buffer()
             wl = buf.wavelengths(msg.slot)
             ins = buf.intensities(msg.slot)
             skipped = self._skipped_since_fit
             self._skipped_since_fit = 0
-            t_fit0 = time.perf_counter()
             committed = self._tracker.update(wl, ins, skipped=skipped)
-            # Throughput accounting: distinguishes "spectra arrive slowly" (upstream
-            # acquisition/IPC) from "fits are slow" (compute) from "nothing commits"
-            # (the accept gate). Summary emitted every ~2 s.
-            self._tp_fit += 1
-            self._tp_fit_ms += (time.perf_counter() - t_fit0) * 1e3
-            self._tp_commit += int(committed)
-            now = time.perf_counter()
-            if now - self._tp_t0 >= 2.0:
-                dt = now - self._tp_t0
-                log.warning("THROUGHPUT: %.2f frames/s in (%d fit + %d coalesced over %.1fs) | "
-                            "%d committed | mean fit %.0f ms",
-                         (self._tp_fit + self._tp_skip) / dt, self._tp_fit, self._tp_skip,
-                         dt, self._tp_commit, self._tp_fit_ms / max(self._tp_fit, 1))
-                self._tp_t0 = now
-                self._tp_fit = self._tp_skip = self._tp_commit = 0
-                self._tp_fit_ms = 0.0
             if committed:
+                # A good frame clears the failure streak and lifts an auto-pause: the
+                # operator's drag (or the beam) fixed it, and corrections resume.
+                self._consec_fail = 0
+                if self._autopaused:
+                    self._autopaused = False
+                    log.warning("AUTORESUME: a fit committed; corrections re-enabled")
+                    self._notify(StabilizationAutoPaused(paused=False, consecutive_failures=0))
                 self._notify(ConfigSynced(config=self._config))
                 phase = self._tracker.current_phase
                 if phase is not None:
                     result = self._corrector.update(phase)
                     if result is not None:
                         self._notify(CorrectionAvailable(angle=result.angle, sign=result.sign))
+            else:
+                # No commit. After enough consecutive failures, auto-pause: stop driving the
+                # plate AND stop fitting every frame (the probe in _process_spectrum keeps a
+                # slow retry going). A sustained failure means the data cannot support a phase
+                # -- a clip the operator has not yet dragged out -- and both correcting on
+                # nothing (winds the plate) and fitting flat out (starves the stream) are
+                # wrong. The overlay holds its last good fit; the operator drags the geometry
+                # and a probe fit -- or their drag -- auto-resumes.
+                self._consec_fail += 1
+                if not self._autopaused and self._consec_fail >= AUTOPAUSE_FAILS:
+                    self._autopaused = True
+                    self._last_probe_t = time.perf_counter()
+                    log.warning("AUTOPAUSE: %d consecutive fits failed; corrections and "
+                                "fitting held (slow probe only) until a fit commits -- drag "
+                                "the clip edge / envelope centre", self._consec_fail)
+                    self._notify(StabilizationAutoPaused(
+                        paused=True, consecutive_failures=self._consec_fail))
         except Exception:
             log.exception("PhaseStabilizationWorker: error processing spectrum slot %d", msg.slot)
         finally:
@@ -137,6 +171,14 @@ class PhaseStabilizationWorker(ThreadedWorker):
     @worker_thread
     def _on_set_config(self, msg: SetStabilizationConfig) -> None:
         self._config = msg.config
+        # A new config is the operator acting -- typically dragging the clip edge or envelope
+        # centre precisely to break an auto-pause. Clear the pause and the failure streak so
+        # the very next frame is fit at full rate, instead of waiting out a probe interval.
+        if self._autopaused:
+            self._autopaused = False
+            log.warning("AUTORESUME: config changed; fitting resumed at full rate")
+            self._notify(StabilizationAutoPaused(paused=False, consecutive_failures=0))
+        self._consec_fail = 0
         if self._tracker is not None:
             self._tracker = PhaseTracker(self._config)
         if self._corrector is not None:
