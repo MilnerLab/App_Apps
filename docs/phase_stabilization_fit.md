@@ -1,302 +1,361 @@
 # Phase Stabilization — Fringe Fit
 
-How the phase-stabilization loop measures the interferometer phase from a single
-spectrum and turns it into a half-wave-plate correction.
+How the phase-stabilization loop reads the interferometer's phase off a single
+spectrum and turns it into a small rotation of a half-wave plate.
 
-The analysis math lives in `fringe_core.py` (the single source of truth);
-`fringe_fit.py` is a thin adapter that translates between the app's dataclasses and
-`fringe_core.analyze()`. The control-loop pieces are `phase_tracker.py`,
+All of the analysis math lives in `fringe_core.py` (the single source of truth);
+`fringe_fit.py` is a thin adapter that translates between the app's data objects and
+`fringe_core.analyze()`. The control loop itself is `phase_tracker.py`,
 `phase_corrector.py`, and `phase_stabilization_worker.py`.
 
 ---
 
-## 1. The physical model
+## 1. What we are measuring
 
-A spectrometer looks at a two-arm interferometer. Each arm contributes a smooth
-Gaussian-like envelope; the arms interfere, so the recorded spectrum is a fringe
-pattern riding on that envelope:
+A spectrometer looks at an interferometer with two arms. Each arm alone would give a
+smooth, roughly Gaussian bump of light. Because the two arms interfere, the recorded
+spectrum instead shows ripples ("fringes") riding on top of that bump:
 
 ```
 I(λ) = mid(λ) + half(λ)·cos(Φ(λ))
 ```
 
-- `mid(λ) = ½(U + L)` and `half(λ) = ½(U − L)`, where `U` and `L` are the upper and
-  lower envelopes (Gaussians). `half` is the local fringe amplitude; `mid` the local mean.
-- `Φ(λ)` is the **spectral phase**, expanded as a cubic about a basis origin `l0`
-  (the fitted core centroid), in `u = λ − l0`:
+- `mid(λ) = ½(U + L)` is the local average brightness and `half(λ) = ½(U − L)` is the
+  local ripple height, where `U` and `L` are the upper and lower outlines of the
+  fringes (each modelled as a Gaussian). `U` traces the fringe peaks, `L` the troughs.
+- `Φ(λ)` is the **phase** — the quantity we actually want. How it varies with
+  wavelength is described by a cubic polynomial in `u = λ − l0`, where `l0` is a
+  reference point near the middle of the data (the centre of the well-fringed region):
   ```
   Φ(u) = c0 + c1·u + c2·u² + c3·u³
   ```
-  `c0` is the phase at the reference (the quantity the loop locks to); `c1` the carrier
-  (fringe frequency), `c2` the chirp, `c3` third-order dispersion (TOD).
-- The **instantaneous fringe frequency** is `f(u) = Φ'(u)/2π = (c1 + 2c2·u + 3c3·u²)/2π`
-  cycles/nm. It is signed, and flips through a *null* where it passes through zero.
+  In words: `c0` is the phase at the reference point — the one number the loop is trying
+  to hold steady. `c1` sets how fast the fringes oscillate. `c2` says how that spacing
+  changes across the spectrum (the fringes get wider or narrower — "chirp"). `c3` is a
+  smaller, third-order version of the same idea, conventionally called third-order
+  dispersion (TOD).
+- The **local fringe frequency** — how many ripples per nanometre you see at a given
+  wavelength — is `f(u) = Φ'(u)/2π = (c1 + 2c2·u + 3c3·u²)/2π`, in cycles/nm. It carries
+  a sign, and if the chirp is strong enough it can pass through zero. At that wavelength
+  the fringes momentarily stop oscillating and then start again running the other way; we
+  call that point a **null**.
 
-The loop consumes `c0` at a reference wavelength; the rest describe the pulse.
+The loop uses only `c0`, at a chosen reference wavelength. The other coefficients
+describe the shape of the laser pulse and are reported for diagnostics.
 
 ## 2. The analysis pipeline (`analyze()`)
 
 One spectrum in, one fit out. In order:
 
-1. **Truncation detection.** Detect a spectrally clipped interferometer arm and drop
-   the fringe-free band (see §Rationale: truncation).
-2. **Envelope fit.** Fit the upper/lower envelope Gaussians under an asymmetric
-   *pinball* (quantile ≈ 0.91) loss so the fit hugs the fringe crests, with the offset
-   bounded to a continuum measurement taken from the full frame (the *baseline anchor*).
-3. **Contrast crop + normalize.** Keep the high-visibility core (where the envelope
-   contrast exceeds `TRUNC_THRESHOLD` of its peak) and normalize the fringes to
-   `n = (y − mid)/half`, which rides in [−1, 1].
-4. **Seed the phase.** Hilbert-transform the normalized fringes to get the unsigned
-   instantaneous frequency `|f|`. Build a **two-trim seed** (trim the phase-value range,
-   polyfit a quadratic) that is correct where the phase is monotonic, plus a **signed
-   null-flip seed** per `|f|` dip that carries the real chirp through a null — taken only
-   when it cuts the fringe residual. **BIC** then selects the phase order (carrier /
-   chirp / +TOD), so spurious TOD is rejected without a tuning knob.
-5. **Refit the cubic** on the raw counts with the envelopes held fixed.
-6. **Trust.** Propagate the fit covariance to the reference and decide *where* and
-   *whether* the phase can be trusted (§4).
+1. **Look for a clipped arm.** If one interferometer arm has been cut off at one end of
+   the spectrum, the fringes disappear there. Find that band and drop it (see
+   *Telling a clipped arm from a null* below).
+2. **Fit the fringe outlines.** Fit the upper and lower Gaussian outlines using a
+   lopsided error measure (a *quantile* or "pinball" loss, at quantile ≈ 0.91) so the
+   upper curve is pulled up onto the fringe peaks rather than through their middle. The
+   vertical offset of the Gaussians is constrained to a background level measured from
+   the full spectrum (the *baseline anchor*).
+3. **Crop to the well-fringed region and normalize.** Keep the part of the spectrum where
+   the fringes are strong — where the gap between the two outlines is above
+   `TRUNC_THRESHOLD` of its largest value — and rescale the data to
+   `n = (y − mid)/half`, which then oscillates between −1 and +1.
+4. **Make a first guess at the phase.** A Hilbert transform of the normalized fringes
+   gives the local fringe frequency, but without its sign — only `|f|`. From that, build
+   two candidate starting guesses:
+   - a **two-trim guess**: throw away the extremes of the phase range, then fit a
+     quadratic to what is left. This is right wherever the phase climbs steadily.
+   - a **signed null-flip guess**, built at each dip in `|f|`, which restores the correct
+     sign of the chirp on both sides of a null. It is only accepted when it actually
+     reduces the mismatch with the measured fringes.
+
+   The polynomial order (just `c1`; plus `c2`; plus `c3`) is then chosen by the Bayesian
+   information criterion (**BIC**) — a standard rule that only keeps an extra term if it
+   improves the fit by more than you would expect from noise alone. So a spurious `c3`
+   is rejected without anyone tuning a threshold.
+5. **Refit the cubic** against the raw counts, holding the fringe outlines fixed.
+6. **Decide how much to trust the answer.** Convert the fit's uncertainties into an
+   uncertainty on the phase at the reference wavelength, and decide *where* and *whether*
+   the phase can be believed (§4).
 
 ## 3. Fit output
 
-`analyze()` returns the envelopes (`pU`, `pLn`), the basis origin `l0`, the cubic
-coefficients `csig = (c0..c3)`, the reference wavelength `ref_wl`, quality metrics
-(`rms_frac`, `inlier_pct`), and the trust/accuracy flags below. The reported phase is
-`Φ` evaluated at `ref_wl`, taken mod 2π.
+`analyze()` returns the fringe outlines (`pU`, `pLn`), the reference point `l0`, the
+cubic coefficients `csig = (c0..c3)`, the reference wavelength `ref_wl`, quality numbers
+(`rms_frac`, `inlier_pct`), and the trust flags below. The reported phase is `Φ`
+evaluated at `ref_wl`, taken mod 2π.
 
-## 4. Trust and accuracy gates
+## 4. Trust and accuracy checks
 
-Two independent questions, deliberately separate:
+These answer two deliberately separate questions: *how precise is the number?* and
+*is it measuring the right thing?*
 
-- **`trust_ok` — is the phase precise?** The propagated covariance at the reference,
-  scaled by `TRUST_NSIG`, must fit inside the accuracy spec (relative tolerances on
-  `c1`/`c2`, an absolute mod-2π budget on `c0`). Covers `c0` only — the one quantity the
-  loop acts on. A trace that cannot meet it is reported `underdetermined` rather than
-  handed over as a number that looks like all the others.
-- **`shape_ok` — are the carrier/chirp/TOD supportable?** The same test for `c1..c3`,
-  needed only by consumers that evaluate the fit *away* from the reference (the chart
-  overlay and the RF readout). Kept separate so the loop is not gated on an error it
-  does not care about.
-- **`ref_offset_ok` — is the reference inside the data that supports it?** An *accuracy*
-  (bias) check the covariance is blind to: when a clip shrinks the core, its centroid
-  slides off the operator's reference and the phase there is biased by the crop. Enforced
-  by the accept gate, not the fit.
+- **`trust_ok` — is the phase precise enough?** The uncertainty on the phase at the
+  reference wavelength, multiplied by a safety factor `TRUST_NSIG`, must fit inside the
+  required tolerance (a fractional tolerance on `c1` and `c2`, and an absolute budget on
+  `c0` in radians). This covers `c0` only — the one number the loop acts on. A spectrum
+  that cannot meet it is reported as `underdetermined` rather than handed over as a
+  number that looks just as good as all the others.
+- **`shape_ok` — are `c1`, `c2`, `c3` well enough determined?** The same check applied to
+  those three. Only consumers that use the fit *away* from the reference wavelength need
+  it: the chart overlay and the RF frequency readout. It is kept separate so the control
+  loop is never blocked by an uncertainty it does not care about.
+- **`ref_offset_ok` — is the reference wavelength inside the region the fit actually
+  covers?** This catches a systematic error the uncertainties cannot see: when a clipped
+  arm shrinks the fringed region, the middle of that region slides away from the
+  operator's chosen reference, and the phase quoted back there is skewed by the crop.
+  Enforced by the accept gate, not by the fit itself.
 
-## 5. Adaptive phase reference
+## 5. Choosing the reference wavelength
 
-The phase is reported at a reference wavelength — by default the operator's configured
-`lambda_ref` (≈ the intensity centroid, ~802 nm, where the pulse energy is). When a clip
-leaves that reference unsupported, `ref_wl` falls back to the **core centroid `l0`** (the
-fit's own basis origin, best-conditioned, and for a one-sided clip the point furthest from
-the cut); `ref_fallback` flags it. A `ReferencePolicy` carried across frames adds
-hysteresis (`REF_HYST` consecutive frames before switching) so a locked loop cannot
-chatter between two references.
+The phase is reported at a reference wavelength — normally the operator's configured
+`lambda_ref` (≈ the brightness centroid, ~802 nm, where most of the pulse energy sits).
+If a clipped arm leaves that wavelength outside the usable data, `ref_wl` falls back to
+`l0`, the middle of the fringed region: the best-determined point, and for a one-sided
+clip the point furthest from the cut. `ref_fallback` records that this happened. A
+`ReferencePolicy` object carried from frame to frame requires `REF_HYST` consecutive
+frames before switching, so a locked loop cannot flip back and forth between two
+references.
 
 ## 6. RF frequency readout
 
-The spectral fringe frequency maps to the RF frequency the shot generates via a dispersive
-time-mapping calibration (9 nm ↔ ~320 ps, linear ⇒ **28.125 GHz per cycle/nm**). The
-readout quotes the range of the **signed** frequency across 802 ± 9 nm; where the chirp
+The fringe spacing in the spectrum corresponds to a radio frequency the shot will
+generate. The conversion comes from a timing calibration of the setup (9 nm of
+wavelength maps to ~320 ps of delay, linearly), giving **28.125 GHz per cycle/nm**. The
+readout quotes the range of the **signed** frequency across 802 ± 9 nm. Where the chirp
 sweeps through a null the frequency genuinely goes negative, and the readout shows that
-(a zero-crossing / negative value), gated on `shape_ok` because it extrapolates the cubic
-past the fitted core.
+(a zero crossing, or a negative value). It is gated on `shape_ok` because it evaluates
+the cubic beyond the region that was fitted.
 
 ## 7. From phase to correction (the control loop)
 
-- **`PhaseTracker`** fits each spectrum (cold, seed-independent), carrying only the
-  `ReferencePolicy` and the clip-edge cache across frames. It commits a fit that passes
-  the accept gate and exposes `current_phase = c0 at ref_wl (mod 2π)`.
-- **`PhaseCorrector`** turns the phase error (measured − target, wrapped to the shortest
-  way round) into a *relative* half-wave-plate rotation increment. It is effectively an
-  integral controller: each frame applies `gain ×` the measured error, so the loop
-  integrates and `gain` alone sets its bandwidth. A dead-band (`PHASE_TOLERANCE`) ignores
-  sub-tolerance error; a per-step cap (`MAX_STEP_DEG`) bounds one move.
-- **RGV travel limit.** The rotator handle clamps any correction that would drive the
-  plate past its physical travel (`RGV_MAX_DEG`) and logs it — a correction that large
-  means the phase feeding it is wrong.
-- **Auto-pause.** After `AUTOPAUSE_FAILS` consecutive failed fits the worker stops
-  driving the plate *and* stops fitting every frame (a slow probe only), and auto-resumes
-  on the next committed fit or an operator config change.
+- **`PhaseTracker`** fits each spectrum from scratch, with no dependence on the previous
+  frame's answer. The only things it carries between frames are the `ReferencePolicy` and
+  a cache of where the clip edge was. It commits any fit that passes the accept gate and
+  exposes `current_phase = c0 at ref_wl (mod 2π)`.
+- **`PhaseCorrector`** turns the phase error (measured − target, wrapped to whichever
+  direction is shorter) into a *relative* rotation of the half-wave plate. Each frame it
+  applies `gain ×` the current error, so corrections accumulate over time — this is an
+  integral controller, and `gain` alone sets how fast the loop responds. Errors smaller
+  than `PHASE_TOLERANCE` are ignored (a dead band), and `MAX_STEP_DEG` limits how far a
+  single move can go.
+- **Rotator travel limit.** The rotation-stage handle refuses any correction that would
+  push the plate past its physical travel (`RGV_MAX_DEG`) and logs it — a correction that
+  large means the phase driving it is wrong.
+- **Auto-pause.** After `AUTOPAUSE_FAILS` failed fits in a row the worker stops moving the
+  plate *and* stops fitting every frame (it only probes occasionally). It resumes on the
+  next good fit, or when the operator changes a setting.
 
 ## 8. Operator controls
 
-The operator can drag two pieces of analysis geometry live on the chart: the **envelope
-centre** (`env_center`, pinned so a one-sided clip cannot drag the fit origin) and the
-**manual left clip edge** (`manual_cut_left`, excluding fringes below it). Only left cuts
-are physical on this setup.
+The operator can drag two things directly on the chart: the **centre of the fringe
+outlines** (`env_center`, pinned so that a clip on one side cannot drag it) and the
+**left clip edge** (`manual_cut_left`, which excludes everything below it). Only left-hand
+cuts are physically possible on this setup.
 
 ---
 
-# Decision rationales
+# Why it is built this way
 
-The *why* behind the choices above. This section is the home for that reasoning — the code
-itself carries only what a reader needs to follow *what* it does.
+The reasoning behind the choices above. This is the home for that reasoning — the code
+itself carries only what a reader needs in order to follow *what* it does.
 
-### Baseline anchor for the envelope offset
-The analysis window (`ZOOM`, ±3.1σ of the bump) contains no pure-baseline points, so the
-Gaussian offset is unconstrained. Under the 0.91 quantile loss the fit lowers its own loss
-by floating the offset *up* and shrinking σ with it — on a bright, high-visibility trace it
-settled at offset 255 against a truth of 155, squeezing σ ~12% narrow, corrupting the
-truncation width and inflating `rms_frac`. So the continuum is measured from the *full*
-frame (outside the bump) and the offset is bounded to it (`U_base ± K·D`). This is invisible
-on the saved low-visibility `.xls` traces (bump ~25 counts over ~145 baseline), which fit
-correctly at any window with either optimizer — the bug only bites bright live data, so
-those files must not be trusted to catch it.
+### Anchoring the Gaussian offset to a measured background
+The analysis window (`ZOOM`, ±3.1σ of the bump) contains no pure-background points, so
+nothing in the window pins down the vertical offset of the Gaussians. Under the 0.91
+quantile loss the fit can lower its own error by floating that offset *upward* and
+narrowing σ to match. On a bright, strongly fringed spectrum it settled at offset 255
+when the true value was 155, squeezing σ about 12% too narrow, which corrupted the
+clipped-arm width and inflated `rms_frac`. So the background is measured from the *full*
+spectrum, outside the bump, and the offset is held near it (`U_base ± K·D`).
 
-### Pinball-loss ratio (`RATIO = 10`)
-With a correctly minimized loss the crest/tail penalty ratio barely matters: the offset
-error is +3.6 counts at R=10 vs −0.2 at R=5 — indistinguishable. It is not a loose knob to
-turn.
+This problem is invisible in the saved `.xls` traces, which have weak fringes (a ~25-count
+bump over a ~145-count background) and fit correctly at any window with either optimizer.
+The bug only appears on bright live data, so those saved files must not be trusted to
+catch it.
 
-### Nelder-Mead, not L-BFGS-B (envelope refinement)
-The pinball loss is kinked; a smooth-gradient optimizer (L-BFGS-B on the analytic
-subgradient) stopped at loss 7182.5 after 19 iterations (offset 255, σ 3.41). Nelder-Mead
-on the loss itself is unconditionally safe on a kinked objective. (This was one face of the
-2026-07-16 two-copy drift bug — see "single source of truth".)
+### Quantile-loss ratio (`RATIO = 10`)
+Once the loss is being minimized properly, the exact penalty ratio between peaks and
+troughs barely matters: the offset error is +3.6 counts at R=10 versus −0.2 at R=5, which
+is indistinguishable in practice. This is not a knob worth turning.
 
-### Envelope-centre pin (`ENV_CENTRE_*`)
-The upper-envelope mean `muU` is the anchor the cubic is expanded about. Left-clipping the
-beam pushes the intensity peak rightward (measured: `muU` walks ~802.2 → ~802.9 under a left
-clip), and the phase reported at the fixed reference then inherits noise from an anchor that
-has wandered ~0.7 nm with uncertain curvature (phase@802 scatter 0.72 rad vs a 0.314 budget).
-Pinning `muU` to a narrow band around a known centre refuses to follow the clip. It is a
-band, not a hard value, so a clean frame still fits its own centre; the default is
-operator-dragged because it is not derivable from a truncated stream.
+### Nelder-Mead, not L-BFGS-B, for the outline fit
+The quantile loss has sharp kinks in it. A gradient-based optimizer (L-BFGS-B on the
+analytic subgradient) stalled at loss 7182.5 after 19 iterations, at offset 255 and
+σ 3.41. Nelder-Mead works directly on function values and does not care about kinks, so
+it is safe here. (This was one symptom of the 2026-07-16 duplicated-code bug — see
+*One copy of the math*.)
 
-### Physical cut sides — left only (`PHYSICAL_CUT_SIDES`)
-On this setup only the left (blue) arm can be optically clipped, and will stay that way
-(operator, 2026-07-20). So a right-side detection is not a marginal call — it is a known
-false positive with probability 1. Measured the same day: on a confirmed-clean beam the
-detector reported a right cut on 42/195 frames, always in the red wing where the Gaussian
-has rolled off and contrast is naturally low. Rather than chase that with a wing-aware
-threshold, right-side detection is suppressed outright. Restore `("left", "right")` only if
-the interferometer is rebuilt so the red arm can be clipped.
+### Pinning the outline centre (`ENV_CENTRE_*`)
+The centre of the upper outline, `muU`, is the point the cubic is expanded about.
+Clipping the beam on the blue side pushes the apparent brightness peak to the right —
+measured, `muU` walks from ~802.2 to ~802.9 nm under a left clip — and the phase reported
+at a fixed reference then inherits the wobble of an anchor that has moved ~0.7 nm with
+poorly known curvature (phase at 802 nm scattered by 0.72 rad against a 0.314 rad
+budget). Holding `muU` inside a narrow band around a known centre stops it from chasing
+the clip. It is a band, not a fixed value, so a clean frame can still find its own
+centre. The default centre is set by the operator dragging it, because it cannot be
+derived from a stream of clipped frames.
 
-### Truncation detection — separating a clip from a null
-A clipped arm removes a spectral tail: the fringes (the cross term `2·A_a·A_b·cos Φ`) stop
-abruptly where `A_b = 0`, leaving the lone arm's smooth Gaussian tail. The confounder is a
-null, where the instantaneous frequency crosses zero and the fringe is *also* locally flat.
-Two things separate them, and both are required: **pinning** (at a null the trace parks on
-an envelope, `|n| ≈ 1`; a clipped band sits strictly inside them, `|n|` well below 1) and
-**edge-touching** (a null is interior — fringes resume on both sides — while a clipped tail
-runs from its edge to the boundary). Detection is confined to where the envelope gap beats
-read noise by `TRUNCDET_SNR_GAP`; below that the answer is "unknown", not "none". The DC
-step from a clip is not relied on: it is ~1.7 counts at the real ~7% visibility, comparable
-to read noise. Detection is diagnostic only — it never feeds the fit directly.
+### Only left-hand cuts are real (`PHYSICAL_CUT_SIDES`)
+On this setup only the left (blue) arm can be optically clipped, and that will not change
+(operator, 2026-07-20). So a detection on the right side is not a borderline call — it is
+a known false alarm, every time. Measured the same day: on a beam confirmed clean, the
+detector reported a right-side cut on 42 of 195 frames, always out in the red wing where
+the Gaussian has rolled off and the fringes are naturally faint. Rather than chase that
+with a wing-aware threshold, right-side detection is switched off entirely. Restore
+`("left", "right")` only if the interferometer is rebuilt so the red arm can be clipped.
 
-### Null localization — two-sided prominence, not argmin-fold
-The Hilbert instantaneous frequency is unsigned. A genuine null is a *V* in `|f|` that rises
-on both sides of an interior minimum; a monotonic trace has `|f|` rising on one side only, so
-the two-sided prominence collapses. That is how "no null exists" is detected — replacing an
-old argmin+fold that fabricated a null on every trace.
+### Telling a clipped arm from a null
+A clipped arm removes one end of the spectrum: the fringes (the interference term
+`2·A_a·A_b·cos Φ`) stop abruptly where `A_b = 0`, leaving only the smooth Gaussian tail of
+the surviving arm. The thing that looks similar is a null, where the fringe frequency
+crosses zero and the trace is *also* locally flat. Two features tell them apart, and both
+are required:
 
-### Two-trim + null-flip seed
-The full-signal fit is seeded by: the contrast crop (removes low-visibility wings), a
-phase-value trim (cuts the folded null plateau) + quadratic polyfit of the surviving
-one-sided arm — correct wherever the phase is near-monotonic — and, per `|f|` dip, a signed
-parabolic seed that carries the real chirp through the null, taken only when it cuts the
-fringe SSE by ≥ the margin. So an inaccurate or false null candidate cannot poison the fit.
+- **Where the flat part sits.** At a null the trace is parked against one of the outlines,
+  so `|n| ≈ 1`. In a clipped band the trace sits strictly between the outlines, with
+  `|n|` well below 1.
+- **Whether it touches the edge.** A null is interior — fringes resume on both sides of
+  it — while a clipped region runs from its edge all the way to the end of the spectrum.
 
-### BIC phase-order selection
-Order = degree of the frequency polynomial. Instead of a hand-tuned ridge, BIC
-(`n·ln(SSE/n) + k·ln(n)`) penalizes extra terms, so spurious TOD is rejected automatically.
-Applied only when the frequency is one-signed; at a null, TOD is unidentifiable and the
+Detection only runs where the gap between the outlines beats the camera read noise by
+`TRUNCDET_SNR_GAP`; below that the answer is "unknown", not "no clip". The small step in
+average brightness that a clip produces is deliberately not used: at the real ~7% fringe
+visibility it is only ~1.7 counts, comparable to read noise. Detection is diagnostic only
+— it never feeds the fit directly.
+
+### Finding a null: look for a V, not just a minimum
+The frequency from the Hilbert transform has no sign, so a real null appears as a *V* in
+`|f|` — a minimum that rises again on *both* sides. On a spectrum with no null, `|f|` only
+rises on one side, so the two-sided test finds nothing. That is exactly how "there is no
+null here" gets detected. It replaced an earlier approach (take the minimum, fold around
+it) that invented a null on every spectrum.
+
+### The two starting guesses
+The full fit is seeded by: the contrast crop (which removes the faint wings), a
+phase-range trim plus a quadratic fit to what survives — correct wherever the phase
+climbs steadily — and, at each dip in `|f|`, a signed parabolic guess that carries the
+correct chirp sign through the null. The second one is accepted only when it reduces the
+fringe mismatch (sum of squared errors) by at least a set margin, so a wrong or imagined
+null cannot poison the fit.
+
+### BIC for choosing the polynomial order
+The order here is the degree of the frequency polynomial. Rather than hand-tuning a
+penalty, the fit uses BIC (`n·ln(SSE/n) + k·ln(n)`), which charges a fixed price per extra
+coefficient, so a spurious `c3` is dropped automatically. It is applied only when the
+frequency keeps one sign; at a null `c3` cannot be determined from the data at all, so the
 order is capped at 2 by design.
 
-### Scan-free path vs. the recovery scan
-Truncation is handled by trimming the core (the active `TRUNC_METHOD="phase"` conditional
-phase trim). The "coarse cut" derivative idea was tried and dropped (2026-07-19): net-
-negative in testing — it over-cropped good traces into false-drops (+16 vs no coarse cut on
-the realistic suite) and never fixed the truncation corner it was built for.
+### The scan-free path versus the recovery scan
+A clipped arm is handled by trimming the fringed region (the active
+`TRUNC_METHOD="phase"` conditional phase trim). The "coarse cut" derivative idea was tried
+and dropped (2026-07-19): it came out net-negative in testing — it over-cropped good
+spectra into 16 extra false rejections on the realistic test suite — and never fixed the
+clipped-arm case it was built for.
 
-### Trust gate calibration (`TRUST_NSIG = 3.0`)
-The Gauss-Newton covariance under-estimates the true error for two reasons it cannot see:
-the envelopes are held fixed through the phase fit (their error biases the phase without
-entering the covariance), and the phase noise is not the white intensity noise the SSE/dof
-scaling assumes. `NSIG` absorbs both. It *is* the accuracy/yield trade, both sides specced
-(≥98% of reported fits correct, ≤5% of good fits declined; user, 2026-07-16). Swept over
-2470 fits, two seeds:
+### Calibrating the trust factor (`TRUST_NSIG = 3.0`)
+The fit's own uncertainty estimate is too optimistic, for two reasons it cannot see: the
+fringe outlines are held fixed while the phase is fitted (so their error skews the phase
+without showing up in the uncertainty), and the phase noise is not the simple white
+intensity noise the uncertainty calculation assumes. `TRUST_NSIG` absorbs both. It is the
+accuracy-versus-yield trade, and both sides are specified: at least 98% of reported fits
+correct, at most 5% of good fits rejected (user, 2026-07-16). Swept over 2470 fits, two
+random seeds:
 
-| NSIG | accuracy | false-drop |
+| NSIG | accuracy | good fits wrongly rejected |
 |------|----------|-----------|
 | 2.0  | 97.97%   | 0.8%      |
-| 3.0  | 98.54%   | 3.7%  ← shipped (margin on both bars) |
-| 3.25 | 98.69%   | 4.9%  (on the 5% line, no headroom) |
+| 3.0  | 98.54%   | 3.7%  ← shipped (margin on both requirements) |
+| 3.25 | 98.69%   | 4.9%  (right on the 5% line, no headroom) |
 | 5.0  | 99.31%   | 15.0%     |
 | 16.0 | ~99.86%  | ~69.5%    |
 
-Do not chase 99.9% with this knob — it saturates while yield collapses. The residual ~1–1.5%
-is real TOD at the identifiability floor (true `c3 = ±0.005`) that BIC declines to model;
-fixing it means revisiting order selection, not tightening this gate.
+Do not chase 99.9% with this knob — accuracy saturates while yield collapses. The
+remaining ~1–1.5% is real third-order dispersion right at the limit of what the data can
+resolve (true `c3 = ±0.005`), which BIC correctly declines to model. Fixing that means
+revisiting order selection, not tightening this factor.
 
 ### Phase tolerance = 5% of 2π (`TRUST_TOL_C0 = 0.314`)
-Was 0.126 (2% of 2π), never checked against what the loop needs and the binding term on real
-traces. 5% is the honest spec (user, 2026-07-19): the beam jitters more than 2% shot-to-shot
-even while stabilized, and stabilization was never meant to suppress that jitter — it exists
-to stop the slow drift that smears phase across a long scan. A gate an order of magnitude
-below the jitter it lives in rejects frames for an error the loop does not care about.
+It used to be 0.126 (2% of 2π), a number that was never checked against what the loop
+actually needs, and it was the term that decided the outcome on real spectra. 5% is the
+honest requirement (user, 2026-07-19): the beam itself jitters by more than 2% from shot
+to shot even while stabilized, and stabilization was never meant to suppress that jitter —
+it exists to stop the slow drift that smears the phase out over a long scan. A threshold
+ten times tighter than the jitter it lives in just rejects frames for an error the loop
+does not care about.
 
-### Reference-offset accuracy gate (`REF_MAX_OFFSET_FRAC = 0.12`)
-`trust_at` is a *precision* test and is blind to a *bias*: when one arm is clipped the fitted
-core shrinks and its centroid slides off the operator's reference, and the phase quoted back
-there splits into two populations the covariance cannot tell apart. Measured over 58
-consecutive frames, grouped by whether the core had displaced: phase @ 802 nm read 4.128 rad
-vs 2.734 rad — a 1.40 rad step on frames that all reported `trust=True`, `rms_frac ~0.10`,
-97–100% inliers. 0.12 sits in the gap the two populations leave (0.04 → 0.15). It is a
-separation threshold read off real data — re-measure it if the spectrometer window or the
-core crop changes.
+### Reference-offset check (`REF_MAX_OFFSET_FRAC = 0.12`)
+`trust_at` tests *precision* and is blind to *bias*: when one arm is clipped, the fringed
+region shrinks, its centre slides away from the operator's reference wavelength, and the
+phase quoted back there splits into two distinct populations that the uncertainty estimate
+cannot distinguish. Measured over 58 consecutive frames, grouped by whether the fringed
+region had shifted: the phase at 802 nm read 4.128 rad in one group and 2.734 rad in the
+other — a 1.40 rad step, on frames that all reported `trust=True`, `rms_frac ~0.10`, and
+97–100% inliers. The threshold 0.12 sits in the empty gap between the two populations
+(which ran 0.04 and 0.15). It is a separation threshold read off real data — re-measure it
+if the spectrometer window or the crop changes.
 
-### Adaptive reference + hysteresis
-The default reference (intensity centroid ~802 nm) is where the pulse energy is, but a clip
-1–2 nm from it drops reported accuracy to ~87–90% and makes the trust gate decline ~40% of
-fits it would otherwise get right. Falling back to the core centroid `l0` restores that. The
-`ReferencePolicy` hysteresis (`REF_HYST = 5`) exists because a loop locked to one wavelength
-must not chatter between two; a caller with no policy switches immediately.
+### Falling back to a different reference, with hysteresis
+The default reference (brightness centroid, ~802 nm) is where the pulse energy is, but a
+clip landing 1–2 nm from it drops reported accuracy to ~87–90% and makes the trust check
+reject about 40% of fits it would otherwise get right. Falling back to `l0`, the centre of
+the fringed region, restores that. The `ReferencePolicy` hysteresis (`REF_HYST = 5`)
+exists because a loop locked to one wavelength must not flip back and forth between two;
+a caller that supplies no policy switches immediately.
 
-### RF readout — signed, and the band
-The range is reported *signed*, not `|f|`: where the chirp sweeps the frequency through zero,
-`abs()` folds the negative arm up and — because the exact zero rarely lands on a grid node —
-surfaces a meaningless small positive (~0.03 GHz) instead of the true zero-crossing/negative
-excursion. The band (±9 nm) deliberately extrapolates past the fitted core to answer "what RF
-does this shot generate across the pulse", which is why the readout is gated on `shape_ok`.
+### RF readout — signed, and the ±9 nm band
+The range is reported with its sign rather than as `|f|`. Where the chirp sweeps the
+frequency through zero, taking the absolute value folds the negative part upward, and
+because the exact zero almost never lands on a sample point, the result is a meaningless
+small positive number (~0.03 GHz) instead of the true zero crossing or negative
+excursion. The ±9 nm band deliberately reaches beyond the fitted region, because the
+question being answered is "what RF does this shot generate across the whole pulse" —
+which is why the readout is gated on `shape_ok`.
 
-### Corrector — gain, step cap, accumulation limit
-The plant has ~0.5 s of dead time and the phase noise is faster than the measure-and-move
-cycle, so the loop is deliberately overdamped (`LOOP_GAIN = 0.05`, ~1/gain frames to pull
-in): chasing noise faster than the cycle just injects it into the stage. `MAX_STEP_DEG` caps
-a single move (binds only when the operator winds the gain toward 1). Neither bounds an
-*accumulation* of correctly-sized steps that all point the same way — that failure (a biased
-readout winding the plate through whole turns) is caught where absolute position is known, at
-the RGV travel limit.
+### Corrector — gain, step cap, and what bounds accumulation
+The hardware takes about 0.5 s to respond, and the phase noise is faster than one
+measure-and-move cycle, so the loop is deliberately sluggish (`LOOP_GAIN = 0.05`, taking
+roughly 1/gain frames to pull in). Chasing noise faster than the cycle time just injects
+that noise into the stage. `MAX_STEP_DEG` caps any single move, and only really binds if
+the operator winds the gain up toward 1. Neither of those bounds an *accumulation* of
+correctly-sized steps that all point the same way — the failure where a biased reading
+slowly winds the plate through whole turns. That is caught at the one place absolute
+position is known: the rotator travel limit.
 
-### Single source of truth for the math
-`fringe_core.py` is the one place the analysis lives; `fringe_fit.py` holds no math. The app
-once carried a second, hand-maintained copy, and every bug found 2026-07-16 was drift between
-the two: Nelder-Mead's absolute `fatol` passed as L-BFGS-B's relative `ftol` (offset 255 vs
-155), the cubic seeded with `c1 = 0` (carrier wrong on every trace), and no baseline anchor.
-One copy, no drift. Calibrated constants are imported from `fringe_core`, never restated in
-the adapter or config.
+### One copy of the math
+`fringe_core.py` is the only place the analysis lives; `fringe_fit.py` contains no math.
+The app once carried a second, hand-maintained copy, and every bug found on 2026-07-16
+was the two copies drifting apart: Nelder-Mead's absolute `fatol` passed to L-BFGS-B as
+its relative `ftol` (giving offset 255 instead of 155), the cubic seeded with `c1 = 0`
+(so the fringe spacing started wrong on every spectrum), and no baseline anchor. One
+copy, no drift. Calibrated constants are imported from `fringe_core` and never restated
+in the adapter or in config.
 
 ---
 
 # Dead ends & disabled experiments
 
-Recorded so they are not re-tried. The corresponding flags remain in the code as `False`.
+Recorded so they are not tried again. The corresponding flags are still in the code, set
+to `False`.
 
 - **Global-kernel Hilbert detrend** (do not re-add). The idea — subtract
-  `gaussian_filter1d(n, σ)` to zero-mean `n` before the Hilbert transform — is sound, but one
-  global kernel cannot be "about one period" everywhere on a chirped/null trace: on
-  `da_15.95ga_-75` it tracked the fast blue-third fringe and ate 14.7% of the fringe RMS,
-  collapsing `r2_fringe` 0.645 → −0.116. Six of seven traces were bit-identical anyway (the
-  full fit dominates the seed), so the seed barely matters. Any retry needs a local,
-  chirp-following kernel and must first show the seed matters at all.
-- **`JOINT_ENV_FIT`** (off). Re-solving the phase and both envelope Gaussians jointly is a
-  clean win on untruncated traces (`r2_sig` 0.988 → 0.995) but on truncated traces the freed
-  envelope absorbs the missing-arm misfit, passes the trust gate with the phase actually wrong
-  (+23 confidently-wrong), and suppresses the recovery scan that used to catch them. Safe use
-  needs gating to traces the frozen fit already explains with `side == "none"` — a second pass
-  not yet built.
-- **`DEADZONE_REFIT`** (off). Refitting the envelopes on the full window minus the knife
-  deadzone — an alternative to the recovery scan, left off pending evaluation.
-- **`SCANFREE` / alternate `TRUNC_METHOD`** (off / "phase" active). The deterministic
-  scan-free path and the "knife"/"none" truncation methods were built for comparison against
-  the shipped recovery scan; the phase-trim method is the one in use.
+  `gaussian_filter1d(n, σ)` to centre `n` on zero before the Hilbert transform — is sound,
+  but a single fixed smoothing width cannot be "about one fringe period" everywhere on a
+  spectrum whose fringe spacing changes: on `da_15.95ga_-75` it followed the fast fringes
+  in the blue third and removed 14.7% of the fringe amplitude, collapsing `r2_fringe` from
+  0.645 to −0.116. Six of the seven test spectra came out bit-identical anyway, because
+  the full fit dominates its starting guess — so the guess barely matters. Any retry needs
+  a smoothing width that follows the local fringe spacing, and must first show that the
+  starting guess matters at all.
+- **`JOINT_ENV_FIT`** (off). Fitting the phase and both Gaussian outlines together is a
+  clear win on unclipped spectra (`r2_sig` 0.988 → 0.995), but on clipped ones the freed
+  outlines absorb the mismatch left by the missing arm, so the fit passes the trust check
+  while the phase is actually wrong (+23 confidently-wrong results) and the recovery scan
+  that used to catch those never fires. Using it safely means restricting it to spectra
+  the frozen fit already explains with `side == "none"` — a second pass that has not been
+  built.
+- **`DEADZONE_REFIT`** (off). Refitting the outlines on the full window minus the knife
+  dead zone — an alternative to the recovery scan, left off pending evaluation.
+- **`SCANFREE` / alternate `TRUNC_METHOD`** (off; "phase" is active). The deterministic
+  scan-free path and the "knife"/"none" clip-handling methods were built to compare
+  against the shipped recovery scan; the phase-trim method is the one in use.
