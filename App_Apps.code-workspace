@@ -34,7 +34,7 @@
     ]
   },
   "settings": {
-    "python.defaultInterpreterPath": "${workspaceFolder:App_Apps}/.venv/Scripts/python",
+    "python.defaultInterpreterPath": "${workspaceFolder:App_Apps}/.venv/Scripts/python.exe",
     "python.analysis.indexing": true,
     "python.analysis.autoImportCompletions": true,
     "python.analysis.extraPaths": [

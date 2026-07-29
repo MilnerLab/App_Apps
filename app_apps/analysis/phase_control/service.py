@@ -50,10 +50,10 @@ class PhaseControlService(SubprocessService):
     def set_config(self) -> None:
         self._phase_stabilization_handle.set_config(self._config)
 
-    def _active_handle(self) -> PhaseStabilizationHandle | EnvelopeHandle:
+    def _active_handle(self) -> PhaseStabilizationHandle | EnvelopeHandle: #this could be where the two modes of phase stabilization are toggled. This would mean the Hilbert transform fringe fitting should have its own separate handle and worker?
         return self._phase_stabilization_handle if self._mode == ControlMode.PHASE_TRACKING else self._envelope_handle
 
-    def set_worker_paused(self, paused: bool) -> None:
+    def set_worker_paused(self, paused: bool) -> None: 
         handle = self._active_handle()
         handle.pause() if paused else handle.resume()
 

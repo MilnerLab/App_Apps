@@ -514,3 +514,4 @@ out/
 .history
 
 # End of https://www.gitignore.io/api/linux,visualstudiocode,latex
+App_Apps_adm.code-workspace
