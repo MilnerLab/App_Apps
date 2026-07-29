@@ -6,7 +6,11 @@ from base_core.framework.events.event_bus import EventBus
 from base_core.ipc.message import OKReply
 from base_core.ipc.service_connector import ServicePipelineConnector
 from base_core.ipc.worker_handle import BaseWorkerHandle
-from app_apps.analysis.phase_control.events import PhaseTrackingStateChanged, StabilizationConfigChanged
+from app_apps.analysis.phase_control.events import (
+    PhaseTrackingStateChanged,
+    StabilizationAutoPauseChanged,
+    StabilizationConfigChanged,
+)
 
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.analysis.phase_control.subprocess.messages import (
@@ -14,6 +18,7 @@ from app_apps.analysis.phase_control.subprocess.messages import (
     CorrectionAvailable,
     SetStabilizationConfig,
     SpectrumProcessed,
+    StabilizationAutoPaused,
 )
 from app_apps.io.control_readout.rgv.events import RequestRotateRGV
 from app_apps.io.spectrometer.events import SpectrumAck
@@ -33,6 +38,7 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
     def subscribe(self) -> None:
         self._subscribe_service(CorrectionAvailable, self._on_correction_available)
         self._subscribe_service(SpectrumProcessed, self._on_spectrum_processed)
+        self._subscribe_service(StabilizationAutoPaused, self._on_auto_paused)
         self._spectrum_writer.register_consumer(self.CONSUMER_ID)
 
     def unsubscribe(self) -> None:
@@ -61,6 +67,12 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
 
     def _on_correction_available(self, msg: CorrectionAvailable) -> None:
         self._bus.publish(RequestRotateRGV(angle=msg.angle))
+
+    def _on_auto_paused(self, msg: StabilizationAutoPaused) -> None:
+        # Mirror the worker's auto-pause across the process boundary so the chart can tell
+        # the operator the loop has stopped driving the plate (and why).
+        self._bus.publish(StabilizationAutoPauseChanged(
+            paused=msg.paused, consecutive_failures=msg.consecutive_failures))
 
     def _on_spectrum_processed(self, msg: SpectrumProcessed) -> None:
         self._bus.publish(SpectrumAck(slot=msg.slot, item_id=msg.item_id, consumer_id=msg.consumer_id))

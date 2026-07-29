@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+from dataclasses import fields
 from typing import Any, ClassVar, TYPE_CHECKING
 
 from base_core.ipc.worker_handle import WorkerStatus
 from base_core.quantities.enums import Prefix
-from base_qt.ui.form import AngleSpec, BoolSpec, DirtyForm, FloatSpec, GDDSpec, IntSpec, LengthSpec, RangeSpec, TimeSpec
+from base_qt.ui.form import DirtyForm, FloatSpec, LengthSpec, RangeSpec
+
+from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import (
+    GAIN_MAX,
+    GAIN_MIN,
+)
+from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import (
+    FringeFitParams,
+)
 
 
 if TYPE_CHECKING:
@@ -18,48 +27,48 @@ _EDITABLE_STATES = (WorkerStatus.NEW, WorkerStatus.PAUSED)
 
 
 class PhaseConfigView(DirtyForm):
-    _PARAMS_FIELDS: ClassVar[frozenset[str]] = frozenset({
-        "lambda0", "delta_lambda_fwhm", "R", "L",
-        "theta0", "theta1", "theta2",
-        "alpha_R", "epsilon_R", "s_R", "alpha_L", "epsilon_L", "s_L", "offset",
-    })
+    # Derived, not hand-listed: a spec name lives on FringeFitParams if and only if
+    # FringeFitParams declares it, and every other spec belongs to StabilizationConfig.
+    # Spelling this set out by hand made it a fourth list that had to agree with _specs,
+    # _groups and _readonly_when_running, and it silently fell out of step during the v3
+    # port -- a field routed to the wrong object only fails at _populate, i.e. on app
+    # start. The two dataclasses share no field names, so this stays unambiguous.
+    _PARAMS_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        f.name for f in fields(FringeFitParams)
+    )
 
+    # The folded-chirp knobs (ratio, sigma_init, phase_loss_scale, signal_loss_frac,
+    # init_smooth_div) went away with that pipeline: the v3 analysis owns those as
+    # calibrated constants, and exposing constants nobody can tune from the
+    # instrument only invites mis-setting them.
     _specs = {
-        "lambda0":             LengthSpec("λ₀",             Prefix.NANO, min=700,  max=1000),
-        "delta_lambda_fwhm":   LengthSpec("FWHM bandwidth", Prefix.NANO, min=0.1,  max=50),
-        "R":                   FloatSpec("Amplitude R (reference arm)", 0.0, 10.0),
-        "L":                   FloatSpec("Amplitude L (grating arm)",   0.0, 10.0),
-        "theta0":              AngleSpec("Phase θ₀"),
-        "theta1":              TimeSpec("θ₁", Prefix.PICO, min=-10.0, max=10.0),
-        "theta2":              GDDSpec("θ₂", Prefix.PICO, min=-10.0, max=10.0),
-        "alpha_R":             FloatSpec("Skewness α (R)",      -50.0,   50.0,   decimals=3, step=0.1),
-        "epsilon_R":           FloatSpec("Skew location ε (R)", -100.0,  100.0,  decimals=3, step=0.1),
-        "s_R":                 FloatSpec("Skew scale s (R)",      0.0001, 200.0, decimals=3, step=0.1),
-        "alpha_L":             FloatSpec("Skewness α (L)",      -50.0,   50.0,   decimals=3, step=0.1),
-        "epsilon_L":           FloatSpec("Skew location ε (L)", -100.0,  100.0,  decimals=3, step=0.1),
-        "s_L":                 FloatSpec("Skew scale s (L)",      0.0001, 200.0, decimals=3, step=0.1),
-        "offset":              FloatSpec("Offset",            0.0,   float("inf")),
-        "wavelength_range":    RangeSpec(
+        "trunc_threshold":   FloatSpec("Truncation threshold",     0.0,   1.0,    decimals=2, step=0.05),
+        "trust_nsig":        FloatSpec("Trust margin (sigmas)",    1.0,   16.0,   decimals=2, step=0.25),
+        "lambda_ref":        LengthSpec("λ_ref (preferred)", Prefix.NANO, min=700, max=1000),
+        "wavelength_range":  RangeSpec(
             "Wavelength range",
             LengthSpec("", Prefix.NANO, min=700, max=1000),
         ),
-        "residuals_threshold": FloatSpec("Residuals threshold", 0.0, 1000.0, decimals=1, step=1.0),
-        "avg_spectra":         IntSpec("Averaging window", 1, 100),
+        "rms_frac_threshold": FloatSpec("Accept rms/amp below",    0.0,   2.0,     decimals=3, step=0.02),
+        "inlier_threshold":  FloatSpec("Accept inliers above (%)", 0.0,   100.0,   decimals=0, step=1.0),
+        "loop_gain":         FloatSpec("Loop gain (err/frame)", GAIN_MIN, GAIN_MAX, decimals=2, step=0.01),
     }
     _groups = [
-        ("Spectral Fit", [
-            "lambda0", "delta_lambda_fwhm", "R", "L",
-            "theta0", "theta1", "theta2",
-            "alpha_R", "epsilon_R", "s_R", "alpha_L", "epsilon_L", "s_L", "offset",
+        ("Fit tunables", [
+            "trunc_threshold", "trust_nsig", "lambda_ref",
         ]),
         ("Tracking", [
-            "wavelength_range", "residuals_threshold", "avg_spectra",
+            "wavelength_range", "rms_frac_threshold", "inlier_threshold",
+        ]),
+        ("Control loop", [
+            "loop_gain",
         ]),
     ]
+    # loop_gain is deliberately NOT here: tuning the gain against a loop you are watching
+    # settle is the entire reason it is exposed, and it is safe to change mid-run (the
+    # corrector is retuned in place, and the fit does not depend on it at all).
     _readonly_when_running = frozenset({
-        "lambda0", "delta_lambda_fwhm", "R", "L",
-        "theta0", "theta1", "theta2",
-        "alpha_R", "epsilon_R", "s_R", "alpha_L", "epsilon_L", "s_L", "offset",
+        "trunc_threshold", "trust_nsig", "lambda_ref",
     })
 
     def __init__(

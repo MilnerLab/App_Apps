@@ -16,3 +16,10 @@ class PhaseTrackingStateChanged:
 @dataclass
 class EnvelopeStateChanged:
     pass
+
+
+@dataclass
+class StabilizationAutoPauseChanged:
+    """Main-process mirror of the worker's StabilizationAutoPaused message, for the UI."""
+    paused: bool = False
+    consecutive_failures: int = 0
