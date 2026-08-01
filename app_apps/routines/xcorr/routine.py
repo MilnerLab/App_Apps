@@ -30,17 +30,21 @@ import time
 from pathlib import Path
 from typing import Callable, TYPE_CHECKING
 
+import numpy as np
+
 from base_core.framework.events.event_bus import EventBus
 from base_core.framework.routines.routine_base import BaseRoutine, routine_thread
 from base_core.framework.serialization.h5_utils import now_utc_iso
 from base_core.ipc.worker_handle import BaseWorkerHandle, WorkerStatus
+from oscilloscope.config import ScopeConfig
 
-from app_apps.routines.xcorr.config import AXIS_LIMITS, XcorrConfig
+from app_apps.routines.xcorr.config import AXIS_LIMITS, SCOPE_RESOURCE, XcorrConfig
 from app_apps.routines.xcorr.events import (
     XcorrFailed,
     XcorrFinished,
     XcorrGroupWritten,
     XcorrProgress,
+    XcorrScanStarted,
 )
 from app_apps.routines.xcorr.planner import PlanError, ScanPlan, Setpoint, plan_scan
 from app_apps.routines.xcorr.storage import XcorrH5Writer, default_run_path
@@ -49,6 +53,7 @@ if TYPE_CHECKING:
     from app_apps.io.control_readout.fms300pp.handler import Fms300ppHandle
     from app_apps.io.control_readout.mfa_cc.handler import MfaccHandle
     from app_apps.io.control_readout.uts150cc.handler import Uts150ccHandle
+    from app_apps.io.oscilloscope.oscilloscope_worker_handler import OscilloscopeWorkerHandle
 
 log = logging.getLogger(__name__)
 
@@ -78,15 +83,31 @@ class XcorrRoutine(BaseRoutine):
         probe: "Fms300ppHandle",
         delay: "MfaccHandle",
         grating: "Uts150ccHandle",
+        scope: "OscilloscopeWorkerHandle",
     ) -> None:
         self._cfg = config
         self._probe = probe
         self._delay = delay
         self._grating = grating
+        self._scope = scope
+        #: Built once at start from the run config; carries the VISA resource, channel,
+        #: fixed 2500 record and the mock flag. ``discard`` is reused per acquire.
+        self._scope_cfg = ScopeConfig(
+            resource=SCOPE_RESOURCE,
+            channel=config.channel,
+            n_samples=2500,
+            mock=config.mock_scope,
+        )
 
         # Set from the caller's thread, read on the routine thread. NOT dispatched —
         # a dispatched abort would queue behind the very loop it is meant to stop.
         self._abort = threading.Event()
+        # Pause gate, same threading discipline as _abort: set = free to run,
+        # cleared = paused. The routine thread blocks on it at each probe point, so a
+        # pause (like an abort) takes effect at the next point, never mid-move. Starts
+        # set so a fresh run is never born paused.
+        self._resume = threading.Event()
+        self._resume.set()
         self._running = threading.Event()
         self._run_path: Path | None = None
         super().__init__(bus)
@@ -96,6 +117,10 @@ class XcorrRoutine(BaseRoutine):
     @property
     def is_running(self) -> bool:
         return self._running.is_set()
+
+    @property
+    def is_paused(self) -> bool:
+        return self._running.is_set() and not self._resume.is_set()
 
     @property
     def run_path(self) -> Path | None:
@@ -122,6 +147,38 @@ class XcorrRoutine(BaseRoutine):
             return
         log.info("XcorrRoutine: abort requested — will stop at the next probe point")
         self._abort.set()
+        # If a pause is in force the routine thread is parked in _wait_while_paused();
+        # release it so it wakes, sees the abort and unwinds. Without this an abort
+        # requested while paused would hang until someone resumed.
+        self._resume.set()
+
+    def pause(self) -> None:
+        """Request a pause. Takes effect at the **next probe point** (like abort).
+
+        An in-flight move or acquisition is never interrupted; the routine parks at
+        the next point until :meth:`resume`. Stages hold position while paused.
+        """
+        if not self._running.is_set():
+            return
+        log.info("XcorrRoutine: pause requested — will hold at the next probe point")
+        self._resume.clear()
+
+    def resume(self) -> None:
+        """Lift a pause; the scan continues from where it parked."""
+        if not self._resume.is_set():
+            log.info("XcorrRoutine: resuming scan")
+        self._resume.set()
+
+    def _wait_while_paused(self) -> None:
+        """Block the routine thread while paused, staying responsive to abort.
+
+        Polls rather than a bare ``wait()`` so an abort raised while paused is noticed
+        promptly — ``abort()`` also sets ``_resume``, but polling keeps the contract
+        robust to either order.
+        """
+        while not self._resume.wait(_START_POLL_S):
+            if self._abort.is_set():
+                return
 
     # -- the run ----------------------------------------------------------
 
@@ -137,24 +194,49 @@ class XcorrRoutine(BaseRoutine):
             self._running.clear()
             self._bus.publish(XcorrFailed(error=str(exc)))
             return
-
-        for w in plan.warnings:
-            log.warning("XCORR plan warning: %s", w)
-
-        log.info(
-            "XCORR plan: %d setpoint(s) x %d probe point(s) = %d points; outer axis "
-            "= %s (%s)",
-            len(plan.setpoints), len(plan.probe_mm), plan.n_points,
-            plan.outer_axis, plan.outer_reason,
-        )
+        except Exception as exc:
+            # planning must never crash *silently*: an unhandled error here would
+            # escape _run_scan without ever publishing XcorrFailed, so the headless
+            # harness would wait forever and the still-running control_readout
+            # subprocess would be orphaned holding COM7 (defect G25). Publish and
+            # clear like any other failure so the run always ends cleanly.
+            log.exception("XCORR planning failed")
+            self._running.clear()
+            self._bus.publish(XcorrFailed(error=str(exc)))
+            return
 
         try:
+            for w in plan.warnings:
+                log.warning("XCORR plan warning: %s", w)
+
+            fine, coarse = plan.probe_step_range_mm
+            log.info(
+                "XCORR plan: %d setpoint(s), %d probe point(s) total, step %.3f..%.3f mm; "
+                "outer axis = %s (%s)",
+                len(plan.setpoints), plan.n_points, fine, coarse,
+                plan.outer_axis, plan.outer_reason,
+            )
+
+            # Announce the run's shape before anything moves, so a live display can set
+            # up its position header / progress bar during the handle-start delay.
+            gvals = [sp.grating_mm for sp in plan.setpoints]
+            dvals = [sp.delay_base_mm for sp in plan.setpoints]
+            self._bus.publish(XcorrScanStarted(
+                grating_range_mm=(min(gvals), max(gvals)),
+                delay_base_range_mm=(min(dvals), max(dvals)),
+                probe_base_range_mm=(min(self._cfg.probe_start_mm, self._cfg.probe_stop_mm),
+                                     max(self._cfg.probe_start_mm, self._cfg.probe_stop_mm)),
+                n_points=plan.n_points,
+                n_setpoints=len(plan.setpoints),
+            ))
+
             self._start_handles()
 
             self._run_path = default_run_path(self._cfg.out_dir)
             with XcorrH5Writer(self._run_path) as writer:
                 writer.write_config(self._cfg, plan)
                 writer.write_provenance("esp301", self._esp301_provenance())
+                writer.write_provenance("scope", self._scope_provenance())
                 self._scan(plan, writer)
                 writer.mark_finished(aborted=self._abort.is_set())
 
@@ -236,6 +318,9 @@ class XcorrRoutine(BaseRoutine):
         n_probe = len(sp.probe_base_mm)
         rows: list[tuple[float, float, float, int]] = []
         for pi, p_base in enumerate(sp.probe_base_mm):
+            # Hold here while paused (stages stationary), then re-check abort: a pause
+            # can be turned into an abort, and _wait_while_paused returns on abort too.
+            self._wait_while_paused()
             if self._abort.is_set():
                 log.info(
                     "XCORR aborted at probe point %d/%d of setpoint %d",
@@ -260,7 +345,9 @@ class XcorrRoutine(BaseRoutine):
                 n_points=n_points,
                 grating_mm=sp.grating_mm,
                 delay_mm=sp.delay_mm,
+                delay_base_mm=sp.delay_base_mm,
                 probe_mm=p_cmd,
+                probe_base_mm=p_base,
                 v_mean_pos=mean,
             ))
         return rows, False
@@ -268,17 +355,55 @@ class XcorrRoutine(BaseRoutine):
     # -- acquisition ------------------------------------------------------
 
     def _acquire_point(self, probe_mm: float) -> tuple[float, float, int]:
-        """One probe point: ``(v_mean_pos, v_std, n_traces)``.
+        """One probe point: ``(v_mean_pos, v_std, n_positive_mean_traces)``.
 
-        **Stubbed** — returns zeros. Build Step 1 proves motion, planning, storage
-        and DI on real hardware while the laser is off, when the scope can only
-        produce noise anyway. Build Step 2 replaces this body with a blocking
-        ``AcquirePoint`` request to the oscilloscope worker, which gates on
-        ``ACQuire:NUMACq?`` and reduces subprocess-side so only scalars cross IPC.
+        Blocking ``AcquirePoint`` to the scope worker (B6): it acquires
+        ``n_traces`` freshness-gated traces (``NUMACq?``), reduces each to a
+        positive-mean subprocess-side (D3 step 1), and replies with the N scalars.
+        Here we do D3 step 2 — the average and spread *across* the traces — and count
+        how many of them actually had positive signal.
 
-        Override in a subclass, or replace here, when B6 lands.
+        Runs on the routine's own ``TaskRunner`` thread; the reply arrives on the IPC
+        reader thread, so the wait does not deadlock (same contract as ``_move``).
         """
-        return 0.0, 0.0, self._cfg.n_traces
+        done = threading.Event()
+        result: dict[str, list] = {}
+        error: list[str] = []
+
+        def on_reply(values: list[float], counts: list[int]) -> None:
+            result["values"] = values
+            result["counts"] = counts
+            done.set()
+
+        def on_err(message: str) -> None:
+            error.append(message)
+            done.set()
+
+        self._scope.acquire_point(
+            n_traces=self._cfg.n_traces,
+            channel=self._cfg.channel,
+            probe_mm=probe_mm,
+            discard=self._scope_cfg.discard,
+            on_reply=on_reply,
+            on_error=on_err,
+        )
+
+        if not done.wait(self._cfg.timeout_s):
+            raise XcorrError(
+                f"acquire at probe {probe_mm:.4f} mm: no reply within {self._cfg.timeout_s:.0f}s"
+            )
+        if error:
+            raise XcorrError(f"acquire at probe {probe_mm:.4f} mm: {error[0]}")
+
+        values = result.get("values", [])
+        counts = result.get("counts", [])
+        if not values:
+            return 0.0, 0.0, 0
+        arr = np.asarray(values, dtype=np.float64)
+        # n reported per point is the number of traces that carried positive signal —
+        # more informative than a constant n_traces, and 0 flags a dead point.
+        n_positive = int(sum(1 for c in counts if c > 0))
+        return float(arr.mean()), float(arr.std()), n_positive
 
     # -- device plumbing --------------------------------------------------
 
@@ -295,10 +420,17 @@ class XcorrRoutine(BaseRoutine):
         the spectrometer and Andor hardware on every launch, for every user, as a
         side effect of an XCORR fix.
         """
+        # The scope config must reach the worker before its StartWorker: the worker
+        # builds its driver from the config in _start() and does not re-open on a later
+        # change (B5). Both go through the worker's single serial runner, so send-order
+        # is apply-order — set_config first, then start() below.
+        self._scope.set_config(self._scope_cfg)
+
         handles = (
             (self._grating, "grating (UTS150CC)"),
             (self._delay, "delay (MFA-CC)"),
             (self._probe, "probe (FMS300PP)"),
+            (self._scope, "scope (mock)" if self._cfg.mock_scope else "scope (TDS2012C)"),
         )
         for handle, label in handles:
             if handle.state == WorkerStatus.RUNNING:
@@ -413,5 +545,24 @@ class XcorrRoutine(BaseRoutine):
             "limits_delay_mm": list(AXIS_LIMITS["delay"]),
             "limits_grating_mm": list(AXIS_LIMITS["grating"]),
             "limits_source": "read live 2026-07-19; see XCORR_SPEC.md §3.1",
-            "acquisition": "STUBBED — Build Step 1 records zeros; no scope was read",
+            "acquisition": "live — reduced positive-mean per trace over the scope worker",
+        }
+
+    def _scope_provenance(self) -> dict[str, object]:
+        """The scope configuration in force (R5, partial).
+
+        Records the resource, channel, fixed record length and mock flag — what makes
+        a file's amplitudes reinterpretable. The instrument's own live state (coupling,
+        trigger, vertical scale) is read subprocess-side by ``TdsScope.provenance`` but
+        not yet surfaced over IPC; extend with a provenance request message when needed.
+        """
+        return {
+            "model": "Tektronix TDS 2012C" if not self._cfg.mock_scope else "MOCK TDS 2012C",
+            "resource": self._scope_cfg.resource,
+            "channel": self._scope_cfg.channel,
+            "record_length": self._scope_cfg.n_samples,
+            "n_traces_per_point": self._cfg.n_traces,
+            "in_flight_discard": self._scope_cfg.discard,
+            "mock": self._cfg.mock_scope,
+            "reduction": "within-trace mean of samples > 0, then mean/std across traces (D3)",
         }

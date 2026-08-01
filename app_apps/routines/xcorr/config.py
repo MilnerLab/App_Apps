@@ -139,3 +139,8 @@ class XcorrConfig:
 
     #: Scope channel to acquire. The TDS2012C has 2.
     channel: int = 1
+
+    #: Use the synthetic (position-dependent) scope driver instead of the real TDS2012C.
+    #: For hardware-free validation of the acquisition/reduction/storage path; a mock
+    #: run records a real bell-shaped ``v_mean_pos`` curve, not the old stub's zeros.
+    mock_scope: bool = False

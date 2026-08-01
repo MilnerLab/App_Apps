@@ -11,6 +11,22 @@ from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
+class XcorrScanStarted:
+    """Published once, right after the plan is built and before anything moves.
+
+    Carries the axis ranges and totals a live display needs to show
+    position-within-range and overall progress, so the panel never has to read the
+    config or wait to infer the ranges from streamed points. Ranges are (min, max),
+    grating/delay in stage mm and probe in *base* mm (0..probe_stop)."""
+
+    grating_range_mm: tuple[float, float]
+    delay_base_range_mm: tuple[float, float]
+    probe_base_range_mm: tuple[float, float]
+    n_points: int
+    n_setpoints: int
+
+
+@dataclass(frozen=True)
 class XcorrProgress:
     """Published once per completed probe point.
 
@@ -30,6 +46,15 @@ class XcorrProgress:
     delay_mm: float
     probe_mm: float
     v_mean_pos: float
+    #: The setpoint's BASE delay (before the grating-tracking correction). The display
+    #: panel's grid-summary plots key on this (R14: Δt = 2·delay_base/c), and it cannot
+    #: be recovered from ``delay_mm`` without the run's slope/intercept — so it is carried
+    #: on the event rather than re-derived. Constant across a setpoint's probe sweep.
+    delay_base_mm: float = 0.0
+    #: The probe BASE position for this point (``probe_mm`` is the commanded value
+    #: ``base + grating + intercept``). Carried so the position header can show the probe
+    #: within its base range without knowing the run's intercept.
+    probe_base_mm: float = 0.0
 
 
 @dataclass(frozen=True)
