@@ -73,6 +73,23 @@ class FrequencyTrace:
     t_ps: np.ndarray = field(default_factory=lambda: np.empty(0))
     #: |f| along that axis, GHz.
     f_ghz: np.ndarray = field(default_factory=lambda: np.empty(0))
+    #: 1σ of ``f_ghz``, pointwise, from the same fit covariance that gives
+    #: ``f_central_sigma_ghz``. Draw as a band, not per-point error bars: neighbouring
+    #: points share the four fitted coefficients, so the errors are almost perfectly
+    #: correlated and independent bars would badly misread. NaN where the covariance
+    #: is not finite, which is how a failed-but-``ok`` fit shows no band.
+    f_sigma_ghz: np.ndarray = field(default_factory=lambda: np.empty(0))
+    #: The reconstructed fringe in raw signal units on ``t_ps`` — the fitted model, for
+    #: overlaying on the raw sweep. Same axis as ``t_ps``/``f_ghz`` (the fitted core).
+    recon_signal: np.ndarray = field(default_factory=lambda: np.empty(0))
+    #: The fitted upper and lower envelopes in raw signal units, on ``t_ps``. Drawn
+    #: with ``recon_signal`` so the gap between the data's fringe depth and the
+    #: envelope separation is visible as the contrast loss it is: the phase model is
+    #: amplitude-free by design (see ``FringeFit.contrast``), so the reconstruction
+    #: reaching the envelopes while the data does not is correct behaviour, and looks
+    #: like a bad fit only when the envelopes are missing from the plot.
+    env_upper: np.ndarray = field(default_factory=lambda: np.empty(0))
+    env_lower: np.ndarray = field(default_factory=lambda: np.empty(0))
     #: Centre of the upper Gaussian envelope — the trace's own time zero.
     t_mu_ps: float = float("nan")
     #: |f| at the envelope centre.
@@ -123,6 +140,18 @@ def _sigma_from(cov: np.ndarray, grad: np.ndarray) -> float:
     return float(np.sqrt(var))
 
 
+def _sigma_many(cov: np.ndarray, grads: np.ndarray) -> np.ndarray:
+    """:func:`_sigma_from` for a stack of gradients, one row each.
+
+    Kept separate rather than folding the scalar case into it: ``f_central_sigma_ghz``
+    and ``bandwidth_sigma_ghz`` are reported numbers whose exact arithmetic should not
+    shift because a plotting band was added.
+    """
+    cov = np.asarray(cov, float)
+    var = np.einsum("ij,jk,ik->i", grads, cov, grads)
+    return np.sqrt(np.where(np.isfinite(var) & (var >= 0.0), var, np.nan))
+
+
 def fit_sweep(probe_mm, v_mean_pos, *, fwhm_ps: float = DEFAULT_FWHM_PS,
               probe_zero_mm: float = 0.0) -> FrequencyTrace:
     """Fit one finished probe sweep. Never raises — returns ``ok=False`` instead.
@@ -157,6 +186,13 @@ def fit_sweep(probe_mm, v_mean_pos, *, fwhm_ps: float = DEFAULT_FWHM_PS,
         """∂f[GHz]/∂(c0,c1,c2,c3) at offset u — f is linear in the coefficients."""
         return 1e3 * np.array([0.0, 1.0, 2.0 * u, 3.0 * u ** 2]) / (2.0 * np.pi)
 
+    def grads_at(u: np.ndarray) -> np.ndarray:
+        """:func:`grad_at` for a whole axis: one gradient row per offset."""
+        u = np.asarray(u, float)
+        return 1e3 * np.stack(
+            [np.zeros_like(u), np.ones_like(u), 2.0 * u, 3.0 * u ** 2], axis=1
+        ) / (2.0 * np.pi)
+
     u_mu = t_mu - t0
     f_central = abs(float(f_ghz_at(t_mu)))
     f_central_sigma = _sigma_from(cov, grad_at(u_mu))
@@ -174,6 +210,15 @@ def fit_sweep(probe_mm, v_mean_pos, *, fwhm_ps: float = DEFAULT_FWHM_PS,
     f_peak = f_central + 0.5 * bandwidth
     nyquist_ok = bool(np.isfinite(nyq) and f_peak <= NYQUIST_TRUST_FRACTION * nyq)
 
+    # --- per-point outputs for the plots -------------------------------------
+    # The σ band and the two envelopes live on the same axis as f_ghz and
+    # recon_signal, so the panel draws all of them through one x-mapping.
+    t_core = fit.t_core_ps
+    f_sigma = _sigma_many(cov, grads_at(t_core - t0))
+    env_upper = ff.gauss(t_core, *fit.p_upper)
+    env_lower = env_upper - ff.gauss(t_core, *fit.p_lower)
+
+    # --- gates continued -----------------------------------------------------
     failed = [name for name, ok in (("low_r2", r2_ok),
                                     ("window_outside_fit", window_inside),
                                     ("near_nyquist", nyquist_ok)) if not ok]
@@ -182,8 +227,12 @@ def fit_sweep(probe_mm, v_mean_pos, *, fwhm_ps: float = DEFAULT_FWHM_PS,
     return FrequencyTrace(
         ok=True,
         status="ok" if trusted else "untrusted: " + ", ".join(failed),
-        t_ps=fit.t_core_ps,
-        f_ghz=np.abs(f_ghz_at(fit.t_core_ps)),
+        t_ps=t_core,
+        f_ghz=np.abs(f_ghz_at(t_core)),
+        f_sigma_ghz=f_sigma,
+        recon_signal=fit.signal_core,
+        env_upper=env_upper,
+        env_lower=env_lower,
         t_mu_ps=t_mu,
         f_central_ghz=f_central,
         f_central_sigma_ghz=f_central_sigma,
