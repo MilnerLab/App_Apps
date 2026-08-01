@@ -14,14 +14,17 @@ from app_apps.io.control_readout.fms300pp.handler import Fms300ppHandle
 from app_apps.io.control_readout.mfa_cc.handler import MfaccHandle
 from app_apps.io.control_readout.module import ControlReadoutModule
 from app_apps.io.control_readout.uts150cc.handler import Uts150ccHandle
+from app_apps.io.oscilloscope.module import OscilloscopeModule
+from app_apps.io.oscilloscope.oscilloscope_worker_handler import OscilloscopeWorkerHandle
 from app_apps.routines.cfg_calibration.cfg_range import CfgRange
 from app_apps.routines.xcorr.config import XcorrConfig
 from app_apps.routines.xcorr.routine import XcorrRoutine
+from app_apps.routines.xcorr.settings import XcorrSettings
 
 
 class RoutinesModule(BaseModule):
     name = "routines"
-    requires = (PhaseControlModule, ControlReadoutModule)
+    requires = (PhaseControlModule, ControlReadoutModule, OscilloscopeModule)
 
     def register(self, c: Container, ctx: AppContext) -> None:
         c.register_singleton(CfgRange, lambda _: CfgRange(
@@ -35,6 +38,8 @@ class RoutinesModule(BaseModule):
         from base_qt.app.dispatcher import QtDispatcher
         from app_apps.routines.cfg_calibration.ui.view_model import CfgCalibrationViewModel
         from app_apps.routines.cfg_calibration.ui.view import CfgCalibrationView
+        from app_apps.routines.xcorr.ui.view_model import XcorrViewModel
+        from app_apps.routines.xcorr.ui.view import XcorrView
 
         c.register_factory(CfgCalibrationViewModel, lambda c: CfgCalibrationViewModel(
             bus=ctx.event_bus,
@@ -44,6 +49,17 @@ class RoutinesModule(BaseModule):
             cfg_range=c.get(CfgRange),
         ))
         c.register_factory(CfgCalibrationView, lambda c: CfgCalibrationView(c.get(CfgCalibrationViewModel), parent=None))
+
+        c.register_factory(XcorrViewModel, lambda c: XcorrViewModel(
+            bus=ctx.event_bus,
+            dispatcher=c.get(QtDispatcher),
+            probe=c.get(Fms300ppHandle),
+            delay=c.get(MfaccHandle),
+            grating=c.get(Uts150ccHandle),
+            scope=c.get(OscilloscopeWorkerHandle),
+            settings=c.get(XcorrSettings),
+        ))
+        c.register_factory(XcorrView, lambda c: XcorrView(c.get(XcorrViewModel), parent=None))
 
     @staticmethod
     def _register_xcorr(c: Container, ctx: AppContext) -> None:
@@ -59,6 +75,11 @@ class RoutinesModule(BaseModule):
         ``CfgCalibrationRoutine`` is constructed directly by its ViewModel, which is
         exactly the coupling that makes it undriveable headlessly.
         """
+        # The UI edits this mutable twin and freezes it into an XcorrConfig on Start
+        # (the config is frozen and cannot be bound to the form). Singleton so the
+        # panel keeps its values across open/close within a session.
+        c.register_singleton(XcorrSettings, lambda _: XcorrSettings())
+
         c.register_singleton(XcorrConfig, lambda _: XcorrConfig(
             # Placeholders. The headless runner and the eventual UI both override
             # these; a scan is never launched on defaults.
@@ -74,4 +95,5 @@ class RoutinesModule(BaseModule):
             probe=c.get(Fms300ppHandle),
             delay=c.get(MfaccHandle),
             grating=c.get(Uts150ccHandle),
+            scope=c.get(OscilloscopeWorkerHandle),
         ))
