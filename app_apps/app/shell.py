@@ -52,6 +52,7 @@ class AppShell(LabMainWindow):
         from app_apps.io.control_readout.mfa_cc.ui.view import MfaccView
         from app_apps.io.control_readout.uts150cc.ui.view import Uts150ccView
         from app_apps.io.control_readout.rgv.ui.view import RgvView
+        from app_apps.io.control_readout.picomotor.ui.view import PicomotorView
 
         menu = self.menuBar().addMenu("Devices")
         self._spectrometer_host = ViewHost(container, SpectrometerView, parent=self)
@@ -60,6 +61,7 @@ class AppShell(LabMainWindow):
         self._mfa_cc_host = ViewHost(container, MfaccView, parent=self)
         self._uts150cc_host = ViewHost(container, Uts150ccView, parent=self)
         self._rgv_host = ViewHost(container, RgvView, parent=self)
+        self._picomotor_host = ViewHost(container, PicomotorView, parent=self)
 
         menu.addAction("Spectrometer", self._spectrometer_host.open)
         menu.addAction("ELL14 Rotator", self._ell14_host.open)
@@ -67,15 +69,19 @@ class AppShell(LabMainWindow):
         menu.addAction("MFA-CC Stage", self._mfa_cc_host.open)
         menu.addAction("UTS150CC Stage", self._uts150cc_host.open)
         menu.addAction("RGV100BL HWP", self._rgv_host.open)
+        menu.addAction("Mirror Picomotors", self._picomotor_host.open)
 
     def _build_routines_menu(self, container: Container) -> None:
         from base_qt.ui.view_host import ViewHost
         from app_apps.routines.cfg_calibration.ui.view import CfgCalibrationView
+        from app_apps.routines.xcorr.ui.view import XcorrView
 
         menu = self.menuBar().addMenu("Routines")
         self._cfg_calibration_host = ViewHost(container, CfgCalibrationView, parent=self)
+        self._xcorr_host = ViewHost(container, XcorrView, parent=self)
 
         menu.addAction("CFG Calibration", self._cfg_calibration_host.open)
+        menu.addAction("XCORR Scan", self._xcorr_host.open)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         # Bypass PanelWindow.closeEvent (which ignores) and destroy it directly.

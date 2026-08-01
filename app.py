@@ -10,7 +10,9 @@ from app_apps.app.service_config import ServiceConfig
 from app_apps.app.shell import AppShell
 from app_apps.io.spectrometer.module import SpectrometerModule
 from app_apps.io.control_readout.module import ControlReadoutModule
+from app_apps.io.oscilloscope.module import OscilloscopeModule
 from app_apps.analysis.phase_control.module import PhaseControlModule
+from app_apps.analysis.xcorr.module import AnalysisXcorrModule
 from app_apps.routines.module import RoutinesModule
 from base_core.framework.app import AppContext
 from base_core.framework.app.enums import AppStatus
@@ -63,7 +65,9 @@ def main(argv: list[str] | None = None) -> int:
         AppModule(),
         SpectrometerModule(),
         ControlReadoutModule(),
+        OscilloscopeModule(),
         PhaseControlModule(),
+        AnalysisXcorrModule(),
         RoutinesModule(),
     ]
     mm = ModuleManager(modules)
