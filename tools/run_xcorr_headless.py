@@ -81,6 +81,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--settle", type=float, default=0.0, help="post-move dwell, s")
     p.add_argument("--timeout", type=float, default=130.0, help="per-command timeout, s")
     p.add_argument("--channel", type=int, default=1)
+    p.add_argument("--mock-scope", action="store_true",
+                   help="use the synthetic position-dependent scope driver (no laser / no TDS2012C)")
     p.add_argument("--plan-only", action="store_true",
                    help="print the plan and exit without booting anything or moving")
     return p.parse_args(argv)
@@ -102,6 +104,7 @@ def build_config(a: argparse.Namespace) -> XcorrConfig:
         settle_s=a.settle,
         timeout_s=a.timeout,
         channel=a.channel,
+        mock_scope=a.mock_scope,
     )
 
 
@@ -122,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     from app_apps.app.module import AppModule
     from app_apps.analysis.phase_control.module import PhaseControlModule
     from app_apps.io.control_readout.module import ControlReadoutModule
+    from app_apps.io.oscilloscope.module import OscilloscopeModule
     from app_apps.io.spectrometer.module import SpectrometerModule
     from app_apps.routines.module import RoutinesModule
     from base_core.framework.modules import ModuleManager
@@ -134,17 +138,16 @@ def main(argv: list[str] | None = None) -> int:
         AppModule(),
         SpectrometerModule(),
         ControlReadoutModule(),
+        OscilloscopeModule(),
         PhaseControlModule(),
         RoutinesModule(),
     ]
     mm = ModuleManager(modules)
 
-    log.info("bootstrapping modules (no window)")
-    mm.bootstrap(c, ctx)
-
     finished = threading.Event()
     outcome: dict[str, object] = {"rc": 1}
-    unsubs = []
+    unsubs: list = []
+    routine: XcorrRoutine | None = None
 
     def on_progress(e: XcorrProgress) -> None:
         log.info(
@@ -169,24 +172,33 @@ def main(argv: list[str] | None = None) -> int:
         outcome["path"] = e.path
         finished.set()
 
-    # Exit on a bus event, never a Qt signal: without app.exec() there is no Qt event
-    # loop, so anything posted through QtDispatcher would never fire.
-    unsubs.append(ctx.event_bus.subscribe(XcorrProgress, on_progress))
-    unsubs.append(ctx.event_bus.subscribe(XcorrGroupWritten, on_group))
-    unsubs.append(ctx.event_bus.subscribe(XcorrFinished, on_finished))
-    unsubs.append(ctx.event_bus.subscribe(XcorrFailed, on_failed))
-
-    routine: XcorrRoutine = c.get(XcorrRoutine)
-
-    def on_sigint(_sig, _frame) -> None:
-        # abort() sets a threading.Event from this thread. It must not be dispatched,
-        # or it would queue behind the very loop it is meant to stop (G16).
-        log.warning("interrupt — aborting at the next probe point")
-        routine.abort()
-
-    signal.signal(signal.SIGINT, on_sigint)
-
     try:
+        # bootstrap() spawns the ControlReadout subprocess that owns the ESP301 serial port
+        # (COM2). It MUST live inside this try so that if it — or anything after it — fails,
+        # the finally still runs mm.shutdown and the port-holding child is torn down, never
+        # orphaned (F7).
+        # A bootstrap raise/hang (e.g. the XPS connect timing out first) previously exited
+        # main() with the child already spawned and the port stranded.
+        log.info("bootstrapping modules (no window)")
+        mm.bootstrap(c, ctx)
+
+        # Exit on a bus event, never a Qt signal: without app.exec() there is no Qt event
+        # loop, so anything posted through QtDispatcher would never fire.
+        unsubs.append(ctx.event_bus.subscribe(XcorrProgress, on_progress))
+        unsubs.append(ctx.event_bus.subscribe(XcorrGroupWritten, on_group))
+        unsubs.append(ctx.event_bus.subscribe(XcorrFinished, on_finished))
+        unsubs.append(ctx.event_bus.subscribe(XcorrFailed, on_failed))
+
+        routine = c.get(XcorrRoutine)
+
+        def on_sigint(_sig, _frame) -> None:
+            # abort() sets a threading.Event from this thread. It must not be dispatched,
+            # or it would queue behind the very loop it is meant to stop (G16).
+            log.warning("interrupt — aborting at the next probe point")
+            routine.abort()
+
+        signal.signal(signal.SIGINT, on_sigint)
+
         log.info("starting scan; output goes to %s", cfg.out_dir)
         routine.start_scan()
         while not finished.wait(0.25):
@@ -194,9 +206,19 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         for u in unsubs:
             u()
-        routine.stop()
-        ctx.lifecycle.add(lambda: mm.shutdown(c, ctx))
-        ctx.lifecycle.clear()
+        if routine is not None:
+            try:
+                routine.stop()
+            except Exception:
+                log.exception("routine.stop() failed during teardown")
+        # ALWAYS tear the modules down — even on a bootstrap failure — so a spawned
+        # port-holding subprocess is released and never orphaned. Guarded so a teardown
+        # error on a partial boot cannot mask the original failure.
+        try:
+            ctx.lifecycle.add(lambda: mm.shutdown(c, ctx))
+            ctx.lifecycle.clear()
+        except Exception:
+            log.exception("module shutdown failed during teardown")
 
     path = outcome.get("path")
     if path:
