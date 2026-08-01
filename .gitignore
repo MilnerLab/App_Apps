@@ -514,3 +514,5 @@ out/
 .history
 
 # End of https://www.gitignore.io/api/linux,visualstudiocode,latex
+# XCORR run output (settings.py out_dir default = cwd/xcorr_runs); regenerated per run
+xcorr_runs/
