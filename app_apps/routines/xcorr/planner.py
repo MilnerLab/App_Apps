@@ -102,7 +102,9 @@ class ScanPlan:
         return (min(steps), max(steps))
 
 
-def expand_range(start: float, stop: float, step: float, *, name: str) -> tuple[float, ...]:
+def expand_range(
+    start: float, stop: float, step: float, *, name: str, include_endpoint: bool = False
+) -> tuple[float, ...]:
     """Inclusive range from ``start`` to ``stop`` in increments of ``step``.
 
     ``step`` is unsigned; direction comes from ``stop - start``. ``stop`` is
@@ -110,6 +112,13 @@ def expand_range(start: float, stop: float, step: float, *, name: str) -> tuple[
     without that, ``0..10`` by ``0.1`` would silently drop its endpoint to float
     error. Positions are computed as ``start + i*step`` rather than accumulated,
     so error does not grow along the scan.
+
+    With ``include_endpoint`` the true ``stop`` is *always* the last position, even
+    when the step does not divide the interval — it is appended as a final, shorter
+    step. Used for the probe sweep so every setpoint ends exactly on ``probe_stop_mm``
+    regardless of its adaptive step, which lets analysis interpolate onto and truncate
+    to one common right edge. Left off for grating/delay, where a stray short final
+    step on a physical outer axis is undesirable.
     """
     if step <= 0:
         raise PlanError(f"{name}: step must be > 0, got {step}")
@@ -125,7 +134,12 @@ def expand_range(start: float, stop: float, step: float, *, name: str) -> tuple[
     count = n_int if math.isclose(n_steps, n_int, rel_tol=1e-9, abs_tol=1e-9) else int(n_steps)
 
     direction = math.copysign(1.0, span)
-    return tuple(start + direction * step * i for i in range(count + 1))
+    positions = [start + direction * step * i for i in range(count + 1)]
+    # Append the exact endpoint when the truncating step fell short of it (a genuine
+    # miss, not float noise the snap above already absorbed).
+    if include_endpoint and not math.isclose(positions[-1], stop, rel_tol=1e-9, abs_tol=1e-9):
+        positions.append(stop)
+    return tuple(positions)
 
 
 #: Speed of light in mm/s — for the double-pass Nyquist step.
@@ -166,7 +180,11 @@ def _build_setpoint(
 ) -> "Setpoint":
     """Assemble one setpoint, including its Nyquist-matched probe sweep."""
     step = probe_step_for(cfg, grating_mm, delay_base_mm)
-    probe_base = expand_range(cfg.probe_start_mm, cfg.probe_stop_mm, step, name="probe")
+    # include_endpoint: every setpoint's probe sweep ends exactly on probe_stop_mm even
+    # under adaptive stepping, so all setpoints share one right edge for analysis.
+    probe_base = expand_range(
+        cfg.probe_start_mm, cfg.probe_stop_mm, step, name="probe", include_endpoint=True
+    )
     f_ghz = max_frequency_hz(cfg, grating_mm, delay_base_mm) / 1e9
     correction = cfg.delay_slope * grating_mm + cfg.delay_intercept_mm
     return Setpoint(
@@ -212,6 +230,13 @@ def plan_scan(cfg: XcorrConfig) -> ScanPlan:
         raise PlanError(
             f"probe_step_max_mm ({cfg.probe_step_max_mm}) is finer than the floor "
             f"probe_step_mm ({cfg.probe_step_mm}); the clamp is inverted."
+        )
+    if cfg.adaptive_probe_step and cfg.probe_oversample <= 0.0:
+        # probe_step_for divides by this; <= 0 would be a ZeroDivisionError (or a
+        # negative step) deep in setpoint expansion. Refuse it here as a plan error
+        # rather than let it crash mid-plan (defect G25).
+        raise PlanError(
+            f"probe_oversample must be > 0, got {cfg.probe_oversample}"
         )
 
     _check_limits(grating, "grating", "grating")

@@ -95,6 +95,21 @@ def test_expand_range_rejects_non_positive_step():
     raises(PlanError, lambda: expand_range(0.0, 10.0, -1.0, name="probe"), "step must be > 0")
 
 
+def test_expand_range_include_endpoint_appends_when_step_falls_short():
+    # 0..10 by 3 truncates at 9; with include_endpoint the exact stop is appended as a
+    # final short step.
+    assert expand_range(0.0, 10.0, 3.0, name="x", include_endpoint=True) == (0.0, 3.0, 6.0, 9.0, 10.0)
+
+
+def test_expand_range_include_endpoint_no_duplicate_when_already_inclusive():
+    # Step divides evenly -> endpoint already present -> no spurious extra point.
+    assert expand_range(0.0, 10.0, 2.5, name="x", include_endpoint=True) == (0.0, 2.5, 5.0, 7.5, 10.0)
+
+
+def test_expand_range_include_endpoint_descending():
+    assert expand_range(10.0, 0.0, 3.0, name="x", include_endpoint=True) == (10.0, 7.0, 4.0, 1.0, 0.0)
+
+
 # --- limit validation (R2/S1) ---------------------------------------------
 
 def test_probe_beyond_soft_limit_is_refused_naming_the_offender():
@@ -335,9 +350,42 @@ def test_adaptive_stepping_cuts_total_points_on_a_low_frequency_run():
     assert fixed.n_points == 501, fixed.n_points
 
 
+def test_probe_endpoint_always_included_under_adaptive():
+    # Every setpoint's probe base sweep must end exactly on probe_stop_mm despite the
+    # per-setpoint adaptive step generally not dividing the interval — so analysis has
+    # one common right edge across the grid.
+    cfg = make_cfg(
+        adaptive_probe_step=True,
+        probe_start_mm=0.0, probe_stop_mm=125.0, probe_step_mm=0.2,
+        probe_step_max_mm=1.0, probe_oversample=2.0, probe_intercept_mm=110.0,
+        grating_start_mm=-75.0, grating_stop_mm=30.0, grating_step_mm=5.0,
+        delay_base_start_mm=0.0, delay_base_stop_mm=1.0, delay_base_step_mm=0.5,
+        delay_slope=-0.005, delay_intercept_mm=17.31,
+    )
+    plan = plan_scan(cfg)
+    assert all(sp.probe_base_mm[0] == 0.0 for sp in plan.setpoints)
+    assert all(approx(sp.probe_base_mm[-1], 125.0) for sp in plan.setpoints), \
+        {round(sp.probe_base_mm[-1], 4) for sp in plan.setpoints}
+    # And the appended endpoint never duplicates when a setpoint's step already divides
+    # 125 (the 0.2 mm floor: 625 intervals) — that setpoint keeps a single 125.0.
+    assert all(sp.probe_base_mm[-1] != sp.probe_base_mm[-2] for sp in plan.setpoints)
+
+
 def test_adaptive_rejects_inverted_step_clamp():
     cfg = make_cfg(adaptive_probe_step=True, probe_step_mm=1.0, probe_step_max_mm=0.5)
     raises(PlanError, lambda: plan_scan(cfg), "inverted")
+
+
+def test_adaptive_rejects_non_positive_oversample():
+    # probe_step_for divides by probe_oversample; 0 would ZeroDivisionError deep in
+    # setpoint expansion and escape the routine's PlanError handler (defect G25). It
+    # must be refused up front as a plan error instead.
+    cfg = make_cfg(
+        adaptive_probe_step=True,
+        probe_step_mm=0.5, probe_step_max_mm=2.5,  # valid clamp, so we reach the oversample check
+        probe_oversample=0.0,
+    )
+    raises(PlanError, lambda: plan_scan(cfg), "probe_oversample")
 
 
 # --- runner ---------------------------------------------------------------
