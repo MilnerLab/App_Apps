@@ -47,6 +47,7 @@ from app_apps.routines.xcorr.events import (
     XcorrScanStarted,
 )
 from app_apps.routines.xcorr.planner import PlanError, ScanPlan, Setpoint, plan_scan
+from app_apps.routines.xcorr.spectrum_recorder import XcorrSpectrumRecorder, integration_span_ns
 from app_apps.routines.xcorr.storage import XcorrH5Writer, default_run_path
 
 if TYPE_CHECKING:
@@ -54,6 +55,7 @@ if TYPE_CHECKING:
     from app_apps.io.control_readout.mfa_cc.handler import MfaccHandle
     from app_apps.io.control_readout.uts150cc.handler import Uts150ccHandle
     from app_apps.io.oscilloscope.oscilloscope_worker_handler import OscilloscopeWorkerHandle
+    from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
 
 log = logging.getLogger(__name__)
 
@@ -84,12 +86,20 @@ class XcorrRoutine(BaseRoutine):
         delay: "MfaccHandle",
         grating: "Uts150ccHandle",
         scope: "OscilloscopeWorkerHandle",
+        spectrometer: "SpectrometerWorkerHandle | None" = None,
     ) -> None:
         self._cfg = config
         self._probe = probe
         self._delay = delay
         self._grating = grating
         self._scope = scope
+        #: Optional and purely additive. When present, the free-running spectrum stream
+        #: is recorded into ``/spectra`` alongside the scan; when absent — or when it
+        #: cannot be started — the scan runs exactly as it did before (the operator
+        #: loses spectra, never a scan). Optional also keeps every existing construction
+        #: site, including the headless runner, working unchanged.
+        self._spectrometer = spectrometer
+        self._recorder: XcorrSpectrumRecorder | None = None
         #: Built once at start from the run config; carries the VISA resource, channel,
         #: fixed 2500 record and the mock flag. ``discard`` is reused per acquire.
         self._scope_cfg = ScopeConfig(
@@ -175,7 +185,15 @@ class XcorrRoutine(BaseRoutine):
         Polls rather than a bare ``wait()`` so an abort raised while paused is noticed
         promptly — ``abort()`` also sets ``_resume``, but polling keeps the contract
         robust to either order.
+
+        A pause also shuts the spectrum gate. The stages *are* stationary, so the
+        spectra would be honestly labelled, but an operator who pauses for ten minutes
+        would otherwise bury one probe point under thousands of rows. The gate reopens
+        at the next probe point like any other.
         """
+        if self._resume.is_set():
+            return
+        self._gate_close()
         while not self._resume.wait(_START_POLL_S):
             if self._abort.is_set():
                 return
@@ -237,7 +255,13 @@ class XcorrRoutine(BaseRoutine):
                 writer.write_config(self._cfg, plan)
                 writer.write_provenance("esp301", self._esp301_provenance())
                 writer.write_provenance("scope", self._scope_provenance())
-                self._scan(plan, writer)
+                self._start_recorder(writer)
+                try:
+                    self._scan(plan, writer)
+                finally:
+                    # Before mark_finished, so the drop count and the last spectra are
+                    # in the file by the time the run is stamped complete.
+                    self._stop_recorder()
                 writer.mark_finished(aborted=self._abort.is_set())
 
             self._bus.publish(XcorrFinished(
@@ -333,6 +357,10 @@ class XcorrRoutine(BaseRoutine):
             # already validated every such position against the soft limits).
             p_cmd = p_base + sp.probe_offset_mm
             self._move(self._probe, p_cmd, "probe")
+            # All three stages are now stationary and stay that way until the next
+            # _move, so this is the window in which a spectrum can be attributed to a
+            # position. It spans the scope acquisition, which is the bulk of the dwell.
+            self._gate_open(sp, si, pi, p_cmd)
             mean, std, n = self._acquire_point(p_cmd)
             rows.append((p_cmd, mean, std, n))
 
@@ -405,6 +433,92 @@ class XcorrRoutine(BaseRoutine):
         n_positive = int(sum(1 for c in counts if c > 0))
         return float(arr.mean()), float(arr.std()), n_positive
 
+    # -- spectrometer recording (additive, never fatal) -------------------
+
+    def _start_recorder(self, writer: XcorrH5Writer) -> None:
+        """Begin recording the spectrum stream, or log why we are not.
+
+        Every failure path here is a warning and a ``return``. Unlike the stages and the
+        scope, the spectrometer is not something the scan *needs*: an operator who ran a
+        four-hour grid should not lose it because a USB spectrometer did not enumerate.
+        """
+        if self._spectrometer is None:
+            return
+        try:
+            if not self._ensure_spectrometer_running():
+                return
+            cfg = self._spectrometer.config
+            self._recorder = XcorrSpectrumRecorder(
+                self._bus,
+                self._spectrometer,
+                writer,
+                span_ns=integration_span_ns(cfg),
+                provenance=self._spectrometer_provenance(cfg),
+            )
+            self._recorder.start()
+        except Exception:
+            log.exception("XCORR: spectrum recording could not start — scanning without it")
+            self._recorder = None
+
+    def _ensure_spectrometer_running(self) -> bool:
+        """Start the spectrometer worker if it is idle. Returns whether it is running.
+
+        Deliberately *not* folded into ``_start_handles``: everything in that tuple is
+        a precondition of the scan and its absence raises. This one is opportunistic —
+        if a device panel already has the spectrometer streaming (the common case, since
+        Phase Control is usually open) we simply join the stream.
+        """
+        handle = self._spectrometer
+        assert handle is not None
+        if handle.state == WorkerStatus.RUNNING:
+            return True
+        log.info("XCORR starting spectrometer worker for spectrum recording")
+        handle.start()
+        if self._wait_for_running(handle):
+            return True
+        log.warning(
+            "XCORR: spectrometer worker did not reach RUNNING within %.0fs — scanning "
+            "without spectrum recording. The spm_002 subprocess needs the 32-bit "
+            "interpreter and PhotonSpectr.dll; check its log.",
+            _START_TIMEOUT_S,
+        )
+        return False
+
+    def _stop_recorder(self) -> None:
+        recorder, self._recorder = self._recorder, None
+        if recorder is None:
+            return
+        try:
+            recorder.close()
+        except Exception:
+            log.exception("XCORR: spectrum recorder shutdown failed")
+
+    def _gate_close(self) -> None:
+        """Stop admitting spectra — the stages are about to move."""
+        if self._recorder is not None:
+            self._recorder.gate_close()
+
+    def _gate_open(self, sp: Setpoint, si: int, probe_index: int, probe_mm: float) -> None:
+        """Stamp the now-stationary positions and admit spectra again."""
+        if self._recorder is not None:
+            self._recorder.gate_open(si, sp.grating_mm, sp.delay_mm, probe_index, probe_mm)
+
+    @staticmethod
+    def _spectrometer_provenance(cfg) -> dict[str, object]:
+        """The spectrometer settings in force, recorded as ``/spectra`` attributes."""
+        from base_core.quantities.models import Prefix
+
+        return {
+            "model": "SPM-002 (PhotonSpectr)",
+            "device_index": cfg.device_index,
+            "exposure_ms": float(cfg.exposure_time.value(Prefix.MILLI)),
+            "average": cfg.average,
+            "dark_subtraction": cfg.dark_subtraction,
+            "mode": cfg.mode,
+            "scan_delay": cfg.scan_delay,
+            "timestamp_source": "time.time_ns() at end of integration (spm_002.spectrometer)",
+        }
+
     # -- device plumbing --------------------------------------------------
 
     def _start_handles(self) -> None:
@@ -474,7 +588,13 @@ class XcorrRoutine(BaseRoutine):
         Blocking on the routine's own ``TaskRunner`` thread is safe — replies arrive
         on the IPC reader thread, so nothing deadlocks. **Do not** call this from an
         EventBus handler, which runs on the publisher's thread.
+
+        Closing the spectrum gate here rather than at the call sites is deliberate: this
+        is the single choke point for all three axes, so no move can start without the
+        gate shutting. Re-opening it is the caller's job, because the positions to stamp
+        are only known once the *whole* move sequence for a point is complete.
         """
+        self._gate_close()
         lo, hi = AXIS_LIMITS[role]
         if not (lo <= position <= hi):
             # Belt and braces: the planner already refused out-of-range setpoints,

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from app_apps.io.control_readout.mfa_cc.handler import MfaccHandle
     from app_apps.io.control_readout.uts150cc.handler import Uts150ccHandle
     from app_apps.io.oscilloscope.oscilloscope_worker_handler import OscilloscopeWorkerHandle
+    from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
 
 log = logging.getLogger(__name__)
 
@@ -53,12 +54,14 @@ class XcorrViewModel(PanelViewModel):
         grating: "Uts150ccHandle",
         scope: "OscilloscopeWorkerHandle",
         settings: XcorrSettings,
+        spectrometer: "SpectrometerWorkerHandle | None" = None,
     ) -> None:
         super().__init__(bus, dispatcher)
         self._probe = probe
         self._delay = delay
         self._grating = grating
         self._scope = scope
+        self._spectrometer = spectrometer
         self._settings = settings
         self._routine: XcorrRoutine | None = None
         self._update: UpdateSink | None = None
@@ -95,6 +98,7 @@ class XcorrViewModel(PanelViewModel):
             delay=self._delay,
             grating=self._grating,
             scope=self._scope,
+            spectrometer=self._spectrometer,
         )
         self._render(f"starting scan → {cfg.out_dir}", running=True)
         self._msg("XCORR scan started")

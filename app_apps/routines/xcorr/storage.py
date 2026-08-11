@@ -11,14 +11,30 @@ Layout (§6.1)::
     │                aborted, completed_utc
     ├─ /config              one attr per XcorrConfig field
     ├─ /provenance/{esp301,scope}
-    └─ /scans/g####_d####/  one group per (grating, delay) combination
-        ├─ (attrs) grating_mm, delay_mm, delay_base_mm, delay_correction_mm,
-        │          probe_offset_mm, probe_step_mm, max_freq_ghz, grating_index,
-        │          delay_index, n_traces_per_point, utc_start, utc_end, status
-        ├─ probe_mm      float64[n]   (commanded; base = probe_mm - probe_offset_mm)
-        ├─ v_mean_pos    float64[n]
-        ├─ v_std         float64[n]
-        └─ n_traces      int32[n]
+    ├─ /scans/g####_d####/  one group per (grating, delay) combination
+    │   ├─ (attrs) grating_mm, delay_mm, delay_base_mm, delay_correction_mm,
+    │   │          probe_offset_mm, probe_step_mm, max_freq_ghz, grating_index,
+    │   │          delay_index, n_traces_per_point, utc_start, utc_end, status
+    │   ├─ probe_mm      float64[n]   (commanded; base = probe_mm - probe_offset_mm)
+    │   ├─ v_mean_pos    float64[n]
+    │   ├─ v_std         float64[n]
+    │   └─ n_traces      int32[n]
+    └─ /spectra             free-running spectrometer stream (format_version >= 2;
+        │                   absent when no spectrometer was recording)
+        ├─ (attrs) n_pixels, n_dropped, integration_span_ns, gate_rule, and the
+        │          spectrometer settings in force
+        ├─ wavelength_nm   float64[n_pixels]  written once
+        ├─ counts          float32[N, n_pixels]
+        ├─ timestamp_ns    int64[N]     time.time_ns() at end of integration
+        ├─ setpoint_index  int32[N]
+        ├─ probe_index     int32[N]
+        ├─ grating_mm      float64[N]
+        ├─ delay_mm        float64[N]
+        └─ probe_mm        float64[N]   commanded
+
+``/spectra`` rows are *not* aligned with the ``/scans`` rows: the spectrometer free-runs
+at its own rate, so a probe point may carry zero, one or several spectra. Join on the
+recorded stage positions (or on ``setpoint_index``/``probe_index``), never on row index.
 
 There is deliberately no ``/plan`` table. It was a denormalised copy of what the scan
 groups already carry, and it needed two workarounds — ``append_row`` cannot mutate a
@@ -29,7 +45,8 @@ which is deterministic.
 from __future__ import annotations
 
 import logging
-from dataclasses import fields as dataclass_fields
+import threading
+from dataclasses import dataclass, fields as dataclass_fields
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
@@ -46,7 +63,14 @@ from app_apps.routines.xcorr.planner import ScanPlan, Setpoint
 log = logging.getLogger(__name__)
 
 FORMAT_NAME = "milnerlab-xcorr"
-FORMAT_VERSION = 1
+#: 2 added the optional ``/spectra`` group. Nothing in v1 changed, so a v2 file
+#: without ``/spectra`` is byte-identical in structure to a v1 file and every v1
+#: reader still works.
+FORMAT_VERSION = 2
+
+#: Rows appended to ``/spectra`` per resize. Resizing an HDF5 dataset is cheap but
+#: not free, and the spectrometer delivers only a few per second.
+_SPECTRA_CHUNK_ROWS = 32
 
 
 def default_run_path(out_dir: Path, when: datetime | None = None) -> Path:
@@ -73,6 +97,24 @@ def _write_array(g: h5py.Group, name: str, arr: Sequence[Any], dtype: Any) -> No
     g.create_dataset(name, data=a, chunks=True, compression="lzf", shuffle=True)
 
 
+@dataclass(frozen=True)
+class SpectrumRecord:
+    """One spectrum plus the stage positions in force when it was integrated.
+
+    ``counts`` is whatever the spectrometer returned (float64 out of shared memory);
+    it is narrowed to float32 on the way to disk. The device returns ``c_ushort``, so
+    that is lossless here and halves the file.
+    """
+
+    counts: np.ndarray
+    timestamp_ns: int
+    setpoint_index: int
+    probe_index: int
+    grating_mm: float
+    delay_mm: float
+    probe_mm: float
+
+
 class XcorrH5Writer:
     """Context manager owning one run file. Opened once, flushed per combination.
 
@@ -82,6 +124,13 @@ class XcorrH5Writer:
 
     ``__exit__`` always stamps ``completed_utc`` and closes, including on an
     exception — that, plus the routine's ``try/finally``, is what delivers R3.
+
+    **Thread safety.** ``/scans`` is written from the routine thread and ``/spectra``
+    from the spectrum recorder's writer thread. ``h5py`` is not thread-safe, so every
+    method that touches the file takes :attr:`_lock`. The lock is held only for the
+    duration of a write — a spectrum append is a few hundred microseconds, so it never
+    meaningfully delays the per-setpoint flush that delivers the crash-safety
+    guarantee (R4/§6.3).
     """
 
     def __init__(self, path: Path, run_id: str | None = None) -> None:
@@ -89,6 +138,11 @@ class XcorrH5Writer:
         self.run_id = run_id or self.path.stem
         self._f: h5py.File | None = None
         self.n_groups_written = 0
+        self.n_spectra_written = 0
+        self._lock = threading.RLock()
+        self._spectra: h5py.Group | None = None
+        self._n_pixels = 0
+        self._appends_since_flush = 0
 
     # -- lifecycle --------------------------------------------------------
 
@@ -114,15 +168,20 @@ class XcorrH5Writer:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        if self._f is None:
-            return
-        try:
-            self._f.attrs["completed_utc"] = now_utc_iso()
-            self._f.flush()
-        finally:
-            self._f.close()
-            self._f = None
-        log.info("XCORR run file closed: %s (%d group(s))", self.path, self.n_groups_written)
+        with self._lock:
+            if self._f is None:
+                return
+            try:
+                self._f.attrs["completed_utc"] = now_utc_iso()
+                self._f.flush()
+            finally:
+                self._spectra = None
+                self._f.close()
+                self._f = None
+        log.info(
+            "XCORR run file closed: %s (%d group(s), %d spectra)",
+            self.path, self.n_groups_written, self.n_spectra_written,
+        )
 
     @property
     def file(self) -> h5py.File:
@@ -139,22 +198,23 @@ class XcorrH5Writer:
         only execution order when the grating took the outer loop, so this is the
         record of what actually ran in what sequence.
         """
-        g = ensure_group(self.file, "/config")
-        for f in dataclass_fields(cfg):
-            value = getattr(cfg, f.name)
-            g.attrs[f.name] = str(value) if isinstance(value, Path) else value
+        with self._lock:
+            g = ensure_group(self.file, "/config")
+            for f in dataclass_fields(cfg):
+                value = getattr(cfg, f.name)
+                g.attrs[f.name] = str(value) if isinstance(value, Path) else value
 
-        g.attrs["outer_axis"] = plan.outer_axis
-        g.attrs["outer_reason"] = plan.outer_reason
-        g.attrs["n_setpoints"] = len(plan.setpoints)
-        g.attrs["n_points_total"] = plan.n_points
-        # Probe point count is per-setpoint under adaptive stepping, so record the
-        # step range rather than a single count (which no longer exists run-wide).
-        fine, coarse = plan.probe_step_range_mm
-        g.attrs["probe_step_min_mm"] = fine
-        g.attrs["probe_step_max_mm"] = coarse
-        g.attrs["plan_warnings"] = list(plan.warnings)
-        self.file.flush()
+            g.attrs["outer_axis"] = plan.outer_axis
+            g.attrs["outer_reason"] = plan.outer_reason
+            g.attrs["n_setpoints"] = len(plan.setpoints)
+            g.attrs["n_points_total"] = plan.n_points
+            # Probe point count is per-setpoint under adaptive stepping, so record the
+            # step range rather than a single count (which no longer exists run-wide).
+            fine, coarse = plan.probe_step_range_mm
+            g.attrs["probe_step_min_mm"] = fine
+            g.attrs["probe_step_max_mm"] = coarse
+            g.attrs["plan_warnings"] = list(plan.warnings)
+            self.file.flush()
 
     def write_provenance(self, section: str, values: dict[str, Any]) -> None:
         """Record ``/provenance/<section>`` — instrument state as found (R5).
@@ -162,10 +222,11 @@ class XcorrH5Writer:
         Provenance is read, never written: the scope's front-panel state is
         operator-owned and correct as left (§3.3.1).
         """
-        g = ensure_group(self.file, f"/provenance/{section}")
-        for k, v in values.items():
-            g.attrs[k] = str(v) if isinstance(v, Path) else v
-        self.file.flush()
+        with self._lock:
+            g = ensure_group(self.file, f"/provenance/{section}")
+            for k, v in values.items():
+                g.attrs[k] = str(v) if isinstance(v, Path) else v
+            self.file.flush()
 
     # -- per-combination scan groups (R4) ---------------------------------
 
@@ -187,6 +248,23 @@ class XcorrH5Writer:
         Returns the group name. Flushes before returning, so the caller may command
         the next combination immediately.
         """
+        with self._lock:
+            return self._write_group_locked(
+                setpoint, rows,
+                n_traces_per_point=n_traces_per_point,
+                utc_start=utc_start,
+                status=status,
+            )
+
+    def _write_group_locked(
+        self,
+        setpoint: Setpoint,
+        rows: Sequence[tuple[float, float, float, int]],
+        *,
+        n_traces_per_point: int,
+        utc_start: str,
+        status: str,
+    ) -> str:
         scans = ensure_group(self.file, "/scans")
         name = setpoint.group_name
         if name in scans:
@@ -220,8 +298,124 @@ class XcorrH5Writer:
         log.info("XCORR wrote /scans/%s (%d point(s), status=%s)", name, len(rows), status)
         return name
 
+    # -- the free-running spectrometer stream -----------------------------
+
+    def open_spectra(self, wavelengths: Sequence[float], attrs: dict[str, Any]) -> None:
+        """Create ``/spectra`` and pin the wavelength axis. Idempotent per run.
+
+        Deferred until the first spectrum arrives because ``n_pixels`` comes from the
+        device, not from configuration — and because a run where the spectrometer never
+        delivered anything should have no ``/spectra`` group at all rather than an empty
+        one claiming a pixel count nobody measured.
+        """
+        with self._lock:
+            if self._spectra is not None:
+                return
+            wl = np.asarray(wavelengths, dtype=np.float64)
+            n_pixels = int(wl.size)
+            if n_pixels == 0:
+                raise ValueError("open_spectra: empty wavelength axis")
+
+            g = ensure_group(self.file, "/spectra")
+            for k, v in attrs.items():
+                g.attrs[k] = str(v) if isinstance(v, Path) else v
+            g.attrs["n_pixels"] = n_pixels
+            g.attrs["n_dropped"] = 0
+
+            _write_array(g, "wavelength_nm", wl, np.float64)
+            # Row-chunked: readers pull individual spectra, and a chunk that spans rows
+            # would make a single-spectrum read decompress its neighbours too.
+            g.create_dataset(
+                "counts",
+                shape=(0, n_pixels), maxshape=(None, n_pixels), dtype=np.float32,
+                chunks=(1, n_pixels), compression="lzf", shuffle=True,
+            )
+            for name, dtype in (
+                ("timestamp_ns", np.int64),
+                ("setpoint_index", np.int32),
+                ("probe_index", np.int32),
+                ("grating_mm", np.float64),
+                ("delay_mm", np.float64),
+                ("probe_mm", np.float64),
+            ):
+                g.create_dataset(
+                    name,
+                    shape=(0,), maxshape=(None,), dtype=dtype,
+                    chunks=(_SPECTRA_CHUNK_ROWS,), compression="lzf", shuffle=True,
+                )
+
+            self._spectra = g
+            self._n_pixels = n_pixels
+            self.file.flush()
+            log.info("XCORR /spectra opened (%d pixels)", n_pixels)
+
+    def append_spectra(self, records: Sequence[SpectrumRecord]) -> int:
+        """Append a batch of spectra. Returns the number actually written.
+
+        A record whose pixel count disagrees with the axis pinned by
+        :meth:`open_spectra` is skipped with a warning rather than aborting the run —
+        a mid-run spectrometer reconfiguration must not cost the XCORR data.
+
+        Flushed every ``_SPECTRA_CHUNK_ROWS`` appends rather than per batch: the
+        per-setpoint ``write_group`` flush is what carries the crash-safety guarantee,
+        and flushing the whole file a few times a second would fight it.
+        """
+        with self._lock:
+            g = self._spectra
+            if g is None or self._f is None or not records:
+                return 0
+
+            good = [r for r in records if np.asarray(r.counts).size == self._n_pixels]
+            if len(good) != len(records):
+                log.warning(
+                    "XCORR /spectra: skipped %d spectrum/spectra with unexpected pixel count "
+                    "(axis is %d wide)",
+                    len(records) - len(good), self._n_pixels,
+                )
+            if not good:
+                return 0
+
+            start = g["counts"].shape[0]
+            end = start + len(good)
+
+            g["counts"].resize(end, axis=0)
+            g["counts"][start:end, :] = np.asarray(
+                [np.asarray(r.counts, dtype=np.float32) for r in good], dtype=np.float32
+            )
+            for name, dtype, get in (
+                ("timestamp_ns", np.int64, lambda r: r.timestamp_ns),
+                ("setpoint_index", np.int32, lambda r: r.setpoint_index),
+                ("probe_index", np.int32, lambda r: r.probe_index),
+                ("grating_mm", np.float64, lambda r: r.grating_mm),
+                ("delay_mm", np.float64, lambda r: r.delay_mm),
+                ("probe_mm", np.float64, lambda r: r.probe_mm),
+            ):
+                g[name].resize(end, axis=0)
+                g[name][start:end] = np.asarray([get(r) for r in good], dtype=dtype)
+
+            self.n_spectra_written = end
+            self._appends_since_flush += len(good)
+            if self._appends_since_flush >= _SPECTRA_CHUNK_ROWS:
+                self._appends_since_flush = 0
+                self.file.flush()
+            return len(good)
+
+    def close_spectra(self, *, n_dropped: int) -> None:
+        """Stamp the drop count and flush. Safe to call when ``/spectra`` was never opened."""
+        with self._lock:
+            if self._spectra is None or self._f is None:
+                return
+            self._spectra.attrs["n_dropped"] = int(n_dropped)
+            self._appends_since_flush = 0
+            self.file.flush()
+            log.info(
+                "XCORR /spectra closed: %d spectra written, %d dropped",
+                self.n_spectra_written, n_dropped,
+            )
+
     def mark_finished(self, *, aborted: bool) -> None:
         """Stamp the run outcome. Called before ``__exit__`` on a controlled end."""
-        self.file.attrs["aborted"] = aborted
-        self.file.attrs["completed_utc"] = now_utc_iso()
-        self.file.flush()
+        with self._lock:
+            self.file.attrs["aborted"] = aborted
+            self.file.attrs["completed_utc"] = now_utc_iso()
+            self.file.flush()

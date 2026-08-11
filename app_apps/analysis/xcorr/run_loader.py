@@ -84,6 +84,15 @@ class LoadedRun:
     #: One entry per ``/config`` attribute, for provenance display. Values are whatever
     #: h5py hands back (numpy scalars are converted to Python for cleanliness).
     config: dict = field(default_factory=dict)
+    #: ``/spectra`` attributes plus ``n_rows``, or empty when the run recorded no
+    #: spectra. Deliberately *not* the spectra themselves — a long run's ``counts`` is
+    #: hundreds of MB and ``load_run`` is on the panel's import path. Call
+    #: :func:`load_spectra` for the arrays.
+    spectra_meta: dict = field(default_factory=dict)
+
+    @property
+    def has_spectra(self) -> bool:
+        return bool(self.spectra_meta.get("n_rows", 0))
 
     @property
     def n_points(self) -> int:
@@ -199,6 +208,14 @@ def load_run(path: str | Path) -> LoadedRun:
                 utc_end=str(_scalar(a.get("utc_end", ""))),
             ))
 
+        # Absent in format_version 1 and in any run where the spectrometer was not
+        # recording, so this stays an empty dict rather than a failure.
+        spectra_meta: dict = {}
+        if "/spectra" in f:
+            sg = f["/spectra"]
+            spectra_meta = {k: _scalar(v) for k, v in sg.attrs.items()}
+            spectra_meta["n_rows"] = int(sg["counts"].shape[0]) if "counts" in sg else 0
+
         run = LoadedRun(
             path=path,
             run_id=str(_scalar(f.attrs.get("run_id", path.stem))),
@@ -206,10 +223,93 @@ def load_run(path: str | Path) -> LoadedRun:
             aborted=bool(_scalar(f.attrs.get("aborted", True))),
             completed_utc=str(_scalar(f.attrs.get("completed_utc", ""))),
             config=config,
+            spectra_meta=spectra_meta,
         )
 
     log.info(
-        "XCORR imported %s: %d scan(s), %d point(s), aborted=%s",
-        path.name, len(run.scans), run.n_points, run.aborted,
+        "XCORR imported %s: %d scan(s), %d point(s), %d spectrum/spectra, aborted=%s",
+        path.name, len(run.scans), run.n_points, run.spectra_meta.get("n_rows", 0), run.aborted,
     )
     return run
+
+
+@dataclass(frozen=True)
+class LoadedSpectra:
+    """The ``/spectra`` stream: one row per spectrum, plus the shared wavelength axis.
+
+    Rows are **not** aligned with any scan's ``probe_mm``. The spectrometer free-runs, so
+    a probe point carries however many spectra happened to complete while the stages were
+    stationary — sometimes none. Join on ``setpoint_index``/``probe_index`` (or on the
+    recorded positions), never on row index; :meth:`for_setpoint` does the former.
+    """
+
+    wavelength_nm: np.ndarray
+    counts: np.ndarray          # (N, n_pixels)
+    timestamp_ns: np.ndarray
+    setpoint_index: np.ndarray
+    probe_index: np.ndarray
+    grating_mm: np.ndarray
+    delay_mm: np.ndarray
+    probe_mm: np.ndarray
+    attrs: dict = field(default_factory=dict)
+
+    @property
+    def n_rows(self) -> int:
+        return int(self.counts.shape[0])
+
+    def for_setpoint(self, setpoint_index: int) -> np.ndarray:
+        """Row indices belonging to one ``(grating, delay)`` combination."""
+        return np.flatnonzero(self.setpoint_index == setpoint_index)
+
+
+def load_spectra(path: str | Path, *, setpoint_index: int | None = None) -> LoadedSpectra:
+    """Read ``/spectra`` from an XCORR run.
+
+    Separate from :func:`load_run` because ``counts`` is the one array in the file big
+    enough to matter: a two-hour run is ~100 k rows × 3648 float32, so the panel asks for
+    it only when someone actually wants to look at spectra. Pass ``setpoint_index`` to
+    read just one combination's rows — the index columns are small, so this reads them
+    first and slices ``counts`` rather than materialising the whole thing.
+    """
+    path = Path(path)
+    with _open(path) as f:
+        if "/spectra" not in f:
+            raise RunLoadError(
+                f"{path.name} contains no /spectra group — no spectrometer was recording "
+                f"during this run."
+            )
+        g = f["/spectra"]
+        attrs = {k: _scalar(v) for k, v in g.attrs.items()}
+
+        def col(name: str, dtype) -> np.ndarray:
+            if name not in g:
+                return np.empty(0, dtype=dtype)
+            return np.asarray(g[name][()], dtype=dtype)
+
+        setpoints = col("setpoint_index", np.int32)
+        if setpoint_index is None:
+            rows = slice(None)
+            counts = np.asarray(g["counts"][()], dtype=np.float32)
+        else:
+            # h5py fancy-indexes only with a sorted, unique list — flatnonzero gives
+            # exactly that, and an empty selection has to be special-cased.
+            sel = np.flatnonzero(setpoints == int(setpoint_index))
+            rows = sel
+            n_pixels = int(g["counts"].shape[1])
+            counts = (
+                np.asarray(g["counts"][sel, :], dtype=np.float32)
+                if sel.size
+                else np.empty((0, n_pixels), dtype=np.float32)
+            )
+
+        return LoadedSpectra(
+            wavelength_nm=col("wavelength_nm", np.float64),
+            counts=counts,
+            timestamp_ns=col("timestamp_ns", np.int64)[rows],
+            setpoint_index=setpoints[rows],
+            probe_index=col("probe_index", np.int32)[rows],
+            grating_mm=col("grating_mm", np.float64)[rows],
+            delay_mm=col("delay_mm", np.float64)[rows],
+            probe_mm=col("probe_mm", np.float64)[rows],
+            attrs=attrs,
+        )

@@ -16,6 +16,7 @@ from app_apps.io.control_readout.module import ControlReadoutModule
 from app_apps.io.control_readout.uts150cc.handler import Uts150ccHandle
 from app_apps.io.oscilloscope.module import OscilloscopeModule
 from app_apps.io.oscilloscope.oscilloscope_worker_handler import OscilloscopeWorkerHandle
+from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
 from app_apps.routines.cfg_calibration.cfg_range import CfgRange
 from app_apps.routines.xcorr.config import XcorrConfig
 from app_apps.routines.xcorr.routine import XcorrRoutine
@@ -57,6 +58,7 @@ class RoutinesModule(BaseModule):
             delay=c.get(MfaccHandle),
             grating=c.get(Uts150ccHandle),
             scope=c.get(OscilloscopeWorkerHandle),
+            spectrometer=c.get(SpectrometerWorkerHandle),
             settings=c.get(XcorrSettings),
         ))
         c.register_factory(XcorrView, lambda c: XcorrView(c.get(XcorrViewModel), parent=None))
@@ -96,4 +98,5 @@ class RoutinesModule(BaseModule):
             delay=c.get(MfaccHandle),
             grating=c.get(Uts150ccHandle),
             scope=c.get(OscilloscopeWorkerHandle),
+            spectrometer=c.get(SpectrometerWorkerHandle),
         ))
