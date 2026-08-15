@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from base_core.framework.events.event_bus import EventBus
-from base_core.ipc.message import OKReply
-from base_core.ipc.worker_handle import BaseWorkerHandle
+from base_core.ipc.message import Reply
 from base_core.math.models import Angle
-from control_readout.ell14.messages import CurrentELL14Position, HomeELL14Rotator, RotateELL14
+from control_readout.ell14.messages import (
+    CurrentELL14Position,
+    ELL14PositionReply,
+    GetCurrentELL14Position,
+    HomeELL14Rotator,
+    RotateELL14,
+)
 
 from app_apps.io.control_readout.ell14.events import (
     ELL14RotatorHomed,
@@ -12,9 +17,10 @@ from app_apps.io.control_readout.ell14.events import (
     NewELL14Angle,
     RequestRotate,
 )
+from app_apps.io.control_readout.motorized_stage_handle import MotorizedStageHandle
 
 
-class ELL14RotatorHandle(BaseWorkerHandle):
+class ELL14RotatorHandle(MotorizedStageHandle):
     """
     Main-process handle to RotatorWorker.
 
@@ -24,27 +30,29 @@ class ELL14RotatorHandle(BaseWorkerHandle):
     """
 
     WORKER_ID = "rotator"
+    REQUEST_MOVE_EVENT = RequestRotate
+    POS_UPDATE_MSG = CurrentELL14Position
 
     def __init__(self, bus: EventBus) -> None:
         super().__init__(self.WORKER_ID, bus, state_event=ELL14WorkerStateChanged)
-        self._current_Angle: Angle = None
 
-    def subscribe(self) -> None:
-        self._subscribe(RequestRotate, self._on_request_rotate)
-        self._subscribe_service(CurrentELL14Position, self._on_current_position)
+    def _build_move_msg(self, value: Angle) -> RotateELL14:
+        return RotateELL14(angle=value)
 
-    def home(self) -> None:
-        self._request(HomeELL14Rotator(), self._on_home_reply)
+    def _build_home_msg(self) -> HomeELL14Rotator:
+        return HomeELL14Rotator()
 
-    def _on_request_rotate(self, event: RequestRotate) -> None:
-        self._request(RotateELL14(angle=event.angle), self._on_rotate_reply)
+    def _build_get_pos_msg(self) -> GetCurrentELL14Position:
+        return GetCurrentELL14Position()
 
-    def _on_rotate_reply(self, reply: OKReply) -> None:
-        pass
+    def _move_value_from_event(self, event: RequestRotate) -> Angle:
+        return event.angle
 
-    def _on_home_reply(self, reply: OKReply) -> None:
+    def _msg_value(self, msg: CurrentELL14Position | ELL14PositionReply) -> Angle:
+        return msg.angle
+
+    def _build_position_event(self, value: Angle) -> NewELL14Angle:
+        return NewELL14Angle(value)
+
+    def _on_home_reply(self, reply: Reply) -> None:
         self._bus.publish(ELL14RotatorHomed())
-
-    def _on_current_position(self, msg: CurrentELL14Position) -> None:
-        self._current_Angle = msg.angle
-        self._bus.publish(NewELL14Angle(self._current_Angle))

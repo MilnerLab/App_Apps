@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from base_core.framework.events.event_bus import EventBus
-from base_core.ipc.message import OKReply
-from base_core.ipc.worker_handle import BaseWorkerHandle
 from control_readout.esp_301.fms300pp.messages import (
     FMS300PPPosReply,
     FMS300PPPosUpdate,
@@ -16,37 +14,33 @@ from app_apps.io.control_readout.fms300pp.events import (
     NewFms300ppPosition,
     RequestMoveFms300pp,
 )
+from app_apps.io.control_readout.motorized_stage_handle import MotorizedStageHandle
 
 
-class Fms300ppHandle(BaseWorkerHandle):
+class Fms300ppHandle(MotorizedStageHandle):
     """Main-process handle to the FMS300PP ESP301 linear stage."""
 
     WORKER_ID = "fms300pp"
+    REQUEST_MOVE_EVENT = RequestMoveFms300pp
+    POS_UPDATE_MSG = FMS300PPPosUpdate
 
     def __init__(self, bus: EventBus) -> None:
         super().__init__(self.WORKER_ID, bus, state_event=Fms300ppWorkerStateChanged)
 
-    def subscribe(self) -> None:
-        self._subscribe(RequestMoveFms300pp, self._on_request_move)
-        self._subscribe_service(FMS300PPPosUpdate, self._on_position_update)
+    def _build_move_msg(self, value: float) -> MoveFMS300PPTo:
+        return MoveFMS300PPTo(position=value)
 
-    def move_to(self, position: float) -> None:
-        self._request(MoveFMS300PPTo(position=position), self._on_reply)
+    def _build_home_msg(self) -> HomeFMS300PP:
+        return HomeFMS300PP()
 
-    def home(self) -> None:
-        self._request(HomeFMS300PP(), self._on_reply)
+    def _build_get_pos_msg(self) -> GetCurrentPosFMS300PP:
+        return GetCurrentPosFMS300PP()
 
-    def get_position(self) -> None:
-        self._request(GetCurrentPosFMS300PP(), self._on_position_reply)
+    def _move_value_from_event(self, event: RequestMoveFms300pp) -> float:
+        return event.position
 
-    def _on_request_move(self, event: RequestMoveFms300pp) -> None:
-        self._request(MoveFMS300PPTo(position=event.position), self._on_reply)
+    def _msg_value(self, msg: FMS300PPPosUpdate | FMS300PPPosReply) -> float:
+        return msg.position
 
-    def _on_reply(self, reply: OKReply) -> None:
-        pass
-
-    def _on_position_reply(self, reply: FMS300PPPosReply) -> None:
-        self._bus.publish(NewFms300ppPosition(position=reply.position))
-
-    def _on_position_update(self, msg: FMS300PPPosUpdate) -> None:
-        self._bus.publish(NewFms300ppPosition(position=msg.position))
+    def _build_position_event(self, value: float) -> NewFms300ppPosition:
+        return NewFms300ppPosition(position=value)

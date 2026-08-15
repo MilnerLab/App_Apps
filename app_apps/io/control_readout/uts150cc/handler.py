@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from base_core.framework.events.event_bus import EventBus
-from base_core.ipc.message import OKReply
-from base_core.ipc.worker_handle import BaseWorkerHandle
 from control_readout.esp_301.uts150cc.messages import (
     GetCurrentPosUTS150CC,
     HomeUTS150CC,
@@ -11,6 +9,7 @@ from control_readout.esp_301.uts150cc.messages import (
     UTS150CCPosUpdate,
 )
 
+from app_apps.io.control_readout.motorized_stage_handle import MotorizedStageHandle
 from app_apps.io.control_readout.uts150cc.events import (
     NewUts150ccPosition,
     RequestMoveUts150cc,
@@ -18,35 +17,30 @@ from app_apps.io.control_readout.uts150cc.events import (
 )
 
 
-class Uts150ccHandle(BaseWorkerHandle):
+class Uts150ccHandle(MotorizedStageHandle):
     """Main-process handle to the UTS150CC ESP301 linear stage."""
 
     WORKER_ID = "uts150cc"
+    REQUEST_MOVE_EVENT = RequestMoveUts150cc
+    POS_UPDATE_MSG = UTS150CCPosUpdate
 
     def __init__(self, bus: EventBus) -> None:
         super().__init__(self.WORKER_ID, bus, state_event=Uts150ccWorkerStateChanged)
 
-    def subscribe(self) -> None:
-        self._subscribe(RequestMoveUts150cc, self._on_request_move)
-        self._subscribe_service(UTS150CCPosUpdate, self._on_position_update)
+    def _build_move_msg(self, value: float) -> MoveUTS150CCTo:
+        return MoveUTS150CCTo(position=value)
 
-    def move_to(self, position: float) -> None:
-        self._request(MoveUTS150CCTo(position=position), self._on_reply)
+    def _build_home_msg(self) -> HomeUTS150CC:
+        return HomeUTS150CC()
 
-    def home(self) -> None:
-        self._request(HomeUTS150CC(), self._on_reply)
+    def _build_get_pos_msg(self) -> GetCurrentPosUTS150CC:
+        return GetCurrentPosUTS150CC()
 
-    def get_position(self) -> None:
-        self._request(GetCurrentPosUTS150CC(), self._on_position_reply)
+    def _move_value_from_event(self, event: RequestMoveUts150cc) -> float:
+        return event.position
 
-    def _on_request_move(self, event: RequestMoveUts150cc) -> None:
-        self._request(MoveUTS150CCTo(position=event.position), self._on_reply)
+    def _msg_value(self, msg: UTS150CCPosUpdate | UTS150CCPosReply) -> float:
+        return msg.position
 
-    def _on_reply(self, reply: OKReply) -> None:
-        pass
-
-    def _on_position_reply(self, reply: UTS150CCPosReply) -> None:
-        self._bus.publish(NewUts150ccPosition(position=reply.position))
-
-    def _on_position_update(self, msg: UTS150CCPosUpdate) -> None:
-        self._bus.publish(NewUts150ccPosition(position=msg.position))
+    def _build_position_event(self, value: float) -> NewUts150ccPosition:
+        return NewUts150ccPosition(position=value)

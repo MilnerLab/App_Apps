@@ -9,7 +9,7 @@ from base_core.math.models import Angle
 from base_qt.ui.form import AngleSpec, ConfigForm
 from base_qt.ui.worker_control_widget import WorkerControlWidget
 
-from app_apps.io.control_readout.ell14.ui.view_model import ELL14RotatorViewModel
+from app_apps.io.control_readout.rotator_view_model import RotatorViewModel
 
 
 @dataclass
@@ -17,20 +17,30 @@ class _RotateCommand:
     angle: Angle = Angle(0, AngleUnit.DEG, wrap=False)
 
 
-class ELL14RotatorView(ConfigForm):
+class RotatorView(ConfigForm):
+    """Reusable panel for any motorized-waveplate rotator: editable
+    "Rotate by" angle with a live current-angle readout, a Home button, and
+    Start/Pause worker controls.
+
+    One instance per device (ELL14, RGV100BL, ...) — parameterized by title
+    and ViewModel rather than subclassed.
+    """
+
     _specs = {
         "angle": AngleSpec("Rotate by"),
     }
 
-    def __init__(self, vm: ELL14RotatorViewModel, parent: QWidget) -> None:
+    def __init__(self, title: str, vm: RotatorViewModel, parent: QWidget) -> None:
         self._vm = vm
-        super().__init__("ELL14 Rotator", _RotateCommand(), parent, vm=vm)
+        super().__init__(title, _RotateCommand(), parent, vm=vm)
 
         ctrl = WorkerControlWidget(vm.start, vm.pause, vm.resume, vm.stop, parent=self)
         ctrl.set_status(vm.worker_status)
         vm.worker_state_changed.connect(ctrl.set_status)
         self.header_layout.addWidget(ctrl)
         self.header_widget.setVisible(True)
+
+        vm.angle_updated.connect(lambda deg: self.update_readout("angle", Angle(deg, AngleUnit.DEG)))
 
         home_row = QHBoxLayout()
         home_row.addStretch(1)
