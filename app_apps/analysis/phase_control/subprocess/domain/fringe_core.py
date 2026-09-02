@@ -487,11 +487,24 @@ def cfg_freq_ghz(csig, u):
     return fringe_freq_cyc_per_nm(csig, u) * GHZ_PER_CYC_PER_NM * CFG_PER_FRINGE
 
 
-def cfg_range(csig, l0, pU, n=401):
-    """f_cfg at the two FWHM edges, ready to render, or ``None``.
+def cfg_range(csig, l0, pU, cut_left=None, n=401):
+    """f_cfg at the two band edges, ready to render, or ``None``.
 
     Returns ``(hi_nm, f_at_hi, lo_nm, f_at_lo, signed)`` with the RED edge (higher
     wavelength) first, which is the order the readout quotes.
+
+    **The low-wavelength terminal is the SUPPORTED edge, not the fitted one.** The band
+    starts as the envelope's FWHM, ``mu -/+ FWHM/2``. But when the trace is clipped on the
+    short-wavelength side there is no light below the cut, so the fitted envelope there is
+    the cubic's extrapolation rather than a measurement -- and f_cfg is the phase
+    DERIVATIVE, which extrapolates worse than the phase itself. ``cut_left`` therefore
+    raises that terminal: the quoted edge is ``max(mu - FWHM/2, cut_left)``, i.e. whichever
+    wavelength is HIGHER, which is always the one the data reaches.
+
+    Passing ``cut_left=None`` (the default) leaves the FWHM band exactly as it was, so an
+    unclipped frame reads identically to before this argument existed. The high-wavelength
+    edge is deliberately NOT clamped here: the caller asked for the one terminal, and
+    changing the red edge as well would move a number nobody asked to move.
 
     **Sign.** The fit is globally sign-ambiguous: the model is ``mid + half*cos(Phi)`` and
     cosine is even, so ``Phi -> -Phi`` is a bit-identical fit and the sign the optimiser
@@ -512,6 +525,13 @@ def cfg_range(csig, l0, pU, n=401):
     if band is None:
         return None
     lo_nm, hi_nm = band
+    if cut_left is not None:
+        cut = float(cut_left)
+        # Only ever raises the terminal. A cut below the FWHM edge removed nothing the
+        # readout was quoting, and one at or above hi_nm would invert the band, so it is
+        # ignored rather than allowed to produce a backwards range.
+        if np.isfinite(cut) and lo_nm < cut < hi_nm:
+            lo_nm = cut
     grid = np.linspace(lo_nm, hi_nm, int(n)) - float(l0)
     f = cfg_freq_ghz(csig, grid)
     if not np.all(np.isfinite(f)):

@@ -41,6 +41,7 @@ class StabilizationControlViewModel(QObject):
     plot_mode_changed = Signal(bool)       # plot-in-frequency toggled
     template_state_changed = Signal(str)   # human-readable frozen-template state
     knife_edges_changed = Signal(bool)     # knife-edge markers toggled
+    cut_left_changed = Signal(float, bool)  # terminal nm, True when manually set
 
     def __init__(
         self,
@@ -110,12 +111,22 @@ class StabilizationControlViewModel(QObject):
             pen = QPen(QColor("red"))
             pen.setStyle(Qt.PenStyle.DashLine)
             pen.setCosmetic(True)
-            line = pg.InfiniteLine(angle=90, movable=False, pen=pen,
+            # Only the LEFT edge is draggable. It is the one the f_cfg readout quotes its
+            # short-wavelength terminal at, so moving it means something; a handle on the
+            # right would move under the cursor and change nothing, which is worse than no
+            # handle at all.
+            movable = side == "left"
+            line = pg.InfiniteLine(angle=90, movable=movable, pen=pen,
                                    label="knife " + side,
                                    labelOpts={"color": "red", "position": 0.92,
                                               "movable": False})
             line.setZValue(50)
             line.setVisible(False)
+            if movable:
+                # On RELEASE, not on every mouse move: the readout re-renders and the value
+                # crosses IPC into the persisted config, and doing that per pixel of drag
+                # would push hundreds of config writes for one gesture.
+                line.sigPositionChangeFinished.connect(self._on_knife_dragged)
             self._knife_lines.append(line)
 
     def set_active(self, active: bool) -> None:
@@ -232,6 +243,64 @@ class StabilizationControlViewModel(QObject):
         return float(2.0 * np.pi * SPEED_OF_LIGHT / wl_nm * 1e-3
                      - 2.0 * np.pi * SPEED_OF_LIGHT / lambda_ref * 1e-3)
 
+    def _from_plot_x(self, x: float) -> float:
+        """The inverse of :meth:`_to_plot_x`: a plot x back to a wavelength in nm.
+
+        The detuning map is its own inverse in form -- omega = 2*pi*c/lambda - omega_ref
+        rearranges to lambda = 2*pi*c/(x + omega_ref) -- so a drag in frequency mode lands
+        on the same nm the marker was drawn from, with no accumulated error from a
+        round trip.
+        """
+        if not self._plot_frequency:
+            return float(x)
+        lambda_ref = self._config.params.lambda_ref.value(Prefix.NANO)
+        omega_ref = 2.0 * np.pi * SPEED_OF_LIGHT / lambda_ref * 1e-3
+        omega = float(x) + omega_ref
+        if omega <= 0.0:
+            return float("nan")
+        return float(2.0 * np.pi * SPEED_OF_LIGHT / omega * 1e-3)
+
+    @property
+    def effective_cut_left(self) -> float | None:
+        """The short-wavelength terminal the readout quotes at, in nm, or None.
+
+        The operator's dragged value wins over the fit's own detection when there is one.
+        With no drag this is exactly the detected cut, so the default behaviour is
+        unchanged -- which is the point: the override exists for the frames where the
+        detector is wrong, not to become the normal path.
+        """
+        if self._config.manual_cut_left is not None:
+            return float(self._config.manual_cut_left)
+        cut = self._config.params.cut_left
+        return None if cut is None else float(cut)
+
+    @property
+    def cut_left_is_manual(self) -> bool:
+        return self._config.manual_cut_left is not None
+
+    def _on_knife_dragged(self, line) -> None:
+        """The operator moved the left knife edge: adopt it as the manual terminal."""
+        nm = self._from_plot_x(float(line.value()))
+        if not np.isfinite(nm):
+            self._update_knife_lines()      # snap back rather than store a nonsense edge
+            return
+        self._config.manual_cut_left = nm
+        self._handle.set_config(self._config)
+        self._update_rf_label()
+        self._update_knife_lines()
+        self.cut_left_changed.emit(nm, True)
+
+    def clear_manual_cut_left(self) -> None:
+        """Hand the terminal back to the fit's own detection."""
+        if self._config.manual_cut_left is None:
+            return
+        self._config.manual_cut_left = None
+        self._handle.set_config(self._config)
+        self._update_rf_label()
+        self._update_knife_lines()
+        cut = self.effective_cut_left
+        self.cut_left_changed.emit(float("nan") if cut is None else cut, False)
+
     def _update_knife_lines(self) -> None:
         """Place/hide the two knife-edge markers from the committed fit.
 
@@ -242,7 +311,7 @@ class StabilizationControlViewModel(QObject):
         if not self._knife_lines:
             return
         p = self._config.params
-        for line, cut in zip(self._knife_lines, (p.cut_left, p.cut_right)):
+        for line, cut in zip(self._knife_lines, (self.effective_cut_left, p.cut_right)):
             if cut is None or not self._show_knife_edges:
                 line.setVisible(False)
                 continue
@@ -297,7 +366,8 @@ class StabilizationControlViewModel(QObject):
         if not any((p.c1, p.c2, p.c3)):
             self._rf_label.setText("")
             return
-        rng = fc.cfg_range((p.c0, p.c1, p.c2, p.c3), p.l0, p.pU)
+        rng = fc.cfg_range((p.c0, p.c1, p.c2, p.c3), p.l0, p.pU,
+                           cut_left=self.effective_cut_left)
         self._rf_label.setText(fc.format_cfg_range(rng, p.shape_ok))
         self._rf_label.setColor(QColor("white") if p.shape_ok else QColor("orange"))
 

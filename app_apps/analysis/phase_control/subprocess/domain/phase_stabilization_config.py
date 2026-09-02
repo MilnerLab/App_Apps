@@ -217,6 +217,17 @@ class StabilizationConfig(PrimitiveSerde):
                                         # default comes from. Tunable while running because
                                         # the phase-invariance floor depends on the noise,
                                         # which depends on the spectrometer settings.
+    manual_cut_left: float | None = None
+                                        # operator override for the short-wavelength
+                                        # terminal the f_cfg readout quotes at, in nm. None
+                                        # = use the fit's own detected cut, which is the
+                                        # default and the normal case. Set by dragging the
+                                        # left knife-edge marker; cleared by "Auto".
+                                        #
+                                        # It lives on the config rather than on
+                                        # FringeFitParams because params is REPLACED by
+                                        # every committed fit -- an operator's choice
+                                        # parked there would survive one frame and vanish.
     min_amplitude_frac: float = 0.10    # hold if the closed-form fit amplitude falls below
                                         # this fraction of the template's capture amplitude.
                                         # The amplitude drops ~226x when the fringes wash
@@ -278,6 +289,7 @@ class StabilizationConfig(PrimitiveSerde):
             "correction_period_s": self.correction_period_s,
             "shape_mismatch_max": self.shape_mismatch_max,
             "min_amplitude_frac": self.min_amplitude_frac,
+            "manual_cut_left": self.manual_cut_left,
         }
 
     @classmethod
@@ -305,4 +317,7 @@ class StabilizationConfig(PrimitiveSerde):
             correction_period_s=float(v.get("correction_period_s", 15.0)),
             shape_mismatch_max=float(v.get("shape_mismatch_max", SHAPE_MISMATCH_MAX)),
             min_amplitude_frac=float(v.get("min_amplitude_frac", 0.10)),
+            # Absent in every config written before the drag existed -> None -> auto.
+            manual_cut_left=(None if v.get("manual_cut_left") is None
+                             else float(v["manual_cut_left"])),
         )

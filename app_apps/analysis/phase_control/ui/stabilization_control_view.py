@@ -77,6 +77,20 @@ class StabilizationControlView(QWidget):
         )
         self._knife_cb.setChecked(vm.show_knife_edges)
         freq_row.addWidget(self._knife_cb)
+
+        # Drag the left marker to override where the readout's short-wavelength terminal
+        # sits; this hands it back. Enabled only while an override is actually in force, so
+        # the button doubles as the indicator that one IS -- otherwise a dragged edge is
+        # indistinguishable from a detected one on a glance at the chart.
+        self._auto_cut_btn = QPushButton("Auto")
+        self._auto_cut_btn.setToolTip(
+            "The f_cfg readout quotes its short-wavelength terminal at the FWHM edge, or "
+            "at the left knife edge when that is the higher wavelength -- whichever the "
+            "data actually reaches. Drag the left marker to override it; press Auto to go "
+            "back to the detected cut."
+        )
+        self._auto_cut_btn.setEnabled(vm.cut_left_is_manual)
+        freq_row.addWidget(self._auto_cut_btn)
         freq_row.addStretch()
         fbox.addLayout(freq_row)
 
@@ -104,6 +118,9 @@ class StabilizationControlView(QWidget):
         self._freq_cb.checkStateChanged.connect(
             lambda state: self._vm.set_plot_frequency(state == Qt.CheckState.Checked)
         )
+        self._auto_cut_btn.clicked.connect(self._vm.clear_manual_cut_left)
+        self._vm.cut_left_changed.connect(
+            lambda _nm, manual: self._auto_cut_btn.setEnabled(bool(manual)))
         self._knife_cb.checkStateChanged.connect(
             lambda state: self._vm.set_show_knife_edges(state == Qt.CheckState.Checked)
         )
