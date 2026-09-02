@@ -403,24 +403,39 @@ REF_HYST = 5          # consecutive traces agreeing before the app changes refer
 # --- Frequency plot ---
 FREQ_YLIM = 6         # frequency-axis cap (cycles/nm)
 
-# --- Spectral fringe frequency -> generated RF frequency ----------------------
-# Dispersive time-mapping calibration (user, 2026-07-19): 9 nm of spectrum maps to ~320 ps
-# of delay, assumed LINEAR over the band. So a spectral fringe of period P nm becomes a
-# temporal beat of period P * (320/9) ps, and the RF frequency it generates is the
-# reciprocal of that:
-#     f_RF [GHz] = f [cycles/nm] * (9 nm / 320 ps) = f * 28.125
+# --- Spectral fringe frequency -> generated centrifuge frequency --------------
+# Dispersive time-mapping calibration (user; 310 ps as of 2026-09-01): 9 nm of spectrum maps
+# to ~310 ps of delay, assumed LINEAR over the band. So a spectral fringe of period P nm
+# becomes a temporal beat of period P * (310/9) ps, and the beat frequency it generates is
+# the reciprocal of that:
+#     f_fringe [GHz] = f [cycles/nm] * (9 nm / 310 ps) = f * 29.032
 # The "roughly" in the calibration is the dominant error here -- it is a stated ~1 sig fig,
 # so do not report this to a precision the calibration cannot carry (see format_ghz).
-NM_PER_PS = 9.0 / 320.0          # 0.028125 nm/ps
-GHZ_PER_CYC_PER_NM = 1e3 * NM_PER_PS   # 28.125 GHz per (cycle/nm)
+#
+# The 9 nm here is the DISPERSIVE MAPPING span (a property of the stretcher), not the pulse
+# bandwidth. It is unrelated to the FWHM the readout is quoted over below, and the two must
+# not be conflated just because both happened to be 9.
+MAP_SPAN_NM = 9.0
+MAP_SPAN_PS = 310.0
+NM_PER_PS = MAP_SPAN_NM / MAP_SPAN_PS   # 0.029032 nm/ps
+GHZ_PER_CYC_PER_NM = 1e3 * NM_PER_PS    # 29.032 GHz per (cycle/nm)
 
-# The band the range is quoted over: 802 +- 9 nm. This deliberately EXTRAPOLATES beyond the
-# fitted core (typically ~150-185 points over 6-9 nm), because the question the readout
-# answers is "what RF does this shot generate across the pulse", not "what did we fit".
-# Extrapolating a cubic is exactly where a badly-determined c2/c3 shows up, multiplied by
-# d^2/d^3 -- which is why the readout must be gated on shape_ok, not trust_ok.
-RF_BAND_CENTRE_NM = 802.0
-RF_BAND_HALFWIDTH_NM = 9.0
+#: The centrifuge frequency is HALF the fringe beat frequency. The readout reports f_cfg,
+#: so every GHz figure the UI shows carries this factor; the raw fringe rate is what
+#: ``fringe_freq_cyc_per_nm`` returns and is NOT what is displayed.
+CFG_PER_FRINGE = 0.5
+
+# The band the readout is quoted over is the shot's OWN measured FWHM, taken from the fitted
+# upper-envelope Gaussian (pU = [a, mu, sigma, off]) -- not a hardcoded window. The previous
+# fixed 802 +- 9 nm extrapolated ~2.5x past the real spectrum (measured FWHM 7.1 nm on the
+# 2026-08-31 scan_gz run), which is exactly where a poorly determined c2/c3 blows up. Quoting
+# the FWHM instead keeps the readout inside the light that actually exists. The shape_ok gate
+# still applies: the fitted core can be narrower than the FWHM.
+#: Gaussian sigma -> FWHM.
+FWHM_PER_SIGMA = 2.0 * np.sqrt(2.0 * np.log(2.0))   # 2.3548
+#: Reject a degenerate envelope (the all-defaults pU = [0, 0, 1, 0], or a collapsed fit)
+#: rather than quoting a band derived from it.
+MIN_ENVELOPE_SIGMA_NM = 0.05
 
 TAU = RATIO / (RATIO + 1.0)   # ~0.91 quantile: fit hugs the upper envelope of the fringes
 # =============================================================================
@@ -431,33 +446,86 @@ def fringe_freq_cyc_per_nm(csig, u):
 
     dPhi/du / 2pi for the fitted cubic. SIGNED -- the sign flips through a null, and callers
     that want a frequency magnitude must take abs() themselves. Keeping the sign here is what
-    lets rf_range_ghz find the null (where |f| -> 0) instead of silently reporting the
-    turning point as a minimum of a quantity that never went negative.
+    lets ``cfg_range`` see a zero CROSSING as a crossing, rather than folding it to a
+    spurious 0 GHz minimum of a quantity that never went negative.
+
+    This is the raw FRINGE rate. The displayed centrifuge frequency is half of it -- use
+    :func:`cfg_freq_ghz`, which applies both the dispersive mapping and ``CFG_PER_FRINGE``.
     """
     c = np.asarray(csig, float)
     u = np.asarray(u, float)
     return (c[1] + 2.0 * c[2] * u + 3.0 * c[3] * u ** 2) / (2.0 * np.pi)
 
 
-def rf_range_ghz(csig, l0, centre_nm=None, halfwidth_nm=None, n=401):
-    """RF frequency range (min_GHz, max_GHz) generated across the quoted spectral band.
+def fwhm_band_nm(pU):
+    """(lo_nm, hi_nm) FWHM edges of the fitted upper-envelope Gaussian, or None.
 
-    Returns the extremes of |f| over lambda in centre +- halfwidth, converted through the
-    dispersive time-mapping calibration (see GHZ_PER_CYC_PER_NM). Sampled on a grid rather
-    than evaluated at the two endpoints, because f is a PARABOLA in u whenever c3 != 0 and a
-    line otherwise: with a chirp, the extreme frequency is often interior, and with an
-    in-band null |f| touches ZERO in the middle while both endpoints are large. Endpoint-only
-    evaluation would report a range that excludes both the true minimum and, past the vertex,
-    the true maximum.
-
-    The band deliberately extends past the fitted core -- this is extrapolation, and it is
-    only as good as c1/c2/c3. Gate the readout on R["shape_ok"].
+    ``pU`` is ``[a, mu, sigma, off]`` as committed by the fit. Returns ``None`` for a
+    degenerate envelope -- the all-defaults ``[0, 0, 1, 0]`` of an un-fitted config, a
+    collapsed sigma, or anything non-finite -- so the caller shows nothing rather than a
+    band derived from a fit that did not happen.
     """
-    c = RF_BAND_CENTRE_NM if centre_nm is None else float(centre_nm)
-    h = RF_BAND_HALFWIDTH_NM if halfwidth_nm is None else float(halfwidth_nm)
-    u = np.linspace(c - h, c + h, int(n)) - float(l0)
-    f = np.abs(fringe_freq_cyc_per_nm(csig, u)) * GHZ_PER_CYC_PER_NM
-    return float(np.min(f)), float(np.max(f))
+    try:
+        a, mu, sigma, _off = (float(v) for v in pU[:4])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if not (np.isfinite(a) and np.isfinite(mu) and np.isfinite(sigma)):
+        return None
+    if a == 0.0 or abs(sigma) < MIN_ENVELOPE_SIGMA_NM or mu <= 0.0:
+        return None
+    half = 0.5 * FWHM_PER_SIGMA * abs(sigma)
+    return (mu - half, mu + half)
+
+
+def cfg_freq_ghz(csig, u):
+    """Signed centrifuge frequency at phase-basis offset ``u``, in GHz.
+
+    ``fringe_freq_cyc_per_nm`` gives the spectral fringe rate; this applies the dispersive
+    mapping and the factor ``CFG_PER_FRINGE`` -- f_cfg is HALF the fringe beat. Signed, for
+    the reason ``fringe_freq_cyc_per_nm`` documents.
+    """
+    return fringe_freq_cyc_per_nm(csig, u) * GHZ_PER_CYC_PER_NM * CFG_PER_FRINGE
+
+
+def cfg_range(csig, l0, pU, n=401):
+    """f_cfg at the two FWHM edges, ready to render, or ``None``.
+
+    Returns ``(hi_nm, f_at_hi, lo_nm, f_at_lo, signed)`` with the RED edge (higher
+    wavelength) first, which is the order the readout quotes.
+
+    **Sign.** The fit is globally sign-ambiguous: the model is ``mid + half*cos(Phi)`` and
+    cosine is even, so ``Phi -> -Phi`` is a bit-identical fit and the sign the optimiser
+    lands on is a seed accident (see ``recover_offset``). Therefore:
+
+    * when f_cfg does NOT change sign across the band, the sign carries no information and
+      magnitudes are returned (``signed=False``) -- printing one would assert a rotation
+      direction the data never determined;
+    * when it DOES change sign, the crossing is invariant under the global flip and is real
+      structure, so signed values are returned (``signed=True``), normalised so the red edge
+      is positive. That convention is tied to the spectrum rather than to the fit, so it is
+      stable from shot to shot instead of mirroring whenever the optimiser flips.
+
+    The sign change is detected over the whole sampled band, not just the two endpoints: with
+    a non-zero c3 the frequency is a parabola in u and can dip through zero and return.
+    """
+    band = fwhm_band_nm(pU)
+    if band is None:
+        return None
+    lo_nm, hi_nm = band
+    grid = np.linspace(lo_nm, hi_nm, int(n)) - float(l0)
+    f = cfg_freq_ghz(csig, grid)
+    if not np.all(np.isfinite(f)):
+        return None
+
+    signed = bool(np.nanmin(f) < 0.0 < np.nanmax(f))
+    f_lo, f_hi = float(f[0]), float(f[-1])
+    if signed:
+        # Normalise the arbitrary global sign so the red edge reads positive.
+        if f_hi < 0.0:
+            f_lo, f_hi = -f_lo, -f_hi
+    else:
+        f_lo, f_hi = abs(f_lo), abs(f_hi)
+    return (hi_nm, f_hi, lo_nm, f_lo, signed)
 
 
 def format_ghz(v):
@@ -483,21 +551,26 @@ def format_ghz(v):
     return f"{v:.3f}"
 
 
-def format_rf_range(lo_ghz, hi_ghz, shape_ok=True):
-    """The overlay string: "12-47 GHz", or a single value when the range is degenerate.
+def format_cfg_range(rng, shape_ok=True):
+    """The overlay string, red edge first::
+
+        f_cfg ranges from 130 GHz @ 806.2 nm to 70 GHz @ 797.8 nm
+
+    ``rng`` is whatever :func:`cfg_range` returned; ``None`` gives an empty string, so an
+    un-fitted or degenerate shot shows nothing rather than a fabricated zero.
 
     ``shape_ok=False`` marks the number as unsupported rather than hiding it -- the phase can
     still be locked on such a frame, so blanking the readout would misreport a working shot,
-    while quoting it bare would launder an extrapolated c2 the fit cannot vouch for.
+    while quoting it bare would launder a c2/c3 the fit cannot vouch for.
     """
-    lo, hi = float(lo_ghz), float(hi_ghz)
-    if not (np.isfinite(lo) and np.isfinite(hi)):
-        return "-- GHz"
-    # Collapse to one number when the two ends round to the same displayed value: an
-    # unchirped shot is a single frequency, and "34-34 GHz" reads as a bug.
-    s_lo, s_hi = format_ghz(lo), format_ghz(hi)
-    body = s_lo if s_lo == s_hi else f"{s_lo}-{s_hi}"
-    return f"{body} GHz" + ("" if shape_ok else " (unverified)")
+    if rng is None:
+        return ""
+    hi_nm, f_hi, lo_nm, f_lo, _signed = rng
+    if not (np.isfinite(f_hi) and np.isfinite(f_lo)):
+        return ""
+    body = (f"f_cfg ranges from {format_ghz(f_hi)} GHz @ {hi_nm:.1f} nm "
+            f"to {format_ghz(f_lo)} GHz @ {lo_nm:.1f} nm")
+    return body + ("" if shape_ok else " (unverified)")
 
 
 def gauss(x, a, mu, sigma, off):

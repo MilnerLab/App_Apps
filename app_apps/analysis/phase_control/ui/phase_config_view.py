@@ -5,7 +5,7 @@ from typing import Any, ClassVar, TYPE_CHECKING
 
 from base_core.ipc.worker_handle import WorkerStatus
 from base_core.quantities.enums import Prefix
-from base_qt.ui.form import DirtyForm, FloatSpec, LengthSpec, RangeSpec
+from base_qt.ui.form import BoolSpec, DirtyForm, FloatSpec, LengthSpec, RangeSpec
 
 from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import (
     GAIN_MAX,
@@ -51,19 +51,24 @@ class PhaseConfigView(DirtyForm):
         ),
         "rms_frac_threshold": FloatSpec("Accept rms/amp below",    0.0,   2.0,     decimals=3, step=0.02),
         "inlier_threshold":  FloatSpec("Accept inliers above (%)", 0.0,   100.0,   decimals=0, step=1.0),
+        "min_visibility":    FloatSpec("Abort fit below visibility", 0.0, 1.0,   decimals=3, step=0.01),
         "loop_gain":         FloatSpec("Loop gain (err/frame)", GAIN_MIN, GAIN_MAX, decimals=2, step=0.01),
+        "invert_correction": BoolSpec("Invert correction sign"),
     }
     _groups = [
         ("Fit tunables", [
             "trunc_threshold", "trust_nsig", "lambda_ref",
         ]),
         ("Tracking", [
-            "wavelength_range", "rms_frac_threshold", "inlier_threshold",
+            "wavelength_range", "rms_frac_threshold", "inlier_threshold", "min_visibility",
         ]),
         ("Control loop", [
-            "loop_gain",
+            "loop_gain", "invert_correction",
         ]),
     ]
+    # invert_correction is deliberately NOT read-only while running either, and for a
+    # stronger reason than loop_gain: a wrong sign is only diagnosable by watching the loop
+    # fail to converge, so the operator must be able to flip it against the running loop.
     # loop_gain is deliberately NOT here: tuning the gain against a loop you are watching
     # settle is the entire reason it is exposed, and it is safe to change mid-run (the
     # corrector is retuned in place, and the fit does not depend on it at all).

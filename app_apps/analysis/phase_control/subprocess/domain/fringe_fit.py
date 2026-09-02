@@ -29,6 +29,7 @@ file across whole. Do not patch this side.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -43,6 +44,27 @@ phase_poly = fc.phase_poly
 signal_model = fc.signal_model
 baseline_anchor = fc.baseline_anchor
 ReferencePolicy = fc.ReferencePolicy
+
+# Wall-clock budget for the truncation-recovery scan, in seconds.
+#
+# `fc.analyze` runs the scan itself, unbounded: TRUNCREC_MAX_NM/TRUNCREC_STEP_NM = 16 cuts x
+# 2 sides = up to **32 extra full `_analyze_once` calls** on a frame that fails `_explains`.
+# The scan is ordered smallest-cut-first and stops at the first success, so a scan that finds
+# something terminates early -- a scan that runs all 32 was going to fail anyway. A
+# wall-clock cap therefore costs the good path nothing and only truncates a doomed one.
+#
+# It is a TIME budget and not an iteration cap on purpose: an iteration cap also throttles
+# successful recoveries, which are the whole reason the scan exists.
+#
+# Why the loop is here and not in `fc.analyze` where it belongs: `fringe_core.py` is a
+# verbatim copy of the standalone and may not be patched on this side (see the module
+# docstring). So `analyze_trace` calls it with `recover=False` and runs the budgeted scan
+# out here, delegating every decision back to fringe_core -- `_analyze_once` does the
+# fitting, `_explains` does the judging, `TRUNCREC_*` set the grid. No math is restated;
+# only the loop that walks the grid, and the ordering it walks in (smallest cut first,
+# alternating sides, first success wins) is preserved exactly. If this ever moves into the
+# standalone, delete this and pass `recover=True`.
+TRUNCREC_BUDGET_S = 0.5
 
 
 @dataclass(frozen=True)
@@ -179,13 +201,16 @@ def analyze_trace(
     reported reference cannot chatter between two wavelengths. Omit it and the reference
     falls back immediately.
     """
+    x = np.asarray(wl, dtype=float)
+    y = np.asarray(intensity, dtype=float)
     try:
         R = fc.analyze(
-            np.asarray(wl, dtype=float), np.asarray(intensity, dtype=float),
-            anchor=anchor, ref_policy=ref_policy,
+            x, y, anchor=anchor, ref_policy=ref_policy,
             trust_nsig=t.trust_nsig, trunc_threshold=t.trunc_threshold,
-            ref_primary=lambda_ref_nm,
+            ref_primary=lambda_ref_nm, recover=False,
         )
+        if not fc._explains(R):
+            R = _recover_truncation(R, x, y, t, anchor, ref_policy, lambda_ref_nm)
     except Exception as e:  # fringe_core already guards its own internals; belt and braces
         log.warning("FITDIAG rejected: %s: %s", type(e).__name__, e)
         return rejected("error", f"{type(e).__name__}: {e}")
@@ -242,6 +267,86 @@ def analyze_trace(
         trunc_hits_core=bool(trunc.get("hits_core", False)),
         msg=str(R.get("msg", "")),
     )
+
+
+def _recover_truncation(R, x, y, t, anchor, ref_policy, lambda_ref_nm):
+    """Budgeted re-run of ``fc.analyze``'s recovery scan. Returns ``R`` unchanged if nothing
+    explains the trace, or the budget runs out first.
+
+    This mirrors the scan inside ``fc.analyze`` exactly, with one addition -- the
+    ``TRUNCREC_BUDGET_S`` wall clock. See that constant for why the loop lives out here.
+    """
+    if fc.SCANFREE:
+        return R           # the deterministic pipeline lands the truncated fit in one pass
+    if R.get("x") is None or len(R["x"]) < 2:
+        return R
+    lo, hi = float(R["x"][0]), float(R["x"][-1])
+    if (hi - lo) <= fc.TRUNCREC_MIN_SPAN_NM:
+        return R           # no room for any cut at all
+
+    # ref_policy is STATEFUL ACROSS FRAMES (REF_HYST consecutive traces to switch), so the
+    # candidates must not touch it: 32 of them would drive the hysteresis counter 32x in one
+    # frame and switch the reference on the first bad trace instead of the fifth. Only the
+    # winner is re-fit with the policy, below.
+    deadline = time.perf_counter() + TRUNCREC_BUDGET_S
+    best = None
+    # Smallest cut first, alternating sides, so the first success IS the minimal one.
+    steps = int(fc.TRUNCREC_MAX_NM / fc.TRUNCREC_STEP_NM)
+    tried = 0
+    for n in range(1, steps + 1):
+        d = n * fc.TRUNCREC_STEP_NM
+        for side in ("left", "right"):
+            if time.perf_counter() >= deadline:
+                log.warning("FITDIAG recovery scan hit the %.2fs budget after %d cuts; "
+                            "reporting the un-recovered fit", TRUNCREC_BUDGET_S, tried)
+                return R
+            cut = lo + d if side == "left" else hi - d
+            if side == "left" and (hi - cut) < fc.TRUNCREC_MIN_SPAN_NM:
+                continue
+            if side == "right" and (cut - lo) < fc.TRUNCREC_MIN_SPAN_NM:
+                continue
+            ft = {"side": side, "detected": True, "v": None, "dead": None, "live": None,
+                  "x_lo": None, "x_hi": None, "left_nm": d if side == "left" else 0.0,
+                  "right_nm": d if side == "right" else 0.0,
+                  "cut_left": cut if side == "left" else None,
+                  "cut_right": cut if side == "right" else None,
+                  "msg": f"cut found by recovery scan ({side} at {cut:.2f} nm)"}
+            tried += 1
+            try:
+                R2 = fc._analyze_once(x, y, anchor=anchor, ref_policy=None,
+                                      trust_nsig=t.trust_nsig,
+                                      trunc_threshold=t.trunc_threshold,
+                                      ref_primary=lambda_ref_nm, force_trunc=ft)
+            except Exception:
+                continue
+            R2["rms_frac"] = fc._rms_frac(R2)
+            if fc._explains(R2):
+                best = (R2, ft)
+                break
+        if best is not None:
+            break
+    if best is None:
+        return R                      # nothing explains it: report the honest failure
+
+    R2, ft = best
+    if ref_policy is not None:
+        # Re-fit the winner with the policy so its reference choice is hysteretic like any
+        # other frame. This is the frame's SECOND policy update (the first was R), so a
+        # recovered frame counts double toward the REF_HYST streak. Same trade fc.analyze
+        # makes, deliberately: a truncated frame is when the reference is most likely to
+        # move, so it is the worst one to leave unguarded.
+        try:
+            R3 = fc._analyze_once(x, y, anchor=anchor, ref_policy=ref_policy,
+                                  trust_nsig=t.trust_nsig,
+                                  trunc_threshold=t.trunc_threshold,
+                                  ref_primary=lambda_ref_nm, force_trunc=ft)
+            R3["rms_frac"] = fc._rms_frac(R3)
+            if fc._explains(R3):
+                R2 = R3
+        except Exception:
+            pass
+    R2["recovered"] = True
+    return R2
 
 
 def display_curve(r: FringeFitResult, wl: np.ndarray):

@@ -13,6 +13,7 @@ from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import (
     FringeFitResult,
 )
 from app_apps.analysis.phase_control.subprocess.domain import fringe_core as fc
+from app_apps.analysis.phase_control.subprocess.domain.fringe_visibility import MIN_VISIBILITY
 from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import LOOP_GAIN
 
 
@@ -154,7 +155,24 @@ class StabilizationConfig(PrimitiveSerde):
                                         # rejected bright ones (good ~10 ct). 0.30 is permissive;
                                         # tighten from the logged rms_frac (good live fits ~0.1).
     inlier_threshold: float = 80.0      # accept if folded-phase inliers above this (%)
+    min_visibility: float = MIN_VISIBILITY
+                                        # abort the fit ENTIRELY below this fringe-contrast
+                                        # index (fringe_visibility, ~1.9 ms, no optimizer).
+                                        # This is not a quality gate like the two above --
+                                        # those judge a fit that already ran. A washed-out
+                                        # trace costs 47 s in the optimizer and then returns
+                                        # status="ok" with a phase fit to noise, so it has to
+                                        # be caught BEFORE the fit, not after. Editable while
+                                        # running: it can only be tuned against a live trace.
     set_phase: Angle = field(default_factory=lambda: Angle(0))
+    invert_correction: bool = False     # flip the HWP rotation direction. NOT a tuning knob:
+                                        # the sense of the correction depends on the QUARTER
+                                        # wave plate's orientation, so the same measured error
+                                        # calls for opposite rotations on two setups that are
+                                        # otherwise identical. Safe to change mid-run -- the
+                                        # corrector is retuned in place. If the loop locks
+                                        # stably but pi away from the setpoint, this is the
+                                        # knob: see PhaseCorrector.CORRECTION_SIGN.
     loop_gain: float = LOOP_GAIN        # fraction of the measured phase error corrected per
                                         # committed frame; see PhaseCorrector. Lives here and
                                         # not on FringeFitParams because it is a control-loop
@@ -203,7 +221,9 @@ class StabilizationConfig(PrimitiveSerde):
             },
             "rms_frac_threshold": self.rms_frac_threshold,
             "inlier_threshold": self.inlier_threshold,
+            "min_visibility": self.min_visibility,
             "set_phase": self.set_phase.to_primitive(),
+            "invert_correction": self.invert_correction,
             "loop_gain": self.loop_gain,
         }
 
@@ -220,7 +240,11 @@ class StabilizationConfig(PrimitiveSerde):
             # "rms_threshold" (counts) and no "rms_frac_threshold" -> use the default.
             rms_frac_threshold=float(v.get("rms_frac_threshold", 0.30)),
             inlier_threshold=float(v["inlier_threshold"]),
+            # Absent in a config persisted before the gate existed -> the calibrated default.
+            min_visibility=float(v.get("min_visibility", MIN_VISIBILITY)),
             set_phase=Angle.from_primitive(v["set_phase"]),
+            # Configs persisted before the toggle existed ran the baseline sign -> False.
+            invert_correction=bool(v.get("invert_correction", False)),
             # Pre-tunable-gain configs have no "loop_gain" -> the calibrated default.
             loop_gain=float(v.get("loop_gain", LOOP_GAIN)),
         )

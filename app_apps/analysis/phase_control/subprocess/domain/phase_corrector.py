@@ -9,6 +9,16 @@ from base_core.math.models import Angle
 
 PHASE_TOLERANCE = Angle(10, AngleUnit.DEG)
 CONVERSION_CONST = 1 / 4
+# Baseline direction: which way the plate must turn to REDUCE a positive phase error.
+# It is not a free parameter of the loop -- it is a property of the optics, and it FLIPS
+# with the quarter-wave plate's orientation. The same +0.1 rad of error calls for opposite
+# rotations depending on how the QWP is set, so the operator gets a toggle
+# (StabilizationConfig.invert_correction) rather than this constant being retuned.
+#
+# Symptom of getting it wrong: the loop does NOT run away. Wrapping to (-pi, pi] means the
+# error changes sign at +-pi, so an inverted loop is repelled from the setpoint and settles
+# at the OTHER fixed point -- stable, and exactly pi off target. A stable lock half a turn
+# from where you asked for it is the signature of this sign, not of a bad gain.
 CORRECTION_SIGN = -1
 # Fraction of the measured error corrected per frame. Corrections are relative, so the
 # loop integrates and this alone sets its bandwidth: ~1/LOOP_GAIN frames to pull in.
@@ -47,6 +57,7 @@ class PhaseCorrector:
     _correction_angle: Angle = Angle(0, AngleUnit.DEG)
     _target_phase: Angle = Angle(0, AngleUnit.DEG)
     _gain: float = LOOP_GAIN
+    _invert: bool = False
 
     @property
     def target_phase(self) -> Angle:
@@ -68,6 +79,14 @@ class PhaseCorrector:
         # is the one that matters, because it is the one the hardware is behind.
         self._gain = min(max(float(value), GAIN_MIN), GAIN_MAX)
 
+    @property
+    def invert(self) -> bool:
+        return self._invert
+
+    @invert.setter
+    def invert(self, value: bool) -> None:
+        self._invert = bool(value)
+
     def update(self, phase: Angle) -> CorrectionResult | None:
         if phase == 0.0:
             return None
@@ -83,6 +102,7 @@ class PhaseCorrector:
         return CorrectionResult(angle=self._correction_angle, sign=sign)
 
     def _convert_phase_to_hwp(self, phase: Angle) -> Angle:
-        hwp_deg = CORRECTION_SIGN * phase.Deg * CONVERSION_CONST * self._gain
+        sign = -CORRECTION_SIGN if self._invert else CORRECTION_SIGN
+        hwp_deg = sign * phase.Deg * CONVERSION_CONST * self._gain
         # wrap=False: an increment is not a point on the circle.
         return Angle(hwp_deg, AngleUnit.DEG, wrap=False)

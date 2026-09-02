@@ -44,6 +44,7 @@ class StabilizationControlViewModel(QObject):
         self._set_phase_series: pg.PlotDataItem | None = None
         self._current_phase_series: pg.PlotDataItem | None = None
         self._rf_label: pg.TextItem | None = None
+        self._fwhm_lines: list[pg.InfiniteLine] = []
         self._active = False
         self._plot_frequency = False
         self._unsub = bus.subscribe(PhaseTrackingStateChanged, self._on_state_changed)
@@ -64,6 +65,17 @@ class StabilizationControlViewModel(QObject):
         current_phase_pen.setStyle(Qt.PenStyle.DashDotLine)
         current_phase_pen.setCosmetic(True)
         self._current_phase_series = pg.PlotDataItem(pen=current_phase_pen)
+
+        # FWHM markers -- the two wavelengths the f_cfg readout quotes its values AT.
+        # Deliberately unlike the two fit overlays (red dashed / green dash-dot): these are
+        # cyan DOTTED verticals, so the eye separates "where the band ends" from "what the
+        # fit says the fringes do". Cosmetic for the same reason the overlay pens are.
+        fwhm_pen = QPen(QColor("cyan"))
+        fwhm_pen.setStyle(Qt.PenStyle.DotLine)
+        fwhm_pen.setCosmetic(True)
+        self._fwhm_lines = [pg.InfiniteLine(angle=90, pen=fwhm_pen) for _ in range(2)]
+        for line in self._fwhm_lines:
+            line.setVisible(False)
 
         # RF frequency-range readout. Parented to the ViewBox rather than added as a plot
         # item so it stays pinned to the top-left corner in SCREEN coordinates: the y axis is
@@ -101,6 +113,8 @@ class StabilizationControlViewModel(QObject):
             # Excluded from auto-range so the view stays driven by the live spectrum,
             # not by whatever the fit curves happen to be before a config is applied.
             self._plot_item.addItem(series, ignoreBounds=True)
+        for line in self._fwhm_lines:
+            self._plot_item.addItem(line, ignoreBounds=True)
         if self._rf_label is not None:
             self._rf_label.setParentItem(self._plot_item.getViewBox())
             self._rf_label.setPos(10, 6)          # screen px inset from the top-left
@@ -111,6 +125,8 @@ class StabilizationControlViewModel(QObject):
         for series in (self._set_phase_series, self._current_phase_series):
             if series is not None:
                 self._plot_item.removeItem(series)
+        for line in self._fwhm_lines:
+            self._plot_item.removeItem(line)
         if self._rf_label is not None:
             self._rf_label.setParentItem(None)
 
@@ -146,6 +162,7 @@ class StabilizationControlViewModel(QObject):
         self._set_phase_series.setData(x, set_phase_curve)
         self._current_phase_series.setData(x, current_phase_curve)
         self._update_rf_label()
+        self._update_fwhm_lines(lambda_ref)
 
         if rescale and self._plot_item is not None:
             x_lo, x_hi = float(x.min()), float(x.max())
@@ -156,15 +173,50 @@ class StabilizationControlViewModel(QObject):
             self._plot_item.setXRange(x_lo - x_pad, x_hi + x_pad, padding=0)
             self._plot_item.setYRange(y_lo - y_pad, y_hi + y_pad, padding=0)
 
+    def _update_fwhm_lines(self, lambda_ref_nm: float) -> None:
+        """Place the two verticals at this shot's own FWHM edges.
+
+        Same band the f_cfg readout quotes -- ``fringe_core.fwhm_band_nm`` on the committed
+        envelope -- so the operator can see WHERE the two numbers in the label are taken.
+        They are hidden, not left stale, whenever that band does not exist (un-fitted
+        config, degenerate envelope): a marker from a previous shot would be read as a
+        measurement of this one.
+
+        In frequency mode the edges go through the same detuning map as the curves, which
+        is monotonically DECREASING in wavelength, so the red edge ends up on the left. No
+        reordering is needed -- these are two independent lines, not a span.
+        """
+        if not self._fwhm_lines:
+            return
+        p = self._config.params
+        band = fc.fwhm_band_nm(p.pU) if any((p.c1, p.c2, p.c3)) else None
+        if band is None:
+            for line in self._fwhm_lines:
+                line.setVisible(False)
+            return
+        if self._plot_frequency:
+            omega0 = 2.0 * np.pi * SPEED_OF_LIGHT / lambda_ref_nm * 1e-3
+            xs = [2.0 * np.pi * SPEED_OF_LIGHT / nm * 1e-3 - omega0 for nm in band]
+        else:
+            xs = list(band)
+        for line, x in zip(self._fwhm_lines, xs):
+            line.setPos(float(x))
+            line.setVisible(True)
+
     def _update_rf_label(self) -> None:
-        """Show the RF frequency range this shot generates, over 802 +- 9 nm.
+        """Show f_cfg at the two edges of this shot's own measured FWHM.
 
         The spectral fringe rate is converted through the dispersive time-mapping
-        calibration in fringe_core (9 nm ~ 320 ps, linear => 28.125 GHz per cycle/nm). The
-        band is quoted wider than the fitted core on purpose, so this EXTRAPOLATES the cubic
-        -- which is why an unverified shape is labelled rather than quoted bare. An
-        un-fitted config (c1 = c2 = c3 = 0) would read "0.0 GHz", which is a lie about a
-        measurement that has not happened, so it shows nothing at all instead.
+        calibration in fringe_core (9 nm ~ 310 ps, linear => 29.032 GHz per cycle/nm) and
+        halved: the centrifuge frequency is HALF the fringe beat (``CFG_PER_FRINGE``).
+
+        The band comes from the fitted envelope's FWHM rather than a fixed 802 +- 9 nm
+        window, so the readout stays inside the light that actually exists instead of
+        extrapolating the cubic ~2.5x past the spectrum. The shape_ok gate still applies --
+        the fitted core can be narrower than the FWHM -- so an unverified shape is labelled
+        rather than quoted bare. An un-fitted config (c1 = c2 = c3 = 0) or a degenerate
+        envelope shows nothing at all, rather than a "0 GHz" that would be a lie about a
+        measurement that has not happened.
         """
         if self._rf_label is None:
             return
@@ -172,8 +224,8 @@ class StabilizationControlViewModel(QObject):
         if not any((p.c1, p.c2, p.c3)):
             self._rf_label.setText("")
             return
-        lo, hi = fc.rf_range_ghz((p.c0, p.c1, p.c2, p.c3), p.l0)
-        self._rf_label.setText(fc.format_rf_range(lo, hi, p.shape_ok))
+        rng = fc.cfg_range((p.c0, p.c1, p.c2, p.c3), p.l0, p.pU)
+        self._rf_label.setText(fc.format_cfg_range(rng, p.shape_ok))
         self._rf_label.setColor(QColor("white") if p.shape_ok else QColor("orange"))
 
     @property

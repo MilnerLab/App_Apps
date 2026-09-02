@@ -4,6 +4,8 @@ import logging
 import time
 from typing import Callable, TYPE_CHECKING
 
+import numpy as np
+
 from base_core.ipc.threaded_worker import ThreadedWorker, worker_thread
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.analysis.phase_control.subprocess.domain.phase_tracker import PhaseTracker
@@ -59,6 +61,7 @@ class PhaseStabilizationWorker(ThreadedWorker):
         self._corrector = PhaseCorrector()
         self._corrector.target_phase = self._config.set_phase
         self._corrector.gain = self._config.loop_gain
+        self._corrector.invert = self._config.invert_correction
         self._latest_item_id = -1
         self._skipped_since_fit = 0
         self._paused = False
@@ -74,6 +77,7 @@ class PhaseStabilizationWorker(ThreadedWorker):
         self._corrector = PhaseCorrector()
         self._corrector.target_phase = self._config.set_phase
         self._corrector.gain = self._config.loop_gain
+        self._corrector.invert = self._config.invert_correction
         self._latest_item_id = -1
         self._skipped_since_fit = 0
 
@@ -90,6 +94,27 @@ class PhaseStabilizationWorker(ThreadedWorker):
     def _process_spectrum(self, msg: ProcessSpectrum) -> None:
         # Worker thread, serial. A running fit is never interrupted, so an
         # in-progress cold attempt always completes.
+        #
+        # THE SLOT IS ACKED BEFORE THE FIT, NOT AFTER. This worker is a registered
+        # SlotCoordinator consumer, so until it acks there is no SpectrumAvailable and every
+        # other consumer -- the live plot included -- stalls. Acking after the fit is why a
+        # slow fit froze the APPLICATION and not just the loop: a 47 s washed-out fit took
+        # the UI down with it. So: copy the arrays out of the shared buffer, ack, then fit
+        # off the copies. The staleness that admits is already handled by the drop-stale
+        # coalescing below (_latest_item_id), and spectrum_recorder.py does exactly this.
+        acked = False
+
+        def ack() -> None:
+            # One ack per message, from whichever path gets there first: the early ack below
+            # on the fitting path, or the finally-block backstop on every other path
+            # (paused, dropped stale, or an exception raised before the ack).
+            nonlocal acked
+            if acked:
+                return
+            acked = True
+            self._notify(SpectrumProcessed(slot=msg.slot, item_id=msg.item_id,
+                                           consumer_id=CONSUMER_ID))
+
         try:
             if self._paused or self._tracker is None or self._corrector is None:
                 return
@@ -100,8 +125,11 @@ class PhaseStabilizationWorker(ThreadedWorker):
                 self._tp_skip += 1
                 return
             buf = self._get_buffer()
-            wl = buf.wavelengths(msg.slot)
-            ins = buf.intensities(msg.slot)
+            # np.array(..., copy=True): the slot is released on the next line and the buffer
+            # will be overwritten under us. A view would be fit against whatever landed next.
+            wl = np.array(buf.wavelengths(msg.slot), dtype=float)
+            ins = np.array(buf.intensities(msg.slot), dtype=float)
+            ack()
             skipped = self._skipped_since_fit
             self._skipped_since_fit = 0
             t_fit0 = time.perf_counter()
@@ -132,7 +160,7 @@ class PhaseStabilizationWorker(ThreadedWorker):
         except Exception:
             log.exception("PhaseStabilizationWorker: error processing spectrum slot %d", msg.slot)
         finally:
-            self._notify(SpectrumProcessed(slot=msg.slot, item_id=msg.item_id, consumer_id=CONSUMER_ID))
+            ack()
 
     @worker_thread
     def _on_set_config(self, msg: SetStabilizationConfig) -> None:
@@ -145,5 +173,6 @@ class PhaseStabilizationWorker(ThreadedWorker):
             # behaviour change mid-run for a value they did not touch.
             self._corrector.target_phase = self._config.set_phase
             self._corrector.gain = self._config.loop_gain
+            self._corrector.invert = self._config.invert_correction
         self._notify(ConfigSynced(config=self._config))
         self._reply_ok(msg)

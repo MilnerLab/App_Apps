@@ -13,6 +13,9 @@ from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import (
     analyze_trace,
     baseline_anchor,
 )
+from app_apps.analysis.phase_control.subprocess.domain.fringe_visibility import (
+    fringe_visibility,
+)
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import (
     StabilizationConfig,
 )
@@ -20,6 +23,11 @@ from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_confi
 log = logging.getLogger(__name__)
 
 _TWO_PI = 2.0 * math.pi
+
+# Seconds between "holding" lines while visibility stays low. Without this the hold logs at
+# the frame rate for as long as the operator is changing settings, which is exactly when the
+# log has to stay readable.
+_HOLD_LOG_PERIOD_S = 2.0
 
 
 class PhaseTracker:
@@ -33,13 +41,14 @@ class PhaseTracker:
     ``current_phase`` is None until the first accepted fit, then holds the last
     committed value. ``update`` returns True only when a fresh fit committed.
 
-    Two things are stateful across frames, and only these two:
+    Almost nothing is stateful across frames, and the exceptions are these:
       * the baseline anchor is measured on the FULL spectrum before windowing (the analysis
         window holds no continuum at all, so the envelope offset has nothing to pin it and
         the quantile loss floats it upward -- offset 255 against a truth of 155 on real
         bright data). It is re-measured every frame; nothing is carried.
-      * ``_ref_policy`` carries the phase-reference hysteresis, which is the ONLY state that
-        persists between frames. It exists so a stabilization loop locked to one wavelength
+      * ``_last_hold_log`` rate-limits the low-visibility hold message. Diagnostics only.
+      * ``_ref_policy`` carries the phase-reference hysteresis, the only state that can
+        change a fit's OUTPUT. It exists so a stabilization loop locked to one wavelength
         cannot chatter between two when a clip sits near the core.
     The FIT itself remains cold and seed-independent on every shot.
     """
@@ -49,6 +58,7 @@ class PhaseTracker:
     def __init__(self, config: StabilizationConfig) -> None:
         self._config = config
         self._ref_policy = ReferencePolicy()
+        self._last_hold_log = 0.0
 
     def update(self, wavelengths_nm: np.ndarray, intensities: np.ndarray,
                skipped: int = 0) -> bool:
@@ -59,6 +69,21 @@ class PhaseTracker:
         # Measure the continuum BEFORE windowing -- this is the whole point of the anchor.
         anchor = baseline_anchor(wl_full, inten_full)
         wl, inten = self._window(wl_full, inten_full)
+
+        # Contrast gate, BEFORE the optimizer. A trace whose fringes have washed out (settings
+        # changing, the beam moving) costs up to 47 s in the cold fit and then reports
+        # status="ok" on a phase fit to noise -- a confident number with no physical basis,
+        # handed straight to the control loop. ~1.9 ms here buys that back; see
+        # fringe_visibility. On abort: no fit, no commit, no correction. The spectrometer
+        # stream is untouched and the loop simply holds until the fringes come back.
+        vis = fringe_visibility(inten)
+        if vis < self._config.min_visibility:
+            now = time.perf_counter()
+            if now - self._last_hold_log >= _HOLD_LOG_PERIOD_S:
+                self._last_hold_log = now
+                log.info("holding: visibility %.3f < %.3f (no fit, no correction) skip=%d",
+                         vis, self._config.min_visibility, skipped)
+            return False
 
         lam_ref = self._config.params.lambda_ref.value(Prefix.NANO)
         t0 = time.perf_counter()
