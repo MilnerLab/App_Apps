@@ -1,17 +1,16 @@
-"""Report how each XPS group is declared, and whether the RGV can spin.
+"""Report how each XPS group is declared, and how it will be spun.
 
-Continuous rotation (``GroupSpinParametersSet``) is only defined on a group declared
-``SpindleAxis`` in the controller's ``system.ini``. On a ``SingleAxis`` group the XPS
-rejects the command -- correctly, since a SingleAxis group carries travel limits and
-"turn forever" has no valid interpretation inside them. That declaration is therefore
-the single thing that decides whether Spin works, and it is not visible from the app.
+Spin works either way, but by two different mechanisms, and this says which one you are
+on. A ``SpindleAxis`` group has the native spin commands. A ``SingleAxis`` group does
+not -- ``GroupSpinParametersGet`` answers -18, "wrong object type" -- and is instead
+spun by a very long move, which its travel limits make effectively continuous. This also
+prints how long that lasts before the limit is reached, which is the one number the
+SingleAxis path has and the SpindleAxis path does not.
 
-Read-only. It opens a connection, prints the ``[GROUPS]`` table, and exits:
+Read-only: it opens a connection, reads, and exits without commanding any motion.
 
-    python tools/xps_group_check.py --host 192.168.0.254
-
-Pass ``--dump-ini`` to print the whole system.ini, which is what you would edit (see
-``--help`` for where it lives and what the edit is).
+    python tools/xps_group_check.py --host 10.1.137.137 \
+        --username PyControl --password labview2python
 """
 from __future__ import annotations
 
@@ -24,7 +23,9 @@ from control_readout.newport_xps.controller import XPSController
 RGV_GROUP = "GROUP1"
 
 _EDIT_HELP = """
-To change it, on the XPS itself:
+Spin does not require this change -- the SingleAxis path above already works. Convert the
+group only if you want genuinely unbounded rotation and a seamless mid-spin rate change.
+On the XPS itself:
 
   1. Browse to the controller's web interface and open  /Admin/Config/system.ini
      (over FTP the same file is at  Config/system.ini  under the login's home).
@@ -36,7 +37,8 @@ To change it, on the XPS itself:
          SpindleAxis = GROUP1
 
   3. Reboot the controller. Group declarations are read once at boot; nothing short
-     of a restart picks up the change.
+     of a restart picks up the change -- which is also why the type cannot be switched
+     per-operation, only per-boot.
 
 Take a copy of system.ini first. A malformed [GROUPS] section leaves groups
 uninitialised at boot, which takes out every axis on the controller, not just this one.
@@ -82,14 +84,34 @@ def main(argv: list[str] | None = None) -> int:
                   f"until the name matches.")
             return 2
         if category.lower() == "spindleaxis":
-            print(f"{args.group} is a SpindleAxis: continuous rotation is available.")
-            print("If Spin still fails, the cause is downstream of this -- check the "
-                  "error the panel now reports.")
+            print(f"{args.group} is a SpindleAxis: it spins natively, without a limit, "
+                  f"and re-rates smoothly while turning.")
             return 0
 
-        print(f"{args.group} is declared {category}, NOT SpindleAxis.")
-        print("This is why Spin is refused: GroupSpinParametersSet does not exist for "
-              "this group type.")
+        print(f"{args.group} is declared {category}, not SpindleAxis.")
+        print("Spin still works: it is issued as a long move toward the travel limit, on "
+              "a second connection so the blocking call does not tie up the main socket.")
+        try:
+            positioner = f"{args.group}.POSITIONER"
+            err, low, high = controller.xps._xps.PositionerUserTravelLimitsGet(
+                controller.xps._sid, positioner)
+            # Positioners are addressed by their fully-qualified "GROUP.NAME", which is
+            # what the device layer builds and what the XPS itself indexes them under.
+            here = controller.get_position((args.group, positioner))
+            if err == 0:
+                print()
+                print(f"  travel limits : {low:,.0f} to {high:,.0f} deg")
+                print(f"  position now  : {here:,.1f} deg")
+                for rev_s in (0.5, 2.0):
+                    hours = abs(high - here) / (rev_s * 360.0) / 3600.0
+                    print(f"  at {rev_s:>3} rev/s   : {hours:,.1f} hours "
+                          f"of continuous rotation before the limit")
+        except Exception as exc:            # diagnostics only -- never fail the check
+            print(f"  (could not read travel limits: {exc})")
+        print()
+        print("The trade-off against a real SpindleAxis: a rate change mid-spin has to "
+              "abort and re-issue the move, so the plate decelerates and ramps back up "
+              "rather than sliding to the new rate.")
         print(_EDIT_HELP)
 
         if args.dump_ini:
