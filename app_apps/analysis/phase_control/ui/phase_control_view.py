@@ -24,12 +24,9 @@ from app_apps.analysis.phase_control.ui.phase_config_view import PhaseConfigView
 from app_apps.analysis.phase_control.ui.phase_control_view_model import PhaseControlViewModel
 from app_apps.analysis.phase_control.ui.stabilization_control_view import StabilizationControlView
 
-# Every curve on this chart, in screen pixels. One value because the traces are read
-# AGAINST each other -- a raw trace thinner than the fit sitting on top of it reads as the
-# less important of the two, which is backwards. Cosmetic pens throughout, so this stays
-# pixels and does not scale with the wildly mismatched nm/counts axes.
-TRACE_WIDTH = 2.0
-# The one frame after a correction, drawn over the rest.
+# The one frame after a correction is the only curve here that is not hairline: it has to
+# be picked out of the traces it is drawn among. Cosmetic, so it stays screen pixels and
+# does not scale with the wildly mismatched nm/counts axes.
 POST_WIDTH = 3.0
 
 
@@ -44,8 +41,9 @@ class PhaseControlView(Panel):
         self._plot.setLabel("bottom", "Wavelength (nm)")
         self._plot.setLabel("left", "Intensity")
         self._plot.setMinimumHeight(220)
-        live_pen = QPen(QColor("#d0d0d0"))
-        live_pen.setWidthF(TRACE_WIDTH)
+        # (200, 200, 200) is pyqtgraph's own default plot pen, kept explicit only so
+        # _set_post_pens has an object to restore after the purple frame.
+        live_pen = QPen(QColor(200, 200, 200))
         live_pen.setCosmetic(True)
         self._live_curve = self._plot.plot(pen=live_pen)
 
@@ -54,7 +52,6 @@ class PhaseControlView(Panel):
         # catch. Drawn here rather than in the view model because, like the live curve, it is
         # built from the raw spectrum and shares its x mapping.
         avg_pen = QPen(QColor("#ffb000"))
-        avg_pen.setWidthF(TRACE_WIDTH)
         avg_pen.setCosmetic(True)
         self._avg_curve = self._plot.plot(pen=avg_pen)
 
