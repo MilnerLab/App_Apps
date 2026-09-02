@@ -14,8 +14,10 @@ from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import (
 )
 from app_apps.analysis.phase_control.subprocess.domain import fringe_core as fc
 from app_apps.analysis.phase_control.subprocess.domain.fringe_visibility import MIN_VISIBILITY
-from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import LOOP_GAIN
-from app_apps.analysis.phase_control.subprocess.domain.phase_template import SHAPE_MISMATCH_MAX
+from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import (
+    AVG_SPECTRA,
+    PHASE_TOLERANCE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -189,34 +191,41 @@ class StabilizationConfig(PrimitiveSerde):
                                         # corrector is retuned in place. If the loop locks
                                         # stably but pi away from the setpoint, this is the
                                         # knob: see PhaseCorrector.CORRECTION_SIGN.
-    # --- frozen-template tracking (see template_tracker) -------------------------------
-    slow_correction: bool = True        # WHICH loop runs. True is the frozen-template loop:
-                                        # capture a shape, then issue ONE correction every
-                                        # correction_period_s from the circular mean of every
-                                        # frame in between. False is the cold per-frame loop
-                                        # that predates the template -- a full fit and a
-                                        # correction on every committed trace.
-                                        #
-                                        # Slow is the default because it is the accurate one:
-                                        # averaging first is what keeps the phase noise out of
-                                        # the stage. Fast exists for getting a badly drifted
-                                        # setup back into range, where responding now matters
-                                        # more than responding precisely, and for the case
-                                        # where the shape will not hold still long enough for
-                                        # a template to survive.
-    correction_period_s: float = 15.0   # LOCKED mode issues ONE correction this often, from
-                                        # the circular running mean of every frame's phase.
-                                        # Not per-frame like the cold loop: the closed-form
-                                        # fit runs at the full frame rate, so correcting on
-                                        # each would put the phase noise straight into the
-                                        # stage. Averaging first is what buys the accuracy.
-    shape_mismatch_max: float = SHAPE_MISMATCH_MAX
-                                        # invalidate the template above this per-trace
-                                        # smoothed-Hilbert shape mismatch. See
-                                        # phase_template.SHAPE_MISMATCH_MAX for the sweep the
-                                        # default comes from. Tunable while running because
-                                        # the phase-invariance floor depends on the noise,
-                                        # which depends on the spectrometer settings.
+    # --- block-averaged correction loop (see phase_corrector) --------------------------
+    avg_spectra: int = AVG_SPECTRA      # accepted fits per correction. The loop collects
+                                        # this many phases, circular-averages them, CLEARS
+                                        # the block and corrects once on the mean. The block
+                                        # never straddles a move, so the averaged error
+                                        # always describes the state the stage is in now.
+                                        # Raise it for a quieter error and a slower loop;
+                                        # the correction rate is avg_spectra frames, not a
+                                        # clock, so it follows the spectrometer settings.
+    phase_tolerance: Angle = field(default_factory=lambda: PHASE_TOLERANCE)
+                                        # deadband. Inside this the loop holds and issues
+                                        # nothing; outside it corrects the WHOLE error in
+                                        # one move. There is no proportional region between
+                                        # the two -- see PhaseCorrector.
+    capture_n: int = 10                 # consecutively accepted traces averaged into one
+                                        # reference. This is the COLD stage: every parameter
+                                        # is free, the average is fit once, and the fitted
+                                        # shape is then frozen for phase-only tracking.
+                                        # Consecutive on purpose -- a run broken by a
+                                        # rejection restarts, so the reference is never
+                                        # averaged across a disturbance.
+    min_amplitude_frac: float = 0.10    # hold if the closed-form fit amplitude falls below
+                                        # this fraction of the reference's capture
+                                        # amplitude. The in-loop descendant of the legacy
+                                        # residuals_threshold: the amplitude drops ~226x
+                                        # when the fringes wash out, so anything in 0.05-0.3
+                                        # separates cleanly.
+    move_settle_s: float = 0.5          # ignore accepted fits for this long after a
+                                        # correction goes out. The legacy loop had the
+                                        # rotator's own is_busy flag to gate on; the stage
+                                        # lives in another process here, so this is a fixed
+                                        # stand-in for it. It only has to cover the move,
+                                        # because the block is already cleared -- its job is
+                                        # to keep spectra taken DURING the rotation out of
+                                        # the next block, not to pace the loop.
     manual_cut_left: float | None = None
                                         # operator override for the short-wavelength
                                         # terminal the f_cfg readout quotes at, in nm. None
@@ -228,17 +237,6 @@ class StabilizationConfig(PrimitiveSerde):
                                         # FringeFitParams because params is REPLACED by
                                         # every committed fit -- an operator's choice
                                         # parked there would survive one frame and vanish.
-    min_amplitude_frac: float = 0.10    # hold if the closed-form fit amplitude falls below
-                                        # this fraction of the template's capture amplitude.
-                                        # The amplitude drops ~226x when the fringes wash
-                                        # out, so anything in 0.05-0.3 separates cleanly;
-                                        # this is the in-loop cousin of min_visibility.
-    loop_gain: float = LOOP_GAIN        # fraction of the measured phase error corrected per
-                                        # committed frame; see PhaseCorrector. Lives here and
-                                        # not on FringeFitParams because it is a control-loop
-                                        # property, not a fit property -- the fit is identical
-                                        # whatever this is set to.
-
     def accepts(self, r: FringeFitResult) -> bool:
         """Per-shot quality gate.
 
@@ -284,11 +282,11 @@ class StabilizationConfig(PrimitiveSerde):
             "min_visibility": self.min_visibility,
             "set_phase": self.set_phase.to_primitive(),
             "invert_correction": self.invert_correction,
-            "loop_gain": self.loop_gain,
-            "slow_correction": self.slow_correction,
-            "correction_period_s": self.correction_period_s,
-            "shape_mismatch_max": self.shape_mismatch_max,
+            "avg_spectra": self.avg_spectra,
+            "capture_n": self.capture_n,
             "min_amplitude_frac": self.min_amplitude_frac,
+            "phase_tolerance": self.phase_tolerance.to_primitive(),
+            "move_settle_s": self.move_settle_s,
             "manual_cut_left": self.manual_cut_left,
         }
 
@@ -310,13 +308,16 @@ class StabilizationConfig(PrimitiveSerde):
             set_phase=Angle.from_primitive(v["set_phase"]),
             # Configs persisted before the toggle existed ran the baseline sign -> False.
             invert_correction=bool(v.get("invert_correction", False)),
-            # Pre-tunable-gain configs have no "loop_gain" -> the calibrated default.
-            loop_gain=float(v.get("loop_gain", LOOP_GAIN)),
-            # Absent in any config persisted before frozen-template tracking -> defaults.
-            slow_correction=bool(v.get("slow_correction", True)),
-            correction_period_s=float(v.get("correction_period_s", 15.0)),
-            shape_mismatch_max=float(v.get("shape_mismatch_max", SHAPE_MISMATCH_MAX)),
+            # The knobs of the timed EWMA loop (loop_gain, slow_correction,
+            # correction_period_s, shape_mismatch_max) went with it. A config persisted
+            # while it existed still carries them; they are simply not read, so an old file
+            # loads onto the block loop's defaults without complaint.
+            avg_spectra=int(v.get("avg_spectra", AVG_SPECTRA)),
+            capture_n=int(v.get("capture_n", 10)),
             min_amplitude_frac=float(v.get("min_amplitude_frac", 0.10)),
+            phase_tolerance=(Angle.from_primitive(v["phase_tolerance"])
+                             if "phase_tolerance" in v else PHASE_TOLERANCE),
+            move_settle_s=float(v.get("move_settle_s", 0.5)),
             # Absent in every config written before the drag existed -> None -> auto.
             manual_cut_left=(None if v.get("manual_cut_left") is None
                              else float(v["manual_cut_left"])),

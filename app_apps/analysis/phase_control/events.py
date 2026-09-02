@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app_apps.analysis.phase_control.subprocess.domain.phase_template import PhaseTemplate
-
 
 @dataclass
 class StabilizationConfigChanged:
@@ -21,9 +19,14 @@ class EnvelopeStateChanged:
 
 
 @dataclass
-class PhaseTemplateChanged:
-    """The frozen-template state machine moved. ``template`` is set only in "locked"."""
-    state: str = "off"
-    captured: int = 0
+class PhaseBatchChanged:
+    """The averaging block advanced, was cleared, or the loop went into settle.
+
+    Qt-side mirror of ``messages.BatchProgress``; see it for what the fields mean.
+    """
+    collected: int = 0
     needed: int = 0
-    template: PhaseTemplate | None = None
+    coherence: float = 0.0
+    capturing: bool = False
+    settling: bool = False
+    error_deg: float = float("nan")

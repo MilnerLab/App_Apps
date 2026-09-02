@@ -1,10 +1,10 @@
-"""Replay recorded spectra through the slow (frozen-template) loop, headless.
+"""Replay recorded spectra through the stabilization loop, headless.
 
 Answers the question the panel cannot: when the capture counter sits at 0/10, is the
 loop rejecting every trace, silently abandoning a completed run, or capturing fine and
 simply never saying so?
 
-It drives the REAL TemplateTracker over the REAL spectra in an xcorr .h5, at a fixed
+It drives the REAL StabilizationTracker over the REAL spectra in an xcorr .h5, at a fixed
 delay/grating setpoint so the fringe shape is genuinely static, and prints per-frame what
 the tracker did and per-run why a capture ended.
 
@@ -31,9 +31,9 @@ from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_confi
     FringeFitParams,
     StabilizationConfig,
 )
-from app_apps.analysis.phase_control.subprocess.domain.template_tracker import (
-    TemplateState,
-    TemplateTracker,
+from app_apps.analysis.phase_control.subprocess.domain.stabilization_tracker import (
+    StabilizationTracker,
+    TrackerState,
 )
 
 
@@ -68,7 +68,7 @@ def main(argv=None) -> int:
           f"min_visibility {cfg.min_visibility:.3f} | "
           f"rms_frac < {cfg.rms_frac_threshold:.2f} | inliers > {cfg.inlier_threshold:.0f}%")
 
-    tracker = TemplateTracker(cfg)
+    tracker = StabilizationTracker(cfg)
     tracker.request_capture()
 
     lo = cfg.wavelength_range.min.value(Prefix.NANO)
@@ -85,11 +85,11 @@ def main(argv=None) -> int:
         out = tracker.update(wl, inten)
         got, need = tracker.capture_progress
         note = ""
-        if before is TemplateState.CAPTURING and got == 0 and last > 0:
-            note = "  <-- run BROKEN, back to 0" if out.state is TemplateState.CAPTURING \
-                   and not out.template_changed else "  <-- run finished"
-        if out.template_changed:
-            note = "  <-- TEMPLATE INSTALLED"
+        if before is TrackerState.CAPTURING and got == 0 and last > 0:
+            note = "  <-- run BROKEN, back to 0" if out.state is TrackerState.CAPTURING \
+                   and not out.target_phase else "  <-- run finished"
+        if out.target_phase is not None:
+            note = f"  <-- REFERENCE CAPTURED, target {out.target_phase:.3f} rad"
             locked_at = i
         print(f"  frame {i:>3}  vis={vis:6.3f}  accepted={out.committed!s:<5} "
               f"{tracker.state.value:<9} {got}/{need}{note}")

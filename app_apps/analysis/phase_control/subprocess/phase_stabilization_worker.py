@@ -10,32 +10,26 @@ import numpy as np
 from base_core.ipc.threaded_worker import ThreadedWorker, worker_thread
 from base_core.math.models import Angle
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
-from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import PhaseCorrector
-from app_apps.analysis.phase_control.subprocess.domain.template_tracker import (
-    PhaseAverager,
-    TemplateState,
-    TemplateTracker,
+from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import (
+    PhaseBatch,
+    PhaseCorrector,
+)
+from app_apps.analysis.phase_control.subprocess.domain.stabilization_tracker import (
+    StabilizationTracker,
+    TrackerState,
 )
 from app_apps.analysis.phase_control.subprocess.messages import (
-    CaptureReference,
+    BatchProgress,
+    CaptureTarget,
     CorrectionAvailable,
     ConfigSynced,
-    InvalidateTemplate,
+    DropBatch,
     ProcessSpectrum,
-    RecallReference,
     SetStabilizationConfig,
     SpectrumProcessed,
-    TemplateStateChanged,
 )
 
 _TWO_PI = 2.0 * math.pi
-
-# The correction the loop issues in LOCKED mode drives the averaged phase error to ZERO in
-# one move, i.e. gain 1. That is not the aggressive choice it looks like: the cold loop's
-# 0.05 is per FRAME, and this fires once per correction_period_s (~30 frames) off a
-# circularly averaged error, so the noise has already been taken out of it. config.loop_gain
-# is not unused in this mode -- it is the weight in that average.
-_TEMPLATE_CORRECTION_GAIN = 1.0
 
 if TYPE_CHECKING:
     from base_core.framework.events.event_bus import EventBus
@@ -59,12 +53,13 @@ class PhaseStabilizationWorker(ThreadedWorker):
         super().__init__(WORKER_ID, bus, connector)
         self._config = config
         self._get_buffer = get_buffer
-        self._tracker: TemplateTracker | None = None
+        self._tracker: StabilizationTracker | None = None
         self._corrector: PhaseCorrector | None = None
-        # LOCKED-mode loop state: the circular running mean of the per-frame phases, and when
-        # the last correction went out.
-        self._averager = PhaseAverager()
-        self._last_correction = time.perf_counter()
+        # The loop's whole state: one non-overlapping block of accepted phases, and a
+        # settle deadline covering the rotation the last correction commanded. Capture is
+        # the TRACKER's state, not the loop's -- the loop simply gets no phases while it runs.
+        self._batch = PhaseBatch(config.avg_spectra)
+        self._settle_until = 0.0
         self._paused = True
         self._latest_item_id = -1     # newest arrival (drop-stale coalescing)
         self._skipped_since_fit = 0   # frames coalesced away since the last real fit
@@ -74,16 +69,15 @@ class PhaseStabilizationWorker(ThreadedWorker):
         self._tp_skip = 0            # frames coalesced/dropped in the window
         self._tp_commit = 0          # fits that passed the gate in the window
         self._tp_fit_ms = 0.0        # summed fit wall time in the window
-        # Last (state, captured, needed) put on the wire, so the per-frame publish below
-        # can stay silent while nothing moves. None = nothing published yet.
-        self._last_state_stamp: tuple | None = None
+        # Last progress put on the wire, so the per-frame publish below can stay silent
+        # while nothing moves. None = nothing published yet.
+        self._last_progress_stamp: tuple | None = None
 
     def _setup(self) -> None:
         self._unsubs.append(self._bus.subscribe(SetStabilizationConfig, self._on_set_config))
         self._unsubs.append(self._bus.subscribe(ProcessSpectrum, self._on_spectrum))
-        self._unsubs.append(self._bus.subscribe(CaptureReference, self._on_capture_reference))
-        self._unsubs.append(self._bus.subscribe(RecallReference, self._on_recall_reference))
-        self._unsubs.append(self._bus.subscribe(InvalidateTemplate, self._on_invalidate_template))
+        self._unsubs.append(self._bus.subscribe(CaptureTarget, self._on_capture_target))
+        self._unsubs.append(self._bus.subscribe(DropBatch, self._on_drop_batch))
 
     def _start(self) -> None:
         self._build_tracker()
@@ -93,8 +87,10 @@ class PhaseStabilizationWorker(ThreadedWorker):
 
     def _pause(self) -> None:
         self._paused = True
-        # Flush the running phase mean: it describes a window the loop was not acting on.
-        self._averager.reset()
+        # Discard the block: it describes frames the loop was not acting on, and resuming
+        # onto a half-filled one would correct on a mean that straddles the pause.
+        self._batch.clear()
+        self._publish_progress()
 
     def _resume(self) -> None:
         self._paused = False
@@ -105,22 +101,17 @@ class PhaseStabilizationWorker(ThreadedWorker):
         self._skipped_since_fit = 0
 
     def _build_tracker(self) -> None:
-        self._tracker = TemplateTracker(self._config)
+        # Starts in CAPTURING: there is no frozen shape yet and so nothing to phase-track
+        # against, which makes the cold reference run the only thing it CAN do on start.
+        self._tracker = StabilizationTracker(self._config)
         self._corrector = PhaseCorrector()
         self._corrector.target_phase = self._config.set_phase
-        self._corrector.gain = self._config.loop_gain
+        self._corrector.tolerance = self._config.phase_tolerance
         self._corrector.invert = self._config.invert_correction
-        self._averager.reset()
-        self._last_correction = time.perf_counter()
-        self._last_state_stamp = None   # a fresh tracker re-announces itself unconditionally
-        # Arm the capture immediately in slow mode, rather than waiting to be asked. The
-        # tracker starts OFF, which is the cold per-frame loop -- so without this, starting
-        # stabilization silently gave the operator the fast loop while the panel offered no
-        # hint that a button press stood between them and the one they had selected.
-        # Capture holds (issues no correction) for ~5 s at 2 Hz, then locks.
-        if self._config.slow_correction and self._tracker is not None:
-            self._tracker.request_capture()
-        self._publish_template_state()
+        self._batch = PhaseBatch(self._config.avg_spectra)
+        self._settle_until = 0.0
+        self._last_progress_stamp = None   # a fresh loop re-announces itself unconditionally
+        self._publish_progress()
 
     def _on_spectrum(self, msg: ProcessSpectrum) -> None:
         # Runs on the connector poll thread: record the newest arrival for
@@ -194,122 +185,173 @@ class PhaseStabilizationWorker(ThreadedWorker):
                 self._tp_fit_ms = 0.0
             if committed:
                 self._notify(ConfigSynced(config=self._config))
-            if outcome.template_changed:
-                self._averager.reset()   # a new template redefines what the mean is OF
-            # Publish on every CHANGE of (state, progress), not only when a template
-            # appears. The capture run advances 1..9 with template_changed False, and an
-            # ABANDONED run resets to 0 with it False too -- so gating the notify on it
-            # left the panel frozen at the 0/10 it was armed with, whether the loop was
-            # counting up perfectly or restarting forever. Those two look identical to the
-            # operator, which is precisely the thing the counter exists to tell apart.
-            self._publish_template_state()
-            if outcome.state == TemplateState.OFF:
-                # Unchanged cold loop: correct from each committed fit, gain per frame.
-                if outcome.cold_phase is not None:
-                    self._emit_correction(Angle(outcome.cold_phase % _TWO_PI),
-                                          self._config.loop_gain)
-            elif outcome.phase_abs is not None:
-                self._accumulate(outcome.phase_abs)
+            if outcome.target_phase is not None:
+                # A capture completed: the shape is frozen and this is the phase it measures,
+                # so adopting it as the setpoint leaves the loop at exactly zero error.
+                self._adopt_target(outcome.target_phase)
+            if outcome.phase_abs is not None:
+                self._redraw_at(outcome.phase_abs, outcome.delta)
+                self._collect(outcome.phase_abs, now)
+            self._publish_progress()
         except Exception:
             log.exception("PhaseStabilizationWorker: error processing spectrum slot %d", msg.slot)
         finally:
             ack()
 
-    # ------------------------------------------------------------------ template loop --
-    def _accumulate(self, phase_abs: float) -> None:
-        """Fold one closed-form phase into the running mean, and correct when due."""
-        assert self._corrector is not None
-        self._averager.add(phase_abs, self._config.loop_gain)
-        now = time.perf_counter()
-        if now - self._last_correction < self._config.correction_period_s:
+    # -------------------------------------------------------------------- block loop --
+    def _collect(self, phase_rad: float, now: float) -> None:
+        """Add one accepted phase to the block, and act when the block fills.
+
+        Frames arriving inside the settle window are DROPPED, not queued: they were taken
+        while the plate was still turning, so the phase they report belongs to neither the
+        state before the move nor the one after. The legacy loop got this from the rotator's
+        own is_busy flag; ``move_settle_s`` stands in for it across the process boundary.
+        """
+        if now < self._settle_until:
             return
-        self._last_correction = now
-        mean = self._averager.value()
+        self._batch.add(phase_rad)
+        if not self._batch.full:
+            return
+
+        n = self._batch.count
+        coh = self._batch.coherence()
+        mean = self._batch.take()
         if mean is None:
+            # The block cancelled out -- its mean angle is undefined. It has already been
+            # cleared, so the loop simply collects a fresh one rather than acting on it.
+            log.info("block: %d frames cancelled (coherence %.2f), no correction", n, coh)
             return
-        n = self._averager.count
-        self._averager.reset()
-        log.info("template: correcting on the mean of %d frames, phi=%.3f rad", n, mean)
-        self._emit_correction(Angle(mean % _TWO_PI), _TEMPLATE_CORRECTION_GAIN)
 
-    def _emit_correction(self, phase: Angle, gain: float) -> None:
+        self._emit_correction(Angle(mean % _TWO_PI), n, coh)
+
+    def _redraw_at(self, phase_abs: float, delta: float) -> None:
+        """Move the committed params onto the phase this frame measured.
+
+        Only the constant term moves. ``delta`` is measured relative to the frozen
+        polynomial, so setting c0 to (frozen c0 + delta) makes the polynomial evaluate to the
+        measured phase at every wavelength while leaving the carrier and chirp exactly as
+        captured -- which is the point of freezing them. The chart then shows the frozen
+        shape sitting where the light actually is, and the target curve is the same shape at
+        set_phase, so the gap between the two IS the error the loop is about to correct.
+        """
+        tpl = self._tracker.template if self._tracker is not None else None
+        if tpl is None:
+            return
+        self._config.params.c0 = float(tpl.csig[0]) + float(delta)
+        self._config.params.phase_ref = float(phase_abs)
+        self._notify(ConfigSynced(config=self._config))
+
+    def _adopt_target(self, phase_abs: float) -> None:
+        """Take the freshly captured phase as the setpoint, and start the block over.
+
+        The block is cleared because anything in it was measured against the OLD frozen
+        shape: those phases are not comparable with the ones the new reference produces, and
+        averaging across the two would define the first correction partly from a model that
+        no longer exists.
+        """
+        self._batch.clear()
+        self._settle_until = 0.0
+        self._config.set_phase = Angle(phase_abs % _TWO_PI)
+        if self._corrector is not None:
+            self._corrector.target_phase = self._config.set_phase
+        log.info("capture: set_phase = %.3f rad (phase re-zeroed)", phase_abs % _TWO_PI)
+        self._notify(ConfigSynced(config=self._config))
+
+    def _emit_correction(self, phase: Angle, frames: int, coherence: float) -> None:
         assert self._corrector is not None
-        # Set per call rather than at construction: the two modes correct at different
-        # cadences and so need different gains, and the corrector is the one place the gain
-        # is clamped before it can reach the stage.
-        self._corrector.gain = gain
         result = self._corrector.update(phase)
-        if result is not None:
-            self._notify(CorrectionAvailable(angle=result.angle, sign=result.sign))
+        if result is None:
+            log.info("block: %d frames, phi=%.3f rad (coherence %.2f) -- inside deadband, holding",
+                     frames, float(phase), coherence)
+            return
+        log.info("block: %d frames, phi=%.3f rad (coherence %.2f) -> rotate %.3f deg",
+                 frames, float(phase), coherence, result.angle.Deg)
+        self._notify(CorrectionAvailable(angle=result.angle, sign=result.sign))
+        # Hold off collecting until the plate has actually moved. Set only on a real move:
+        # a correction inside the deadband commands nothing, so there is nothing to settle.
+        self._settle_until = time.perf_counter() + self._config.move_settle_s
 
-    def _publish_template_state(self) -> None:
-        """Notify the UI of (state, capture progress), but only when it has changed.
+    def _publish_progress(self) -> None:
+        """Notify the UI of block progress, but only when it has changed.
 
-        Called per frame from the fit path, so it has to be cheap and quiet: an unchanged
-        LOCKED state must not put an IPC message on the wire at the frame rate.
+        Called per frame from the fit path, so it has to be cheap and quiet: a loop sitting
+        in its settle window must not put an IPC message on the wire at the frame rate.
         """
         if self._tracker is None:
             return
-        got, need = self._tracker.capture_progress
-        stamp = (self._tracker.state, got, need)
-        if stamp == self._last_state_stamp:
+        settling = time.perf_counter() < self._settle_until
+        capturing = self._tracker.state == TrackerState.CAPTURING
+        # While capturing, the count that matters to the operator is the reference run, not
+        # the averaging block -- the block is not filling at all. One pair of numbers, and
+        # `capturing` says which of the two things they are counting.
+        got, need = (self._tracker.capture_progress if capturing
+                     else (self._batch.count, self._batch.size))
+        stamp = (got, need, capturing, settling)
+        if stamp == self._last_progress_stamp:
             return
-        self._last_state_stamp = stamp
-        self._notify(TemplateStateChanged(
-            state=self._tracker.state.value, captured=got, needed=need,
-            template=self._tracker.template,
+        self._last_progress_stamp = stamp
+        self._notify(BatchProgress(
+            collected=got, needed=need,
+            coherence=self._batch.coherence(), capturing=capturing,
+            settling=settling, error_deg=self._running_error_deg(),
         ))
 
+    def _running_error_deg(self) -> float:
+        """How far the block currently sits from the setpoint, in degrees.
+
+        Folded through the corrector's own wrap so the number on the panel is the same one
+        the deadband is tested against -- including the fold at pi. Publishing a differently
+        wrapped error would make the loop look like it was ignoring a large error whenever
+        the two disagreed.
+
+        The block is not consumed: this rides along on a progress publish, which only
+        happens when the count changed, so it costs nothing extra on the wire.
+        """
+        mean = self._batch.mean_now()
+        if mean is None or self._corrector is None:
+            return float("nan")
+        err = self._corrector.wrap_error(Angle(mean % _TWO_PI))
+        return float(err.Deg)
+
     @worker_thread
-    def _on_capture_reference(self, msg: CaptureReference) -> None:
+    def _on_capture_target(self, msg: CaptureTarget) -> None:
         if self._tracker is not None:
             self._tracker.request_capture()
-            self._averager.reset()
-            self._publish_template_state()
+        # The collected phases were measured against the shape that is about to be replaced.
+        self._batch.clear()
+        self._settle_until = 0.0
+        self._publish_progress()
         self._reply_ok(msg)
 
-    @worker_thread
-    def _on_recall_reference(self, msg: RecallReference) -> None:
-        if self._tracker is not None and msg.template is not None:
-            self._tracker.install(msg.template)
-            self._averager.reset()
-            self._publish_template_state()
-        self._reply_ok(msg)
-
-    def _on_invalidate_template(self, msg: InvalidateTemplate) -> None:
-        # Runs on the poll thread and touches only the tracker's state flags -- deliberately
-        # NOT dispatched onto the worker thread. A commanded move must invalidate BEFORE the
-        # corrupted spectra are fit, and the worker thread may be mid-fit for hundreds of ms.
-        if self._tracker is not None and self._tracker.invalidate(msg.reason):
-            self._averager.reset()
-            self._publish_template_state()
+    def _on_drop_batch(self, msg: DropBatch) -> None:
+        # Runs on the poll thread and touches only the block -- deliberately NOT dispatched
+        # onto the worker thread. A commanded move must discard the block BEFORE the
+        # disturbed spectra are fit, and the worker thread may be mid-fit for hundreds of ms.
+        if self._batch.count:
+            log.info("block: dropped %d frames (%s)", self._batch.count, msg.reason)
+        self._batch.clear()
+        self._publish_progress()
 
     @worker_thread
     def _on_set_config(self, msg: SetStabilizationConfig) -> None:
         self._config = msg.config
-        # A config change can move lambda_ref, the window or the target, so the accumulated
-        # phases no longer describe the same quantity. The TEMPLATE survives: the shape did
-        # not change, and throwing it away would cost a 5 s re-capture on every edit.
-        self._averager.reset()
+        # A config change can move lambda_ref, the window or the target, so the phases
+        # already collected no longer describe the same quantity. The block goes; there is
+        # nothing else to preserve, which is the point of a loop with no frozen state.
+        self._batch.clear()
+        self._batch.resize(self._config.avg_spectra)
+        # A config edit does NOT drop the frozen reference. The shape did not change
+        # because a threshold was nudged, and re-capturing on every edit is exactly the
+        # spurious refit that made the previous loop untrustworthy.
         if self._tracker is not None:
             self._tracker.retune(self._config)
-            # The fast/slow toggle lives in the config, so it arrives here. Acting on it
-            # only when it actually differs from the running state keeps every other edit
-            # -- a gain nudge, a target change -- from re-arming a capture and dropping a
-            # good template for 5 s.
-            if self._config.slow_correction:
-                if self._tracker.state == TemplateState.OFF:
-                    self._tracker.request_capture()
-                    self._publish_template_state()
-            elif self._tracker.disable():
-                self._averager.reset()
-                self._publish_template_state()
         if self._corrector is not None:
-            # Retuned in place, not reconstructed: gain is the knob the operator turns
-            # WHILE watching the loop settle, and a fresh PhaseCorrector would be a
-            # behaviour change mid-run for a value they did not touch.
+            # Retuned in place, not reconstructed: these are knobs the operator turns WHILE
+            # watching the loop, and a fresh PhaseCorrector would be a behaviour change
+            # mid-run for values they did not touch.
             self._corrector.target_phase = self._config.set_phase
-            self._corrector.gain = self._config.loop_gain
+            self._corrector.tolerance = self._config.phase_tolerance
             self._corrector.invert = self._config.invert_correction
+        self._publish_progress()
         self._notify(ConfigSynced(config=self._config))
         self._reply_ok(msg)

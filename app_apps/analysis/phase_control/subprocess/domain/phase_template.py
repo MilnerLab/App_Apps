@@ -19,7 +19,8 @@ solvable, so there is no optimizer, no seed and no iteration to have.
 
 **Nothing here changes the cold path.** Reference capture runs the existing pipeline
 unmodified, per trace, on each of the 10 -- same optimizer, same accept/reject gate. It is
-not made faster and it is not made looser.
+not made faster and it is not made looser. The template is assembled from those ten fits;
+no eleventh fit is performed.
 
 Deliberately NOT included, having been tested and rejected: letting the envelope amplitude
 and baseline float as extra linear terms. A 3-term variant matched the rigid 1-parameter fit
@@ -43,11 +44,13 @@ from app_apps.analysis.phase_control.subprocess.domain import fringe_core as fc
 # How many CONSECUTIVELY accepted traces make a reference. A rejection resets the count to
 # zero -- the run must be unbroken.
 #
-# The consecutiveness rule is not fussiness, it covers a real hazard: averaging traces whose
-# phase drifted between them washes the fringes out of the average, and the template would
-# then be fit to noise and trusted indefinitely. An unbroken run of 10 accepted traces, plus
-# the visibility check on the averaged trace before fitting it, is sufficient; no separate
-# phase-spread test is needed.
+# The run is averaged in PARAMETER space, not in trace space: each of the 10 is fit cold on
+# its own and the fitted envelopes, carrier and chirp are averaged. Averaging the TRACES was
+# the earlier design and it was wrong -- the phase drifts across a capture, which is the whole
+# reason the loop exists, and drifting fringes cancel in an averaged trace, so the fit that
+# followed was measuring the one thing the capture is not for. Parameter averaging is blind to
+# that drift by construction: the phase constant c0 is simply not averaged, it is taken from
+# the most recent fit, which is also what the setpoint is measured against.
 CAPTURE_N = 10
 
 # Shape-mismatch gate for the per-trace Hilbert check. Measured:

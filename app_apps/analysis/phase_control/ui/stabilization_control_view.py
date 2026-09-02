@@ -4,15 +4,11 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QButtonGroup,
     QCheckBox,
-    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
-    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
@@ -94,6 +90,36 @@ class StabilizationControlView(QWidget):
         freq_row.addStretch()
         fbox.addLayout(freq_row)
 
+        # The four traces the panel draws, and a switch for each. "Fit" is the frozen shape
+        # sitting at the phase this frame measured; "Target" is the same shape at the
+        # setpoint. The gap between them IS the error the loop corrects, so being able to
+        # isolate either against the raw spectrum is how a bad lock is read. "Avg" is the
+        # mean of the raw frames in the current block -- the thing the loop actually
+        # corrects on. Fit starts OFF: it is per-frame and the loop never acts on one frame.
+        trace_row = QHBoxLayout()
+        trace_row.setSpacing(4)
+        trace_row.addWidget(QLabel("Traces:"))
+        self._raw_cb = QCheckBox("Raw")
+        self._raw_cb.setToolTip("The spectrometer trace, as measured")
+        self._fit_cb = QCheckBox("Fit")
+        self._fit_cb.setToolTip(
+            "The frozen reference shape at the phase this frame measured — what the loop "
+            "believes the light is doing")
+        self._target_cb = QCheckBox("Target")
+        self._target_cb.setToolTip(
+            "The same frozen shape at the set phase — where the loop is holding it")
+        self._avg_cb = QCheckBox("Avg")
+        self._avg_cb.setToolTip(
+            "The running mean of the raw frames collected into the current averaging block "
+            "— the trace the correction is actually computed from. It restarts every "
+            "time the block does, so it never smears across a plate move.")
+        for cb, on in ((self._raw_cb, vm.show_raw), (self._fit_cb, vm.show_fit),
+                       (self._target_cb, vm.show_target), (self._avg_cb, vm.show_avg)):
+            cb.setChecked(on)
+            trace_row.addWidget(cb)
+        trace_row.addStretch()
+        fbox.addLayout(trace_row)
+
         row.addWidget(frame)
         row.addWidget(self._build_reference_frame())
 
@@ -124,20 +150,33 @@ class StabilizationControlView(QWidget):
         self._knife_cb.checkStateChanged.connect(
             lambda state: self._vm.set_show_knife_edges(state == Qt.CheckState.Checked)
         )
+        self._raw_cb.checkStateChanged.connect(
+            lambda state: self._vm.set_show_raw(state == Qt.CheckState.Checked)
+        )
+        self._fit_cb.checkStateChanged.connect(
+            lambda state: self._vm.set_show_fit(state == Qt.CheckState.Checked)
+        )
+        self._target_cb.checkStateChanged.connect(
+            lambda state: self._vm.set_show_target(state == Qt.CheckState.Checked)
+        )
+        self._avg_cb.checkStateChanged.connect(
+            lambda state: self._vm.set_show_avg(state == Qt.CheckState.Checked)
+        )
+        vm.readout_changed.connect(self._refresh_readouts)
         self._phase_draft.dirty_changed.connect(self._phase_ind.set_dirty)
 
         self._apply_btn.clicked.connect(self._on_apply)
         self._config_btn.clicked.connect(config_dialog.open)
         vm.worker_state_changed.connect(self._on_worker_state_changed)
-        vm.template_state_changed.connect(self._template_label.setText)
+        vm.loop_state_changed.connect(self._state_label.setText)
 
-    # --- frozen reference -------------------------------------------------
+    # --- reference --------------------------------------------------------
     def _build_reference_frame(self) -> QWidget:
-        """Capture / Save / Recall, plus a one-line state readout.
+        """Capture target, plus a one-line state readout.
 
-        The readout is not decoration: "capturing 4/10" and "locked" are the difference
-        between a loop that is holding and one that is correcting, and the operator has no
-        other way to tell them apart from the plot.
+        The readout is not decoration: "capturing 4/10" and "averaging 7/10" are the
+        difference between a loop that is holding and one that is about to move the plate,
+        and the operator has no other way to tell them apart from the chart.
         """
         frame = QFrame()
         frame.setFrameShape(QFrame.Shape.StyledPanel)
@@ -146,74 +185,54 @@ class StabilizationControlView(QWidget):
         box.setContentsMargins(6, 4, 6, 4)
         box.setSpacing(3)
 
-        self._template_label = QLabel(self._vm.template_text)
-        box.addWidget(self._template_label)
-
-        # Which loop runs. Radio buttons rather than a checkbox: both options are named,
-        # so the one that is NOT selected is still readable off the panel -- and the two
-        # differ by more than a rate, so "not slow" is not a useful way to describe fast.
-        mode = QHBoxLayout()
-        mode.setSpacing(4)
-        self._slow_radio = QRadioButton("Slow")
-        self._slow_radio.setToolTip(
-            "Frozen-template loop: capture a shape, then correct once every "
-            "correction period from the averaged phase. Accurate, and the default.")
-        self._fast_radio = QRadioButton("Fast")
-        self._fast_radio.setToolTip(
-            "Cold per-frame loop: a full fit and a correction on every accepted trace. "
-            "Responsive but noisier — for pulling a badly drifted setup back into range.")
-        self._mode_group = QButtonGroup(self)
-        self._mode_group.addButton(self._slow_radio)
-        self._mode_group.addButton(self._fast_radio)
-        (self._slow_radio if self._vm.slow_correction else self._fast_radio).setChecked(True)
-        self._slow_radio.toggled.connect(self._vm.set_slow_correction)
-        mode.addWidget(QLabel("Correction:"))
-        mode.addWidget(self._slow_radio)
-        mode.addWidget(self._fast_radio)
-        mode.addStretch()
-        box.addLayout(mode)
+        self._state_label = QLabel(self._vm.loop_text)
+        box.addWidget(self._state_label)
 
         btns = QHBoxLayout()
         btns.setSpacing(4)
-        capture = QPushButton("Capture reference")
-        capture.setToolTip("Collect the next 10 consecutively accepted traces, average "
-                           "them, and freeze the fitted shape as the phase template")
-        capture.clicked.connect(self._vm.capture_reference)
-        save = QPushButton("Save")
-        save.clicked.connect(self._on_save_reference)
-        recall = QPushButton("Recall")
-        recall.setToolTip("Load a saved template, overriding the current one")
-        recall.clicked.connect(self._on_recall_reference)
-        for b in (capture, save, recall):
-            btns.addWidget(b)
+        capture = QPushButton("Capture target")
+        capture.setToolTip(
+            "Refit every parameter cold over the next 10 consecutively accepted traces, "
+            "freeze the fitted shape, and take the phase it measures as the new set phase. "
+            "This is how the loop is re-referenced after the centrifuge changes — the "
+            "error goes to zero and the loop holds the fringes where they are now.")
+        capture.clicked.connect(self._vm.capture_target)
+        btns.addWidget(capture)
+        # Where the plate is, what it was last told to do, and how far off the next
+        # correction is. Restored from the legacy panel: without them a held loop and a
+        # stalled one look identical, and a correction that was commanded but not executed
+        # (a spin in progress, a controller fault) is invisible.
+        self._plate_label = QLabel()
+        self._plate_label.setToolTip("Absolute half-wave-plate angle, as read back")
+        self._corr_label = QLabel()
+        self._corr_label.setToolTip(
+            "The last increment this loop commanded. Signed: the direction is the sign.")
+        self._next_label = QLabel()
+        self._next_label.setToolTip(
+            "Frames still to collect before the block fills and a correction can be issued")
+        readouts = QHBoxLayout()
+        readouts.setSpacing(10)
+        for lab in (self._plate_label, self._corr_label, self._next_label):
+            readouts.addWidget(lab)
+        readouts.addStretch()
+        box.addLayout(readouts)
+        self._refresh_readouts()
+
         btns.addStretch()
         box.addLayout(btns)
         return frame
 
-    def _on_save_reference(self) -> None:
-        if not self._vm.has_template:
-            QMessageBox.information(self, "Save reference",
-                                    "There is no template installed to save.")
-            return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save phase reference", "phase_reference.json", "JSON (*.json)")
-        if not path:
-            return
-        try:
-            self._vm.save_reference(path)
-        except OSError as e:
-            QMessageBox.warning(self, "Save reference", f"Could not write the file: {e}")
-
-    def _on_recall_reference(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Recall phase reference", "", "JSON (*.json)")
-        if not path:
-            return
-        try:
-            self._vm.recall_reference(path)
-        except (OSError, ValueError, KeyError, TypeError) as e:
-            QMessageBox.warning(self, "Recall reference",
-                                f"That file is not a usable phase reference: {e}")
+    def _refresh_readouts(self) -> None:
+        # A dash, not 0.00: zero is a legitimate plate angle and a legitimate correction, so
+        # rendering "unknown" as a number would be a lie about a reading that has not
+        # happened.
+        plate = self._vm.waveplate_deg
+        corr = self._vm.last_correction_deg
+        self._plate_label.setText(
+            "Plate: —" if plate is None else f"Plate: {plate:.2f}°")
+        self._corr_label.setText(
+            "Last: —" if corr is None else f"Last: {corr:+.3f}°")
+        self._next_label.setText(self._vm.countdown_text)
 
     def _on_apply(self) -> None:
         self._vm.apply(self._phase_draft.commit())

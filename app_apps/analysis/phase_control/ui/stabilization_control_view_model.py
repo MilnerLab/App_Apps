@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -16,19 +15,17 @@ from base_core.quantities.constants import SPEED_OF_LIGHT
 from base_core.quantities.enums import Prefix
 from base_qt.app.dispatcher import QtDispatcher
 from app_apps.analysis.phase_control.events import (
-    PhaseTemplateChanged,
+    PhaseBatchChanged,
     PhaseTrackingStateChanged,
     StabilizationConfigChanged,
 )
-from app_apps.analysis.phase_control.subprocess.domain.phase_template import PhaseTemplate
+from app_apps.io.control_readout.rgv.events import NewRGVAngle, RequestRotateRGV
 from app_apps.analysis.phase_control.subprocess.domain import fringe_core as fc
 from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import display_curve
 
-# The OFF state, which now means one thing only: fast correction is selected. Slow mode
-# arms its capture the moment stabilization starts, so OFF is no longer something the
-# operator can arrive at by not having pressed a button. The wording says what the loop is
-# doing rather than presenting the absence of a template as a fault.
-_TEMPLATE_OFF_TEXT = "Fast correction — per-frame fit, no reference"
+# Shown before the worker has said anything. The loop starts by capturing, so this is what
+# is true at that moment rather than a placeholder.
+_IDLE_TEXT = "Reference: not captured"
 
 if TYPE_CHECKING:
     from app_apps.analysis.phase_control.phase_stabilization_handle import PhaseStabilizationHandle
@@ -39,9 +36,19 @@ class StabilizationControlViewModel(QObject):
     worker_state_changed = Signal(object)  # WorkerStatus
     config_updated = Signal()              # subprocess synced new fit params
     plot_mode_changed = Signal(bool)       # plot-in-frequency toggled
-    template_state_changed = Signal(str)   # human-readable frozen-template state
+    loop_state_changed = Signal(str)       # human-readable capture / averaging state
     knife_edges_changed = Signal(bool)     # knife-edge markers toggled
+    raw_visible_changed = Signal(bool)     # the live spectrum curve, which this VM does not
+                                           # own -- PhaseControlView draws it, so the toggle
+                                           # has to travel out rather than act here
     cut_left_changed = Signal(float, bool)  # terminal nm, True when manually set
+    avg_visible_changed = Signal(bool)     # the running-average curve, drawn by
+                                           # PhaseControlView for the same reason Raw is
+    block_reset = Signal()                 # a new averaging block started: the running
+                                           # average must start over with it, or it would
+                                           # smear frames from either side of a correction
+    correction_issued = Signal(float)      # commanded plate increment, deg
+    readout_changed = Signal()             # plate angle / last correction / countdown
 
     def __init__(
         self,
@@ -66,8 +73,32 @@ class StabilizationControlViewModel(QObject):
         self._show_knife_edges = True
         self._unsub = bus.subscribe(PhaseTrackingStateChanged, self._on_state_changed)
         self._unsub_cfg = bus.subscribe(StabilizationConfigChanged, self._on_config_updated)
-        self._unsub_tpl = bus.subscribe(PhaseTemplateChanged, self._on_template_changed)
-        self._template_text = _TEMPLATE_OFF_TEXT
+        self._unsub_batch = bus.subscribe(PhaseBatchChanged, self._on_batch_changed)
+        self._loop_text = _IDLE_TEXT
+        # Raw, the running average and the target are on; the per-frame Fit is OFF. The fit
+        # curve redraws on every accepted frame and is the noisiest thing on the chart, and
+        # the loop does not correct on any single frame anyway -- the average is what it acts
+        # on, so that is what the panel shows by default.
+        self._show_raw = True
+        self._show_fit = False
+        self._show_target = True
+        self._show_avg = True
+
+        # Readouts. None means "not known yet" and is rendered as a dash rather than a
+        # zero -- 0.00 deg is a legitimate plate angle and a legitimate correction, so a
+        # placeholder that looks like one would be unreadable.
+        self._waveplate_deg: float | None = None
+        self._last_correction_deg: float | None = None
+        self._remaining: int | None = None
+        self._settling = False
+        self._capturing = False
+        self._error_deg = float("nan")
+        self._collected = 0
+        # RequestRotateRGV is what THIS loop asks the plate to do, published by
+        # PhaseStabilizationHandle the moment a correction lands, so it is both the "most
+        # recent correction" readout and the earliest signal that a block just ended.
+        self._unsub_rot = bus.subscribe(RequestRotateRGV, self._on_rotate_requested)
+        self._unsub_rgv = bus.subscribe(NewRGVAngle, self._on_rgv_angle)
 
     def set_chart(self, plot_item: pg.PlotItem) -> None:
         self._plot_item = plot_item
@@ -151,6 +182,39 @@ class StabilizationControlViewModel(QObject):
         self._update_curves()
         self.plot_mode_changed.emit(enabled)
 
+    # --- trace visibility --------------------------------------------------------------
+    @property
+    def show_raw(self) -> bool:
+        return self._show_raw
+
+    def set_show_raw(self, enabled: bool) -> None:
+        self._show_raw = bool(enabled)
+        self.raw_visible_changed.emit(self._show_raw)
+
+    @property
+    def show_fit(self) -> bool:
+        return self._show_fit
+
+    def set_show_fit(self, enabled: bool) -> None:
+        self._show_fit = bool(enabled)
+        self._update_curves()
+
+    @property
+    def show_target(self) -> bool:
+        return self._show_target
+
+    def set_show_target(self, enabled: bool) -> None:
+        self._show_target = bool(enabled)
+        self._update_curves()
+
+    @property
+    def show_avg(self) -> bool:
+        return self._show_avg
+
+    def set_show_avg(self, enabled: bool) -> None:
+        self._show_avg = bool(enabled)
+        self.avg_visible_changed.emit(self._show_avg)
+
     @property
     def show_knife_edges(self) -> bool:
         return self._show_knife_edges
@@ -215,8 +279,17 @@ class StabilizationControlViewModel(QObject):
         else:
             x = wl
 
-        self._set_phase_series.setData(x, set_phase_curve)
-        self._current_phase_series.setData(x, current_phase_curve)
+        # The toggles bite HERE rather than on setVisible: a hidden pyqtgraph item keeps its
+        # data and reappears with a stale curve the moment it is shown again, which is worse
+        # than no curve at all on a chart that is read as a measurement.
+        if self._show_target:
+            self._set_phase_series.setData(x, set_phase_curve)
+        else:
+            self._set_phase_series.clear()
+        if self._show_fit:
+            self._current_phase_series.setData(x, current_phase_curve)
+        else:
+            self._current_phase_series.clear()
         self._update_rf_label()
         self._update_fwhm_lines()
         self._update_knife_lines()
@@ -408,57 +481,96 @@ class StabilizationControlViewModel(QObject):
 
         self._dispatcher.post(_apply)
 
-    # ------------------------------------------------------------------ frozen template --
+    # --------------------------------------------------------------------- block loop --
     @property
-    def template_text(self) -> str:
-        return self._template_text
+    def loop_text(self) -> str:
+        return self._loop_text
 
-    @property
-    def has_template(self) -> bool:
-        return self._handle.template is not None
+    def capture_target(self) -> None:
+        """Refit every parameter cold and re-zero the phase against the result."""
+        self._handle.capture_target()
 
-    @property
-    def slow_correction(self) -> bool:
-        return self._config.slow_correction
+    def _on_batch_changed(self, event: PhaseBatchChanged) -> None:
+        # The block restarting is what the running-average curve is keyed off: the count
+        # going backwards (or to zero) means the frames behind it were consumed by a
+        # correction, or thrown away by a pause / stage move. Either way the next average
+        # must not include them.
+        if event.collected < self._collected:
+            self._dispatcher.post(self.block_reset.emit)
+        self._collected = event.collected
+        self._capturing = event.capturing
+        self._settling = event.settling
+        self._error_deg = float(event.error_deg)
+        self._remaining = None if event.capturing else max(event.needed - event.collected, 0)
 
-    def set_slow_correction(self, slow: bool) -> None:
-        """Switch between the frozen-template loop and the cold per-frame one.
-
-        Pushed straight to the subprocess rather than waiting for Apply: this is a mode
-        switch, not a tuning value, and an operator reaching for Fast because the loop is
-        misbehaving wants it now.
-        """
-        if bool(slow) == self._config.slow_correction:
-            return
-        self._config.slow_correction = bool(slow)
-        self._handle.set_config(self._config)
-
-    def capture_reference(self) -> None:
-        self._handle.capture_reference()
-
-    def save_reference(self, path: str) -> bool:
-        """Write the installed template to ``path``. False if there is nothing to write."""
-        tpl = self._handle.template
-        if tpl is None:
-            return False
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(tpl.to_primitive(), fh, indent=2)
-        return True
-
-    def recall_reference(self, path: str) -> None:
-        """Load a template from ``path`` and install it, overriding the current one."""
-        with open(path, encoding="utf-8") as fh:
-            self._handle.recall_reference(PhaseTemplate.from_primitive(json.load(fh)))
-
-    def _on_template_changed(self, event: PhaseTemplateChanged) -> None:
-        if event.state == "capturing":
-            text = f"Reference: capturing {event.captured}/{event.needed} — holding"
-        elif event.state == "locked" and event.template is not None:
-            text = (f"Reference: locked — captured {event.template.captured_utc}, "
-                    f"{event.template.integration_ms:.0f} ms x{event.template.averages}")
-        elif event.state == "locked":
-            text = "Reference: locked"
+        if event.capturing:
+            text = f"Reference: capturing {event.collected}/{event.needed} — holding"
+        elif event.settling:
+            text = "Averaging: waiting for the plate to settle"
         else:
-            text = _TEMPLATE_OFF_TEXT
-        self._template_text = text
-        self._dispatcher.post(lambda: self.template_state_changed.emit(text))
+            # The error, not the agreement. "agreement 0.97" says the fits concur; it does
+            # not say whether they concur about being on target, which is the only question
+            # the operator is actually asking of this line.
+            off = ("—" if not np.isfinite(self._error_deg)
+                   else f"{self._error_deg:+.2f}° off")
+            text = f"Averaging {event.collected}/{event.needed} — {off}"
+        self._loop_text = text
+
+        def _emit() -> None:
+            self.loop_state_changed.emit(text)
+            self.readout_changed.emit()
+
+        self._dispatcher.post(_emit)
+
+    # ---------------------------------------------------------------------- readouts --
+    @property
+    def error_deg(self) -> float:
+        """The block's running error against the setpoint, in degrees. NaN when unknown."""
+        return self._error_deg
+
+    @property
+    def waveplate_deg(self) -> float | None:
+        return self._waveplate_deg
+
+    @property
+    def last_correction_deg(self) -> float | None:
+        return self._last_correction_deg
+
+    @property
+    def countdown_text(self) -> str:
+        """Frames still needed before the next correction can be issued.
+
+        Counted in FRAMES rather than seconds on purpose: the loop has no clock. It corrects
+        when the block fills, so a frame count is the real remaining distance, and it stalls
+        exactly when the fits stop being accepted -- which a seconds countdown would hide by
+        continuing to tick.
+        """
+        if self._capturing:
+            return "Next: capturing"
+        if self._settling:
+            return "Next: settling"
+        if self._remaining is None:
+            return "Next: —"
+        return f"Next: {self._remaining} frame{'' if self._remaining == 1 else 's'}"
+
+    def _on_rotate_requested(self, event: RequestRotateRGV) -> None:
+        deg = float(event.angle.Deg)
+
+        def _emit() -> None:
+            self._last_correction_deg = deg
+            # The plate is moving now, so the frames either side of this must not be
+            # averaged together on the chart any more than they are in the loop.
+            self.block_reset.emit()
+            self.correction_issued.emit(deg)
+            self.readout_changed.emit()
+
+        self._dispatcher.post(_emit)
+
+    def _on_rgv_angle(self, event: NewRGVAngle) -> None:
+        deg = float(event.angle.Deg)
+
+        def _emit() -> None:
+            self._waveplate_deg = deg
+            self.readout_changed.emit()
+
+        self._dispatcher.post(_emit)

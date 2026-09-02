@@ -9,6 +9,7 @@ import numpy as np
 from base_core.math.models import Angle
 from base_core.quantities.enums import Prefix
 from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import (
+    FringeFitResult,
     ReferencePolicy,
     analyze_trace,
     baseline_anchor,
@@ -55,10 +56,21 @@ class PhaseTracker:
 
     current_phase: Angle | None = None
 
+    # The FringeFitResult of the last ACCEPTED fit, or None before the first one. Kept so a
+    # caller assembling a reference out of a run of accepted traces can average the fits it
+    # already paid for instead of re-fitting. Never holds a rejected fit -- a caller reading
+    # this after update() returned True is reading that fit.
+    last_result: FringeFitResult | None = None
+
     def __init__(self, config: StabilizationConfig) -> None:
         self._config = config
         self._ref_policy = ReferencePolicy()
         self._last_hold_log = 0.0
+
+    def retune(self, config: StabilizationConfig) -> None:
+        """Adopt an edited config. The ReferencePolicy hysteresis is kept: it is about which
+        wavelength the phase is reported at, which no config edit redefines."""
+        self._config = config
 
     def update(self, wavelengths_nm: np.ndarray, intensities: np.ndarray,
                skipped: int = 0) -> bool:
@@ -105,6 +117,7 @@ class PhaseTracker:
             # itself on a normal frame; it moves to the core centroid only when a clip
             # leaves lambda_ref unsupportable, and ref_fallback flags it when it does.
             phase_ref = result.phase_at(result.ref_wl)
+            self.last_result = result
             self._config.params.commit(result, phase_ref)
             self.current_phase = Angle(phase_ref % _TWO_PI)
             log.info("fit ok  phi=%.3frad @%.2fnm%s rms=%.0f inl=%.0f%% skip=%d %.0fms",

@@ -5,12 +5,16 @@ from typing import Any, ClassVar, TYPE_CHECKING
 
 from base_core.ipc.worker_handle import WorkerStatus
 from base_core.quantities.enums import Prefix
-from base_qt.ui.form import BoolSpec, DirtyForm, FloatSpec, LengthSpec, RangeSpec
-
-from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import (
-    GAIN_MAX,
-    GAIN_MIN,
+from base_qt.ui.form import (
+    AngleSpec,
+    BoolSpec,
+    DirtyForm,
+    FloatSpec,
+    IntSpec,
+    LengthSpec,
+    RangeSpec,
 )
+
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import (
     FringeFitParams,
 )
@@ -52,10 +56,11 @@ class PhaseConfigView(DirtyForm):
         "rms_frac_threshold": FloatSpec("Accept rms/amp below",    0.0,   2.0,     decimals=3, step=0.02),
         "inlier_threshold":  FloatSpec("Accept inliers above (%)", 0.0,   100.0,   decimals=0, step=1.0),
         "min_visibility":    FloatSpec("Abort fit below visibility", 0.0, 1.0,   decimals=3, step=0.01),
-        "loop_gain":         FloatSpec("Loop gain (err/frame)", GAIN_MIN, GAIN_MAX, decimals=2, step=0.01),
+        "phase_tolerance":   AngleSpec("Deadband"),
         "invert_correction": BoolSpec("Invert correction sign"),
-        "correction_period_s":  FloatSpec("Correct every (s)",      1.0,  600.0,  decimals=1, step=1.0),
-        "shape_mismatch_max":   FloatSpec("Re-capture above mismatch", 0.0, 1.0,  decimals=4, step=0.001),
+        "avg_spectra":       IntSpec("Frames averaged per correction", 1, 1000),
+        "move_settle_s":     FloatSpec("Settle after move (s)",    0.0,  10.0,   decimals=2, step=0.05),
+        "capture_n":         IntSpec("Traces per reference capture", 1, 1000),
         "min_amplitude_frac":   FloatSpec("Hold below amp fraction", 0.0,  1.0,   decimals=2, step=0.05),
     }
     _groups = [
@@ -66,20 +71,19 @@ class PhaseConfigView(DirtyForm):
             "wavelength_range", "rms_frac_threshold", "inlier_threshold", "min_visibility",
         ]),
         ("Control loop", [
-            "loop_gain", "invert_correction",
+            "phase_tolerance", "invert_correction", "avg_spectra", "move_settle_s",
         ]),
-        # All three are editable while running, and for the same reason min_visibility is:
-        # they can only be judged against a live trace and a running loop.
-        ("Frozen reference", [
-            "correction_period_s", "shape_mismatch_max", "min_amplitude_frac",
+        # Both are editable while running, and for the same reason min_visibility is: they
+        # can only be judged against a live trace and a running loop.
+        ("Reference", [
+            "capture_n", "min_amplitude_frac",
         ]),
     ]
-    # invert_correction is deliberately NOT read-only while running either, and for a
-    # stronger reason than loop_gain: a wrong sign is only diagnosable by watching the loop
-    # fail to converge, so the operator must be able to flip it against the running loop.
-    # loop_gain is deliberately NOT here: tuning the gain against a loop you are watching
-    # settle is the entire reason it is exposed, and it is safe to change mid-run (the
-    # corrector is retuned in place, and the fit does not depend on it at all).
+    # invert_correction is deliberately NOT read-only while running: a wrong sign is only
+    # diagnosable by watching the loop fail to converge, so the operator must be able to flip
+    # it against the running loop. The deadband and the block length are the same case --
+    # they are judged by watching how much the loop moves and how often, which is only
+    # visible while it is running, and all three are retuned in place.
     _readonly_when_running = frozenset({
         "trunc_threshold", "trust_nsig", "lambda_ref",
     })

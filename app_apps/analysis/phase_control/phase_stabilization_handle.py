@@ -6,24 +6,21 @@ from base_core.framework.events.event_bus import EventBus
 from base_core.ipc.message import OKReply
 from base_core.ipc.service_connector import ServicePipelineConnector
 from base_core.ipc.worker_handle import BaseWorkerHandle
-from base_core.quantities.enums import Prefix
 from app_apps.analysis.phase_control.events import (
-    PhaseTemplateChanged,
+    PhaseBatchChanged,
     PhaseTrackingStateChanged,
     StabilizationConfigChanged,
 )
 
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
-from app_apps.analysis.phase_control.subprocess.domain.phase_template import PhaseTemplate
 from app_apps.analysis.phase_control.subprocess.messages import (
-    CaptureReference,
+    BatchProgress,
+    CaptureTarget,
     ConfigSynced,
     CorrectionAvailable,
-    InvalidateTemplate,
-    RecallReference,
+    DropBatch,
     SetStabilizationConfig,
     SpectrumProcessed,
-    TemplateStateChanged,
 )
 from app_apps.io.control_readout.mfa_cc.events import RequestMoveMfacc
 from app_apps.io.control_readout.rgv.events import RequestRotateRGV
@@ -41,19 +38,16 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
         self._spectrum_writer = spectrum_writer
         self._config = config
         self._unsub_config_synced: Callable[[], None] | None = None
-        # The last template the worker installed. Kept here so Save reference has something
-        # to write without a round trip to the subprocess.
-        self._template: PhaseTemplate | None = None
 
     def subscribe(self) -> None:
         self._subscribe_service(CorrectionAvailable, self._on_correction_available)
         self._subscribe_service(SpectrumProcessed, self._on_spectrum_processed)
-        self._subscribe_service(TemplateStateChanged, self._on_template_state)
-        # Command-driven template invalidation. This is the PRIMARY trigger and it has zero
-        # lag: a commanded delay (MFA-CC) or grating (UTS150CC) move changes the fringe shape,
-        # so the template is invalidated the moment the move is REQUESTED, before the
-        # corrupted spectra can be fit. Deterministic, no threshold. The per-trace Hilbert
-        # check in the worker is the backstop for shape changes nobody commanded.
+        self._subscribe_service(BatchProgress, self._on_batch_progress)
+        # Command-driven block drop, with zero lag: a commanded delay (MFA-CC) or grating
+        # (UTS150CC) move disturbs the fringes, so the partially collected block goes the
+        # moment the move is REQUESTED, before the disturbed spectra can be fit. The frozen
+        # reference is NOT dropped -- re-referencing is the operator's call, and a move that
+        # changes the shape enough to need one is a move they know they made.
         #
         # The probe stage (FMS300PP) is deliberately absent: it does not change the shape.
         self._subscribe(RequestMoveMfacc, self._on_delay_move)
@@ -104,34 +98,19 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
     def _on_set_config_reply(self, reply: OKReply) -> None:
         pass
 
-    # ------------------------------------------------------------------ frozen template --
-    @property
-    def template(self) -> PhaseTemplate | None:
-        """The installed template, or None. Save reference writes this out."""
-        return self._template
-
-    def capture_reference(self) -> None:
-        self._request(CaptureReference(), self._on_set_config_reply)
-
-    def recall_reference(self, template: PhaseTemplate) -> None:
-        self._request(RecallReference(template=template), self._on_set_config_reply)
+    # --------------------------------------------------------------------- block loop --
+    def capture_target(self) -> None:
+        self._request(CaptureTarget(), self._on_set_config_reply)
 
     def _on_delay_move(self, event: RequestMoveMfacc) -> None:
-        self._emit(InvalidateTemplate(reason="delay move"))
+        self._emit(DropBatch(reason="delay move"))
 
     def _on_grating_move(self, event: RequestMoveUts150cc) -> None:
-        self._emit(InvalidateTemplate(reason="grating move"))
+        self._emit(DropBatch(reason="grating move"))
 
-    def _on_template_state(self, msg: TemplateStateChanged) -> None:
-        self._template = msg.template
-        if msg.template is not None:
-            # Stamp the provenance the subprocess cannot know: the spectrometer settings live
-            # on this side. A recalled template can then be checked against the machine it is
-            # loaded onto, since a different integration time or averaging count changes the
-            # noise the template was fitted through -- silently.
-            cfg = self._spectrum_writer.config
-            msg.template.integration_ms = float(cfg.exposure_time.value(Prefix.MILLI))
-            msg.template.averages = int(cfg.average)
-        self._bus.publish(PhaseTemplateChanged(
-            state=msg.state, captured=msg.captured, needed=msg.needed, template=msg.template,
+    def _on_batch_progress(self, msg: BatchProgress) -> None:
+        self._bus.publish(PhaseBatchChanged(
+            collected=msg.collected, needed=msg.needed, coherence=msg.coherence,
+            capturing=msg.capturing, settling=msg.settling,
+            error_deg=msg.error_deg,
         ))

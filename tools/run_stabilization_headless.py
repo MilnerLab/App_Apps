@@ -1,4 +1,4 @@
-"""Start the slow (frozen-template) stabilization loop with no window, and report why.
+"""Start the stabilization loop with no window, and report why.
 
 The panel can only show a capture counter. When that counter sits at 0/10 the operator
 cannot tell which of three things is happening: every trace is being rejected before the
@@ -35,9 +35,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seconds", type=float, default=60.0, help="how long to watch")
-    ap.add_argument("--mismatch-max", type=float, default=None,
-                    help="override shape_mismatch_max, to see how much headroom the "
-                         "live traces actually need before the template survives")
+    ap.add_argument("--capture-n", type=int, default=None,
+                    help="override capture_n, to see how many consecutively accepted "
+                         "traces the live signal can actually string together")
     ap.add_argument("--no-correct", action="store_true",
                     help="observe only: swallow corrections so the plate never turns")
     args = ap.parse_args(argv)
@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     qapp = QApplication([])  # noqa: F841  -- must exist before QtDispatcher resolves
 
     from app import build_container, build_context
-    from app_apps.analysis.phase_control.events import PhaseTemplateChanged
+    from app_apps.analysis.phase_control.events import PhaseBatchChanged
     from app_apps.analysis.phase_control.module import PhaseControlModule
     from app_apps.analysis.phase_control.phase_stabilization_handle import (
         PhaseStabilizationHandle,
@@ -72,14 +72,15 @@ def main(argv: list[str] | None = None) -> int:
     unsubs: list = []
     seen = {"frames": 0, "last": None}
 
-    def on_template(e: PhaseTemplateChanged) -> None:
+    def on_batch(e: PhaseBatchChanged) -> None:
         # This is the event the panel's counter renders. Printing it here proves whether
         # the counter is standing still because the loop is, or because nothing is sent.
-        stamp = (e.state, e.captured)
+        stamp = (e.capturing, e.collected, e.settling)
         if stamp == seen["last"]:
             return
         seen["last"] = stamp
-        log.warning("TEMPLATE STATE -> %s  %d/%d", e.state, e.captured, e.needed)
+        log.warning("%s -> %d/%d%s", "CAPTURING" if e.capturing else "AVERAGING",
+                    e.collected, e.needed, "  (settling)" if e.settling else "")
 
     def on_spectrum(_e: SpectrumAvailable) -> None:
         seen["frames"] += 1
@@ -87,18 +88,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         log.info("bootstrapping modules (no window)")
         mm.bootstrap(c, ctx)
-        unsubs.append(ctx.event_bus.subscribe(PhaseTemplateChanged, on_template))
+        unsubs.append(ctx.event_bus.subscribe(PhaseBatchChanged, on_batch))
         unsubs.append(ctx.event_bus.subscribe(SpectrumAvailable, on_spectrum))
 
         cfg = c.get(StabilizationConfig)
-        cfg.slow_correction = True
-        if args.mismatch_max is not None:
-            cfg.shape_mismatch_max = float(args.mismatch_max)
-        log.warning("slow_correction=%s  min_visibility=%.3f  rms_frac<%.2f  inliers>%.0f%%"
-                    "  correction period %.1fs",
-                    cfg.slow_correction, cfg.min_visibility, cfg.rms_frac_threshold,
-                    cfg.inlier_threshold, cfg.correction_period_s)
-        log.warning("shape_mismatch_max=%.4f", cfg.shape_mismatch_max)
+        if args.capture_n is not None:
+            cfg.capture_n = int(args.capture_n)
+        log.warning("min_visibility=%.3f  rms_frac<%.2f  inliers>%.0f%%"
+                    "  %d frames per correction  deadband %.1f deg",
+                    cfg.min_visibility, cfg.rms_frac_threshold,
+                    cfg.inlier_threshold, cfg.avg_spectra, cfg.phase_tolerance.Deg)
+        log.warning("capture_n=%d  move_settle_s=%.2f", cfg.capture_n, cfg.move_settle_s)
 
         spectro = c.get(SpectrometerWorkerHandle)
         phase = c.get(PhaseStabilizationHandle)
@@ -133,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
         while time.time() < end:
             time.sleep(1.0)
 
-        log.warning("watched %.0f s: %d spectra published, final template state %s",
+        log.warning("watched %.0f s: %d spectra published, final loop state %s",
                     args.seconds, seen["frames"], seen["last"])
         return 0
     finally:

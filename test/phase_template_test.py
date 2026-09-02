@@ -7,6 +7,7 @@ the app framework or a spectrometer, so it runs anywhere:
 """
 from __future__ import annotations
 
+import math
 import os
 import sys
 import time
@@ -16,6 +17,20 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app_apps.analysis.phase_control.subprocess.domain import fringe_core as fc  # noqa: E402
+from base_core.math.models import Angle  # noqa: E402
+from base_core.quantities.enums import Prefix  # noqa: E402
+from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import (
+    FringeFitParams,
+    StabilizationConfig,
+)
+from app_apps.analysis.phase_control.subprocess.domain.stabilization_tracker import (
+    StabilizationTracker,
+    TrackerState,
+)
+from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import (
+    PhaseBatch,
+    PhaseCorrector,
+)
 from app_apps.analysis.phase_control.subprocess.domain.phase_template import (  # noqa: E402
     PhaseTemplate,
     align_sign,
@@ -23,10 +38,6 @@ from app_apps.analysis.phase_control.subprocess.domain.phase_template import (  
     instantaneous_frequency,
     shape_mismatch,
 )
-from app_apps.analysis.phase_control.subprocess.domain.template_tracker import (  # noqa: E402
-    PhaseAverager,
-)
-
 X = np.linspace(792.0, 812.0, 700)
 L0 = 802.0
 CSIG = (0.3, 6.65, 0.12, 0.004)     # c0..c3, a realistic carrier + chirp
@@ -212,22 +223,125 @@ def test_absolute_phase_is_continuous_across_recapture() -> None:
           f"...and across a moved phase origin l0 ({pa:.6f} vs {ps:.6f})")
 
 
-def test_phase_averager_is_circular() -> None:
+def test_phase_batch_is_circular() -> None:
     """The arithmetic mean of 0.01 and 6.27 rad is pi -- the opposite of both inputs, and a
     confident instruction to drive the plate half a turn the wrong way."""
-    a = PhaseAverager()
-    check(a.value() is None, "an empty averager has no value (and issues no correction)")
+    b = PhaseBatch(4)
+    check(b.take() is None, "an unfilled block has no value (and issues no correction)")
     for p in (0.01, 6.27, 0.02, 6.28):
-        a.add(p, 0.5)
-    got = abs(np.angle(np.exp(1j * a.value())))
+        b.add(p)
+    check(b.full, "four phases fill a block of four")
+    got = abs(np.angle(np.exp(1j * b.take())))
     check(got < 0.3, f"phases straddling the 2pi wrap average to {got:.3f} rad, not pi")
+    check(b.count == 0, "taking the mean CLEARS the block, so it can never be used twice")
 
-    b = PhaseAverager()
-    for _ in range(200):
-        b.add(1.234, 0.05)
-    check(abs(b.value() - 1.234) < 1e-6, "a constant phase averages to itself")
-    b.reset()
-    check(b.value() is None and b.count == 0, "reset flushes")
+    c = PhaseBatch(3)
+    for _ in range(5):
+        c.add(1.234)
+    check(c.count == 3, "a block never holds more than its size")
+    check(abs(c.take() - 1.234) < 1e-9, "a constant phase averages to itself")
+
+
+def test_block_never_straddles_a_correction() -> None:
+    """The whole point of the block: the frames behind one correction were all taken after
+    the previous one. An EWMA cannot say this -- its window has no end."""
+    b = PhaseBatch(3)
+    for p in (0.10, 0.12, 0.11):
+        b.add(p)
+    first = b.take()
+    check(abs(first - 0.11) < 0.02, f"first correction is the mean of the first three ({first:.4f})")
+    # Now the plate has moved and the phase is somewhere else entirely.
+    for p in (1.50, 1.52, 1.51):
+        b.add(p)
+    second = b.take()
+    check(abs(second - 1.51) < 0.02,
+          f"the next correction sees ONLY post-move frames ({second:.4f}), not a blend")
+
+
+def test_deadband_and_full_step() -> None:
+    """There is no gain: inside the deadband nothing moves, outside it the WHOLE error is
+    corrected in one step of -err/4."""
+    c = PhaseCorrector()
+    c.target_phase = Angle(0.0)
+    check(c.update(Angle(0.15, wrap=False)) is None,
+          "0.15 rad (8.6 deg) is inside the 10 deg deadband -- hold")
+    r = c.update(Angle(1.0, wrap=False))
+    check(r is not None, "1.0 rad is outside the deadband -- correct")
+    expected = -math.degrees(1.0) / 4.0
+    check(abs(r.angle.Deg - expected) < 1e-9,
+          f"the whole error, at once: {r.angle.Deg:.4f} deg (expected {expected:.4f})")
+
+
+def test_wrap_is_modulo_pi() -> None:
+    """The legacy wrap folds at pi, not 2*pi, so a phase pi from target reads as ZERO error.
+
+    This is restored deliberately -- see PhaseCorrector._wrap_phase_pi. The test exists so
+    that if anyone ever "fixes" it to 2*pi, they do it on purpose.
+    """
+    c = PhaseCorrector()
+    c.target_phase = Angle(0.0)
+    check(c.update(Angle(math.pi, wrap=False)) is None,
+          "exactly pi off target folds to zero error -- the loop holds there")
+    r = c.update(Angle(math.pi / 2 + 0.3, wrap=False))
+    check(r is not None and abs(r.angle.Deg) < 90.0 / 4.0,
+          "no commanded move ever exceeds a quarter of the pi fold")
+
+
+def test_capture_survives_a_drifting_phase() -> None:
+    """A capture taken while the fringes walk must still yield the right SHAPE.
+
+    The reference is the AVERAGE of the run, fit once cold. A phase drifting across the run
+    partially cancels in that average, which is why the averaged visibility is gated -- a run
+    that drifted far enough to wash the fringes out is abandoned rather than frozen.
+
+    What survives the drift is the SHAPE: the carrier, chirp and TOD come back to within 2%
+    of truth through 1.5 rad of walk, which is what the frozen template is for.
+
+    What does NOT survive is the setpoint's agreement with the present. The setpoint is the
+    phase of the averaged trace, so under a drift it sits behind the newest frame by roughly
+    half the run's walk, and the loop opens with that much error rather than zero. It closes
+    it on the first block like any other error. Both properties are asserted below, the
+    second explicitly, because it is the cost of averaging traces instead of parameters and
+    should not be discovered at the bench.
+    """
+    cfg = StabilizationConfig(params=FringeFitParams())
+    deltas = np.linspace(0.0, 1.5, cfg.capture_n)
+
+    tracker = StabilizationTracker(cfg)
+    target = None
+    for i, d in enumerate(deltas):
+        out = tracker.update(X, trace(d, seed=i))
+        if out.target_phase is not None:
+            target = out.target_phase
+
+    check(tracker.state is TrackerState.LOCKED,
+          f"a capture that drifted {deltas[-1]:.1f} rad still locks ({tracker.state.value})")
+    check(target is not None, "and it produces a setpoint")
+    tpl = tracker.template
+    assert tpl is not None
+
+    for i, name in ((1, "carrier c1"), (2, "chirp c2"), (3, "TOD c3")):
+        got, truth = float(tpl.csig[i]), float(CSIG[i])
+        rel = abs(got - truth) / abs(truth)
+        check(rel < 0.02, f"{name} recovered through the drift: {got:.4g} vs {truth:.4g} "
+                          f"({100 * rel:.1f}% off)")
+
+    # The setpoint is measured on the AVERAGED trace, so it is zero error against the
+    # reference itself -- that much is definitional, and it is what "re-zero the phase" means.
+    lam_ref = cfg.params.lambda_ref.value(Prefix.NANO)
+    avg = np.mean(np.stack([trace(d, seed=i) for i, d in enumerate(deltas)]), axis=0)
+    wl_a, avg_w = tracker._cold.window(X, avg)
+    ref = tpl.absolute_phase(fit_phase(wl_a, avg_w, tpl).delta, lam_ref)
+    check(abs(np.angle(np.exp(1j * (ref - target)))) < 0.05,
+          "the setpoint is exactly the phase of the trace the reference was fit from")
+
+    # And the known cost: against the NEWEST frame the setpoint lags by about half the walk.
+    wl, last = tracker._cold.window(X, trace(deltas[-1], seed=len(deltas) - 1))
+    now = tpl.absolute_phase(fit_phase(wl, last, tpl).delta, lam_ref)
+    err = abs(np.angle(np.exp(1j * (now - target))))
+    check(0.3 * deltas[-1] < err < 0.7 * deltas[-1],
+          f"a capture during a {deltas[-1]:.1f} rad drift opens ~half a walk off "
+          f"({err:.4f} rad), which the first block then corrects")
 
 
 TESTS = [
@@ -239,7 +353,11 @@ TESTS = [
     test_sign_flip_is_invisible_to_the_hilbert_check,
     test_align_sign_enforces_continuity,
     test_absolute_phase_is_continuous_across_recapture,
-    test_phase_averager_is_circular,
+    test_capture_survives_a_drifting_phase,
+    test_phase_batch_is_circular,
+    test_block_never_straddles_a_correction,
+    test_deadband_and_full_step,
+    test_wrap_is_modulo_pi,
 ]
 
 if __name__ == "__main__":
