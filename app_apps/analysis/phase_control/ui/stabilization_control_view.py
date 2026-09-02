@@ -5,9 +5,11 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -69,6 +71,7 @@ class StabilizationControlView(QWidget):
         fbox.addLayout(freq_row)
 
         row.addWidget(frame)
+        row.addWidget(self._build_reference_frame())
 
         # --- Apply and Config buttons ---
         self._apply_btn = QPushButton("Apply")
@@ -96,6 +99,67 @@ class StabilizationControlView(QWidget):
         self._apply_btn.clicked.connect(self._on_apply)
         self._config_btn.clicked.connect(config_dialog.open)
         vm.worker_state_changed.connect(self._on_worker_state_changed)
+        vm.template_state_changed.connect(self._template_label.setText)
+
+    # --- frozen reference -------------------------------------------------
+    def _build_reference_frame(self) -> QWidget:
+        """Capture / Save / Recall, plus a one-line state readout.
+
+        The readout is not decoration: "capturing 4/10" and "locked" are the difference
+        between a loop that is holding and one that is correcting, and the operator has no
+        other way to tell them apart from the plot.
+        """
+        frame = QFrame()
+        frame.setFrameShape(QFrame.Shape.StyledPanel)
+        frame.setFrameShadow(QFrame.Shadow.Plain)
+        box = QVBoxLayout(frame)
+        box.setContentsMargins(6, 4, 6, 4)
+        box.setSpacing(3)
+
+        self._template_label = QLabel(self._vm.template_text)
+        box.addWidget(self._template_label)
+
+        btns = QHBoxLayout()
+        btns.setSpacing(4)
+        capture = QPushButton("Capture reference")
+        capture.setToolTip("Collect the next 10 consecutively accepted traces, average "
+                           "them, and freeze the fitted shape as the phase template")
+        capture.clicked.connect(self._vm.capture_reference)
+        save = QPushButton("Save")
+        save.clicked.connect(self._on_save_reference)
+        recall = QPushButton("Recall")
+        recall.setToolTip("Load a saved template, overriding the current one")
+        recall.clicked.connect(self._on_recall_reference)
+        for b in (capture, save, recall):
+            btns.addWidget(b)
+        btns.addStretch()
+        box.addLayout(btns)
+        return frame
+
+    def _on_save_reference(self) -> None:
+        if not self._vm.has_template:
+            QMessageBox.information(self, "Save reference",
+                                    "There is no template installed to save.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save phase reference", "phase_reference.json", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            self._vm.save_reference(path)
+        except OSError as e:
+            QMessageBox.warning(self, "Save reference", f"Could not write the file: {e}")
+
+    def _on_recall_reference(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Recall phase reference", "", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            self._vm.recall_reference(path)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            QMessageBox.warning(self, "Recall reference",
+                                f"That file is not a usable phase reference: {e}")
 
     def _on_apply(self) -> None:
         self._vm.apply(self._phase_draft.commit())

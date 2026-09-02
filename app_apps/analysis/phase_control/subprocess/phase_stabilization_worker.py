@@ -1,22 +1,41 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Callable, TYPE_CHECKING
 
 import numpy as np
 
 from base_core.ipc.threaded_worker import ThreadedWorker, worker_thread
+from base_core.math.models import Angle
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
-from app_apps.analysis.phase_control.subprocess.domain.phase_tracker import PhaseTracker
 from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import PhaseCorrector
+from app_apps.analysis.phase_control.subprocess.domain.template_tracker import (
+    PhaseAverager,
+    TemplateState,
+    TemplateTracker,
+)
 from app_apps.analysis.phase_control.subprocess.messages import (
+    CaptureReference,
     CorrectionAvailable,
     ConfigSynced,
+    InvalidateTemplate,
     ProcessSpectrum,
-    SpectrumProcessed,
+    RecallReference,
     SetStabilizationConfig,
+    SpectrumProcessed,
+    TemplateStateChanged,
 )
+
+_TWO_PI = 2.0 * math.pi
+
+# The correction the loop issues in LOCKED mode drives the averaged phase error to ZERO in
+# one move, i.e. gain 1. That is not the aggressive choice it looks like: the cold loop's
+# 0.05 is per FRAME, and this fires once per correction_period_s (~30 frames) off a
+# circularly averaged error, so the noise has already been taken out of it. config.loop_gain
+# is not unused in this mode -- it is the weight in that average.
+_TEMPLATE_CORRECTION_GAIN = 1.0
 
 if TYPE_CHECKING:
     from base_core.framework.events.event_bus import EventBus
@@ -40,8 +59,12 @@ class PhaseStabilizationWorker(ThreadedWorker):
         super().__init__(WORKER_ID, bus, connector)
         self._config = config
         self._get_buffer = get_buffer
-        self._tracker: PhaseTracker | None = None
+        self._tracker: TemplateTracker | None = None
         self._corrector: PhaseCorrector | None = None
+        # LOCKED-mode loop state: the circular running mean of the per-frame phases, and when
+        # the last correction went out.
+        self._averager = PhaseAverager()
+        self._last_correction = time.perf_counter()
         self._paused = True
         self._latest_item_id = -1     # newest arrival (drop-stale coalescing)
         self._skipped_since_fit = 0   # frames coalesced away since the last real fit
@@ -55,31 +78,38 @@ class PhaseStabilizationWorker(ThreadedWorker):
     def _setup(self) -> None:
         self._unsubs.append(self._bus.subscribe(SetStabilizationConfig, self._on_set_config))
         self._unsubs.append(self._bus.subscribe(ProcessSpectrum, self._on_spectrum))
+        self._unsubs.append(self._bus.subscribe(CaptureReference, self._on_capture_reference))
+        self._unsubs.append(self._bus.subscribe(RecallReference, self._on_recall_reference))
+        self._unsubs.append(self._bus.subscribe(InvalidateTemplate, self._on_invalidate_template))
 
     def _start(self) -> None:
-        self._tracker = PhaseTracker(self._config)
-        self._corrector = PhaseCorrector()
-        self._corrector.target_phase = self._config.set_phase
-        self._corrector.gain = self._config.loop_gain
-        self._corrector.invert = self._config.invert_correction
+        self._build_tracker()
         self._latest_item_id = -1
         self._skipped_since_fit = 0
         self._paused = False
 
     def _pause(self) -> None:
         self._paused = True
+        # Flush the running phase mean: it describes a window the loop was not acting on.
+        self._averager.reset()
 
     def _resume(self) -> None:
         self._paused = False
 
     def _stop(self) -> None:
-        self._tracker = PhaseTracker(self._config)
+        self._build_tracker()
+        self._latest_item_id = -1
+        self._skipped_since_fit = 0
+
+    def _build_tracker(self) -> None:
+        self._tracker = TemplateTracker(self._config)
         self._corrector = PhaseCorrector()
         self._corrector.target_phase = self._config.set_phase
         self._corrector.gain = self._config.loop_gain
         self._corrector.invert = self._config.invert_correction
-        self._latest_item_id = -1
-        self._skipped_since_fit = 0
+        self._averager.reset()
+        self._last_correction = time.perf_counter()
+        self._publish_template_state()
 
     def _on_spectrum(self, msg: ProcessSpectrum) -> None:
         # Runs on the connector poll thread: record the newest arrival for
@@ -133,7 +163,8 @@ class PhaseStabilizationWorker(ThreadedWorker):
             skipped = self._skipped_since_fit
             self._skipped_since_fit = 0
             t_fit0 = time.perf_counter()
-            committed = self._tracker.update(wl, ins, skipped=skipped)
+            outcome = self._tracker.update(wl, ins, skipped=skipped)
+            committed = outcome.committed
             # Throughput accounting: distinguishes "spectra arrive slowly" (upstream
             # acquisition/IPC) from "fits are slow" (compute) from "nothing commits"
             # (the accept gate). Summary emitted every ~2 s.
@@ -152,21 +183,90 @@ class PhaseStabilizationWorker(ThreadedWorker):
                 self._tp_fit_ms = 0.0
             if committed:
                 self._notify(ConfigSynced(config=self._config))
-                phase = self._tracker.current_phase
-                if phase is not None:
-                    result = self._corrector.update(phase)
-                    if result is not None:
-                        self._notify(CorrectionAvailable(angle=result.angle, sign=result.sign))
+            if outcome.template_changed:
+                self._averager.reset()   # a new template redefines what the mean is OF
+                self._publish_template_state()
+            if outcome.state == TemplateState.OFF:
+                # Unchanged cold loop: correct from each committed fit, gain per frame.
+                if outcome.cold_phase is not None:
+                    self._emit_correction(Angle(outcome.cold_phase % _TWO_PI),
+                                          self._config.loop_gain)
+            elif outcome.phase_abs is not None:
+                self._accumulate(outcome.phase_abs)
         except Exception:
             log.exception("PhaseStabilizationWorker: error processing spectrum slot %d", msg.slot)
         finally:
             ack()
 
+    # ------------------------------------------------------------------ template loop --
+    def _accumulate(self, phase_abs: float) -> None:
+        """Fold one closed-form phase into the running mean, and correct when due."""
+        assert self._corrector is not None
+        self._averager.add(phase_abs, self._config.loop_gain)
+        now = time.perf_counter()
+        if now - self._last_correction < self._config.correction_period_s:
+            return
+        self._last_correction = now
+        mean = self._averager.value()
+        if mean is None:
+            return
+        n = self._averager.count
+        self._averager.reset()
+        log.info("template: correcting on the mean of %d frames, phi=%.3f rad", n, mean)
+        self._emit_correction(Angle(mean % _TWO_PI), _TEMPLATE_CORRECTION_GAIN)
+
+    def _emit_correction(self, phase: Angle, gain: float) -> None:
+        assert self._corrector is not None
+        # Set per call rather than at construction: the two modes correct at different
+        # cadences and so need different gains, and the corrector is the one place the gain
+        # is clamped before it can reach the stage.
+        self._corrector.gain = gain
+        result = self._corrector.update(phase)
+        if result is not None:
+            self._notify(CorrectionAvailable(angle=result.angle, sign=result.sign))
+
+    def _publish_template_state(self) -> None:
+        if self._tracker is None:
+            return
+        got, need = self._tracker.capture_progress
+        self._notify(TemplateStateChanged(
+            state=self._tracker.state.value, captured=got, needed=need,
+            template=self._tracker.template,
+        ))
+
+    @worker_thread
+    def _on_capture_reference(self, msg: CaptureReference) -> None:
+        if self._tracker is not None:
+            self._tracker.request_capture()
+            self._averager.reset()
+            self._publish_template_state()
+        self._reply_ok(msg)
+
+    @worker_thread
+    def _on_recall_reference(self, msg: RecallReference) -> None:
+        if self._tracker is not None and msg.template is not None:
+            self._tracker.install(msg.template)
+            self._averager.reset()
+            self._publish_template_state()
+        self._reply_ok(msg)
+
+    def _on_invalidate_template(self, msg: InvalidateTemplate) -> None:
+        # Runs on the poll thread and touches only the tracker's state flags -- deliberately
+        # NOT dispatched onto the worker thread. A commanded move must invalidate BEFORE the
+        # corrupted spectra are fit, and the worker thread may be mid-fit for hundreds of ms.
+        if self._tracker is not None and self._tracker.invalidate(msg.reason):
+            self._averager.reset()
+            self._publish_template_state()
+
     @worker_thread
     def _on_set_config(self, msg: SetStabilizationConfig) -> None:
         self._config = msg.config
+        # A config change can move lambda_ref, the window or the target, so the accumulated
+        # phases no longer describe the same quantity. The TEMPLATE survives: the shape did
+        # not change, and throwing it away would cost a 5 s re-capture on every edit.
+        self._averager.reset()
         if self._tracker is not None:
-            self._tracker = PhaseTracker(self._config)
+            self._tracker.retune(self._config)
         if self._corrector is not None:
             # Retuned in place, not reconstructed: gain is the knob the operator turns
             # WHILE watching the loop settle, and a fresh PhaseCorrector would be a

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -14,9 +15,19 @@ from base_core.math.models import Angle
 from base_core.quantities.constants import SPEED_OF_LIGHT
 from base_core.quantities.enums import Prefix
 from base_qt.app.dispatcher import QtDispatcher
-from app_apps.analysis.phase_control.events import PhaseTrackingStateChanged, StabilizationConfigChanged
+from app_apps.analysis.phase_control.events import (
+    PhaseTemplateChanged,
+    PhaseTrackingStateChanged,
+    StabilizationConfigChanged,
+)
+from app_apps.analysis.phase_control.subprocess.domain.phase_template import PhaseTemplate
 from app_apps.analysis.phase_control.subprocess.domain import fringe_core as fc
 from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import display_curve
+
+# Shown before Capture reference has ever been pressed. In that state the loop runs the
+# per-frame cold fit exactly as it always has, so the wording says what it is doing rather
+# than presenting the absence of a template as a fault.
+_TEMPLATE_OFF_TEXT = "Reference: none — per-frame fit"
 
 if TYPE_CHECKING:
     from app_apps.analysis.phase_control.phase_stabilization_handle import PhaseStabilizationHandle
@@ -27,6 +38,7 @@ class StabilizationControlViewModel(QObject):
     worker_state_changed = Signal(object)  # WorkerStatus
     config_updated = Signal()              # subprocess synced new fit params
     plot_mode_changed = Signal(bool)       # plot-in-frequency toggled
+    template_state_changed = Signal(str)   # human-readable frozen-template state
 
     def __init__(
         self,
@@ -49,6 +61,8 @@ class StabilizationControlViewModel(QObject):
         self._plot_frequency = False
         self._unsub = bus.subscribe(PhaseTrackingStateChanged, self._on_state_changed)
         self._unsub_cfg = bus.subscribe(StabilizationConfigChanged, self._on_config_updated)
+        self._unsub_tpl = bus.subscribe(PhaseTemplateChanged, self._on_template_changed)
+        self._template_text = _TEMPLATE_OFF_TEXT
 
     def set_chart(self, plot_item: pg.PlotItem) -> None:
         self._plot_item = plot_item
@@ -264,3 +278,42 @@ class StabilizationControlViewModel(QObject):
             self.config_updated.emit()
 
         self._dispatcher.post(_apply)
+
+    # ------------------------------------------------------------------ frozen template --
+    @property
+    def template_text(self) -> str:
+        return self._template_text
+
+    @property
+    def has_template(self) -> bool:
+        return self._handle.template is not None
+
+    def capture_reference(self) -> None:
+        self._handle.capture_reference()
+
+    def save_reference(self, path: str) -> bool:
+        """Write the installed template to ``path``. False if there is nothing to write."""
+        tpl = self._handle.template
+        if tpl is None:
+            return False
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(tpl.to_primitive(), fh, indent=2)
+        return True
+
+    def recall_reference(self, path: str) -> None:
+        """Load a template from ``path`` and install it, overriding the current one."""
+        with open(path, encoding="utf-8") as fh:
+            self._handle.recall_reference(PhaseTemplate.from_primitive(json.load(fh)))
+
+    def _on_template_changed(self, event: PhaseTemplateChanged) -> None:
+        if event.state == "capturing":
+            text = f"Reference: capturing {event.captured}/{event.needed} — holding"
+        elif event.state == "locked" and event.template is not None:
+            text = (f"Reference: locked — captured {event.template.captured_utc}, "
+                    f"{event.template.integration_ms:.0f} ms x{event.template.averages}")
+        elif event.state == "locked":
+            text = "Reference: locked"
+        else:
+            text = _TEMPLATE_OFF_TEXT
+        self._template_text = text
+        self._dispatcher.post(lambda: self.template_state_changed.emit(text))

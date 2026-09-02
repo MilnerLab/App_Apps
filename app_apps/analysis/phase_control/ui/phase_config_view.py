@@ -54,6 +54,9 @@ class PhaseConfigView(DirtyForm):
         "min_visibility":    FloatSpec("Abort fit below visibility", 0.0, 1.0,   decimals=3, step=0.01),
         "loop_gain":         FloatSpec("Loop gain (err/frame)", GAIN_MIN, GAIN_MAX, decimals=2, step=0.01),
         "invert_correction": BoolSpec("Invert correction sign"),
+        "correction_period_s":  FloatSpec("Correct every (s)",      1.0,  600.0,  decimals=1, step=1.0),
+        "shape_mismatch_max":   FloatSpec("Re-capture above mismatch", 0.0, 1.0,  decimals=4, step=0.001),
+        "min_amplitude_frac":   FloatSpec("Hold below amp fraction", 0.0,  1.0,   decimals=2, step=0.05),
     }
     _groups = [
         ("Fit tunables", [
@@ -64,6 +67,11 @@ class PhaseConfigView(DirtyForm):
         ]),
         ("Control loop", [
             "loop_gain", "invert_correction",
+        ]),
+        # All three are editable while running, and for the same reason min_visibility is:
+        # they can only be judged against a live trace and a running loop.
+        ("Frozen reference", [
+            "correction_period_s", "shape_mismatch_max", "min_amplitude_frac",
         ]),
     ]
     # invert_correction is deliberately NOT read-only while running either, and for a

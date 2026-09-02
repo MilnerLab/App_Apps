@@ -68,7 +68,7 @@ class PhaseTracker:
         inten_full = np.asarray(intensities, dtype=float)
         # Measure the continuum BEFORE windowing -- this is the whole point of the anchor.
         anchor = baseline_anchor(wl_full, inten_full)
-        wl, inten = self._window(wl_full, inten_full)
+        wl, inten = self.window(wl_full, inten_full)
 
         # Contrast gate, BEFORE the optimizer. A trace whose fringes have washed out (settings
         # changing, the beam moving) costs up to 47 s in the cold fit and then reports
@@ -119,8 +119,11 @@ class PhaseTracker:
                  result.msg)
         return False
 
-    def _window(self, wavelengths_nm: np.ndarray,
-                intensities: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def window(self, wavelengths_nm: np.ndarray,
+               intensities: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Cut the configured analysis window. Public because the frozen-template path needs
+        the SAME window this tracker fits in -- a template fitted on one window and phase-
+        tracked on another is two different models."""
         wl = np.asarray(wavelengths_nm, dtype=float)
         inten = np.asarray(intensities, dtype=float)
         lo = self._config.wavelength_range.min.value(Prefix.NANO)

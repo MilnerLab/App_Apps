@@ -15,6 +15,7 @@ from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import (
 from app_apps.analysis.phase_control.subprocess.domain import fringe_core as fc
 from app_apps.analysis.phase_control.subprocess.domain.fringe_visibility import MIN_VISIBILITY
 from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import LOOP_GAIN
+from app_apps.analysis.phase_control.subprocess.domain.phase_template import SHAPE_MISMATCH_MAX
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +174,25 @@ class StabilizationConfig(PrimitiveSerde):
                                         # corrector is retuned in place. If the loop locks
                                         # stably but pi away from the setpoint, this is the
                                         # knob: see PhaseCorrector.CORRECTION_SIGN.
+    # --- frozen-template tracking (see template_tracker) -------------------------------
+    correction_period_s: float = 15.0   # LOCKED mode issues ONE correction this often, from
+                                        # the circular running mean of every frame's phase.
+                                        # Not per-frame like the cold loop: the closed-form
+                                        # fit runs at the full frame rate, so correcting on
+                                        # each would put the phase noise straight into the
+                                        # stage. Averaging first is what buys the accuracy.
+    shape_mismatch_max: float = SHAPE_MISMATCH_MAX
+                                        # invalidate the template above this per-trace
+                                        # smoothed-Hilbert shape mismatch. See
+                                        # phase_template.SHAPE_MISMATCH_MAX for the sweep the
+                                        # default comes from. Tunable while running because
+                                        # the phase-invariance floor depends on the noise,
+                                        # which depends on the spectrometer settings.
+    min_amplitude_frac: float = 0.10    # hold if the closed-form fit amplitude falls below
+                                        # this fraction of the template's capture amplitude.
+                                        # The amplitude drops ~226x when the fringes wash
+                                        # out, so anything in 0.05-0.3 separates cleanly;
+                                        # this is the in-loop cousin of min_visibility.
     loop_gain: float = LOOP_GAIN        # fraction of the measured phase error corrected per
                                         # committed frame; see PhaseCorrector. Lives here and
                                         # not on FringeFitParams because it is a control-loop
@@ -225,6 +245,9 @@ class StabilizationConfig(PrimitiveSerde):
             "set_phase": self.set_phase.to_primitive(),
             "invert_correction": self.invert_correction,
             "loop_gain": self.loop_gain,
+            "correction_period_s": self.correction_period_s,
+            "shape_mismatch_max": self.shape_mismatch_max,
+            "min_amplitude_frac": self.min_amplitude_frac,
         }
 
     @classmethod
@@ -247,4 +270,8 @@ class StabilizationConfig(PrimitiveSerde):
             invert_correction=bool(v.get("invert_correction", False)),
             # Pre-tunable-gain configs have no "loop_gain" -> the calibrated default.
             loop_gain=float(v.get("loop_gain", LOOP_GAIN)),
+            # Absent in any config persisted before frozen-template tracking -> defaults.
+            correction_period_s=float(v.get("correction_period_s", 15.0)),
+            shape_mismatch_max=float(v.get("shape_mismatch_max", SHAPE_MISMATCH_MAX)),
+            min_amplitude_frac=float(v.get("min_amplitude_frac", 0.10)),
         )
