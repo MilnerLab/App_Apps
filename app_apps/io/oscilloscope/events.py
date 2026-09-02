@@ -4,18 +4,10 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
-class TraceAvailable:
-    """Published by OscilloscopeService when a new scope-trace slot is ready."""
+class OscilloscopeWorkerStateChanged:
+    """Published on every OscilloscopeWorkerHandle status transition (no payload).
 
-    slot: int
-    item_id: int
-    timestamp_ns: int
-
-
-@dataclass(frozen=True)
-class TraceAck:
-    """Published by a consumer after it finishes reading a trace slot."""
-
-    slot: int
-    item_id: int
-    consumer_id: str
+    Subscribers read ``handle.state`` for the current ``WorkerStatus``. Replaces the
+    slot-based ``TraceAvailable``/``TraceAck`` of the deleted shared-memory path (B14):
+    acquisition is now request/reply, so there are no trace slots to advertise.
+    """

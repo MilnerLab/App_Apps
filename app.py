@@ -10,20 +10,26 @@ from app_apps.app.service_config import ServiceConfig
 from app_apps.app.shell import AppShell
 from app_apps.io.spectrometer.module import SpectrometerModule
 from app_apps.io.control_readout.module import ControlReadoutModule
+from app_apps.io.oscilloscope.module import OscilloscopeModule
 from app_apps.analysis.phase_control.module import PhaseControlModule
+from app_apps.analysis.xcorr.module import AnalysisXcorrModule
 from app_apps.routines.module import RoutinesModule
 from base_core.framework.app import AppContext
 from base_core.framework.app.enums import AppStatus
 from base_core.framework.di import Container
 from base_core.framework.events import EventBus
 from base_core.framework.lifecycle.cleanup_collection import CleanupCollection
-from base_core.framework.log import setup_logging
+from base_core.framework.log import default_log_file, setup_logging
 from base_core.framework.modules import ModuleManager
 from base_qt.app.dispatcher import QtDispatcher
 
 
 def build_context() -> AppContext:
-    log = setup_logging("phase_control_lab", level=logging.INFO)
+    # Configures the *root* logger (see G10 / base_core.framework.log), so every
+    # logging.getLogger(__name__) in the codebase reaches the console and the
+    # rotating file. Device subprocesses configure their own in BaseSubprocessMain.
+    log = setup_logging("phase_control_lab", level=logging.INFO,
+                        log_file=default_log_file("app_apps"))
     lifecycle = CleanupCollection()
     bus = EventBus()
     return AppContext(
@@ -59,7 +65,9 @@ def main(argv: list[str] | None = None) -> int:
         AppModule(),
         SpectrometerModule(),
         ControlReadoutModule(),
+        OscilloscopeModule(),
         PhaseControlModule(),
+        AnalysisXcorrModule(),
         RoutinesModule(),
     ]
     mm = ModuleManager(modules)

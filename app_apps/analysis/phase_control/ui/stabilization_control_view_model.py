@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -10,12 +11,24 @@ from PySide6.QtGui import QColor, QPen
 from base_core.framework.events import EventBus
 from base_core.ipc.worker_handle import WorkerStatus
 from base_core.math.enums import AngleUnit
-from base_core.math.functions import spectrum_fit_skew
 from base_core.math.models import Angle
 from base_core.quantities.constants import SPEED_OF_LIGHT
 from base_core.quantities.enums import Prefix
 from base_qt.app.dispatcher import QtDispatcher
-from app_apps.analysis.phase_control.events import PhaseTrackingStateChanged, StabilizationConfigChanged
+from app_apps.analysis.phase_control.events import (
+    PhaseTemplateChanged,
+    PhaseTrackingStateChanged,
+    StabilizationConfigChanged,
+)
+from app_apps.analysis.phase_control.subprocess.domain.phase_template import PhaseTemplate
+from app_apps.analysis.phase_control.subprocess.domain import fringe_core as fc
+from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import display_curve
+
+# The OFF state, which now means one thing only: fast correction is selected. Slow mode
+# arms its capture the moment stabilization starts, so OFF is no longer something the
+# operator can arrive at by not having pressed a button. The wording says what the loop is
+# doing rather than presenting the absence of a template as a fault.
+_TEMPLATE_OFF_TEXT = "Fast correction — per-frame fit, no reference"
 
 if TYPE_CHECKING:
     from app_apps.analysis.phase_control.phase_stabilization_handle import PhaseStabilizationHandle
@@ -26,6 +39,7 @@ class StabilizationControlViewModel(QObject):
     worker_state_changed = Signal(object)  # WorkerStatus
     config_updated = Signal()              # subprocess synced new fit params
     plot_mode_changed = Signal(bool)       # plot-in-frequency toggled
+    template_state_changed = Signal(str)   # human-readable frozen-template state
 
     def __init__(
         self,
@@ -42,10 +56,14 @@ class StabilizationControlViewModel(QObject):
         self._plot_item: pg.PlotItem | None = None
         self._set_phase_series: pg.PlotDataItem | None = None
         self._current_phase_series: pg.PlotDataItem | None = None
+        self._rf_label: pg.TextItem | None = None
+        self._fwhm_lines: list[pg.InfiniteLine] = []
         self._active = False
         self._plot_frequency = False
         self._unsub = bus.subscribe(PhaseTrackingStateChanged, self._on_state_changed)
         self._unsub_cfg = bus.subscribe(StabilizationConfigChanged, self._on_config_updated)
+        self._unsub_tpl = bus.subscribe(PhaseTemplateChanged, self._on_template_changed)
+        self._template_text = _TEMPLATE_OFF_TEXT
 
     def set_chart(self, plot_item: pg.PlotItem) -> None:
         self._plot_item = plot_item
@@ -62,6 +80,24 @@ class StabilizationControlViewModel(QObject):
         current_phase_pen.setStyle(Qt.PenStyle.DashDotLine)
         current_phase_pen.setCosmetic(True)
         self._current_phase_series = pg.PlotDataItem(pen=current_phase_pen)
+
+        # FWHM markers -- the two wavelengths the f_cfg readout quotes its values AT.
+        # Deliberately unlike the two fit overlays (red dashed / green dash-dot): these are
+        # cyan DOTTED verticals, so the eye separates "where the band ends" from "what the
+        # fit says the fringes do". Cosmetic for the same reason the overlay pens are.
+        fwhm_pen = QPen(QColor("cyan"))
+        fwhm_pen.setStyle(Qt.PenStyle.DotLine)
+        fwhm_pen.setCosmetic(True)
+        self._fwhm_lines = [pg.InfiniteLine(angle=90, pen=fwhm_pen) for _ in range(2)]
+        for line in self._fwhm_lines:
+            line.setVisible(False)
+
+        # RF frequency-range readout. Parented to the ViewBox rather than added as a plot
+        # item so it stays pinned to the top-left corner in SCREEN coordinates: the y axis is
+        # raw counts and rescales by ~50x between a dim and a bright frame, so a label placed
+        # in data coordinates would drift off screen on the next shot.
+        self._rf_label = pg.TextItem(color=QColor("white"), anchor=(0, 0))
+        self._rf_label.setZValue(100)
 
     def set_active(self, active: bool) -> None:
         """Attach/detach the spectrum_fit overlay curves to the shared chart."""
@@ -92,6 +128,11 @@ class StabilizationControlViewModel(QObject):
             # Excluded from auto-range so the view stays driven by the live spectrum,
             # not by whatever the fit curves happen to be before a config is applied.
             self._plot_item.addItem(series, ignoreBounds=True)
+        for line in self._fwhm_lines:
+            self._plot_item.addItem(line, ignoreBounds=True)
+        if self._rf_label is not None:
+            self._rf_label.setParentItem(self._plot_item.getViewBox())
+            self._rf_label.setPos(10, 6)          # screen px inset from the top-left
 
     def _detach_curves(self) -> None:
         if self._plot_item is None:
@@ -99,6 +140,10 @@ class StabilizationControlViewModel(QObject):
         for series in (self._set_phase_series, self._current_phase_series):
             if series is not None:
                 self._plot_item.removeItem(series)
+        for line in self._fwhm_lines:
+            self._plot_item.removeItem(line)
+        if self._rf_label is not None:
+            self._rf_label.setParentItem(None)
 
     def _update_curves(self, rescale: bool = False) -> None:
         if not self._active:
@@ -107,35 +152,32 @@ class StabilizationControlViewModel(QObject):
             return
 
         p = self._config.params
+        lambda_ref = p.lambda_ref.value(Prefix.NANO)
         wl = np.linspace(
             self._config.wavelength_range.min.value(Prefix.NANO),
             self._config.wavelength_range.max.value(Prefix.NANO),
             300,
         )
-        lambda0 = p.lambda0.value(Prefix.NANO)
-        delta_lambda_fwhm = p.delta_lambda_fwhm.value(Prefix.NANO)
-        theta1_ps = p.theta1.value(Prefix.PICO)
-        theta2_ps2 = p.theta2.value(Prefix.PICO)
-
-        def curve(theta0_rad: float) -> np.ndarray:
-            return spectrum_fit_skew(wl, p.R, p.L, theta0_rad, theta1_ps, theta2_ps2,
-                                     p.alpha_R, p.epsilon_R, p.s_R,
-                                     p.alpha_L, p.epsilon_L, p.s_L,
-                                     p.offset, lambda0, delta_lambda_fwhm)
-
-        set_phase_curve = curve(self._config.set_phase.Rad)
-        current_phase_curve = curve(p.theta0.Rad)
+        # Reconstruct the committed cubic-phase fringe: current = mid+half·cos(Φ),
+        # set = same envelopes/chirp shifted so the phase at λ_ref equals set_phase.
+        mid, half, phase = display_curve(p.as_result(), wl)
+        current_phase_curve = mid + half * np.cos(phase)
+        set_shift = self._config.set_phase.Rad - p.phase_ref
+        set_phase_curve = mid + half * np.cos(phase + set_shift)
 
         if self._plot_frequency:
-            # Ω(λ) = 2π·c/λ − 2π·c/λ0, same mapping as spectrum_fit (Base_Core/base_core/math/functions.py:45-49)
+            # Ω(λ) = 2π·c/λ − 2π·c/λ_ref (same detuning mapping as before, now
+            # referenced to the fit's λ_ref instead of the old model's λ0).
             omega = 2.0 * np.pi * SPEED_OF_LIGHT / wl * 1e-3
-            omega0 = 2.0 * np.pi * SPEED_OF_LIGHT / lambda0 * 1e-3
+            omega0 = 2.0 * np.pi * SPEED_OF_LIGHT / lambda_ref * 1e-3
             x = omega - omega0
         else:
             x = wl
 
         self._set_phase_series.setData(x, set_phase_curve)
         self._current_phase_series.setData(x, current_phase_curve)
+        self._update_rf_label()
+        self._update_fwhm_lines(lambda_ref)
 
         if rescale and self._plot_item is not None:
             x_lo, x_hi = float(x.min()), float(x.max())
@@ -145,6 +187,61 @@ class StabilizationControlViewModel(QObject):
             y_pad = (y_hi - y_lo) * 0.1 or 1.0
             self._plot_item.setXRange(x_lo - x_pad, x_hi + x_pad, padding=0)
             self._plot_item.setYRange(y_lo - y_pad, y_hi + y_pad, padding=0)
+
+    def _update_fwhm_lines(self, lambda_ref_nm: float) -> None:
+        """Place the two verticals at this shot's own FWHM edges.
+
+        Same band the f_cfg readout quotes -- ``fringe_core.fwhm_band_nm`` on the committed
+        envelope -- so the operator can see WHERE the two numbers in the label are taken.
+        They are hidden, not left stale, whenever that band does not exist (un-fitted
+        config, degenerate envelope): a marker from a previous shot would be read as a
+        measurement of this one.
+
+        In frequency mode the edges go through the same detuning map as the curves, which
+        is monotonically DECREASING in wavelength, so the red edge ends up on the left. No
+        reordering is needed -- these are two independent lines, not a span.
+        """
+        if not self._fwhm_lines:
+            return
+        p = self._config.params
+        band = fc.fwhm_band_nm(p.pU) if any((p.c1, p.c2, p.c3)) else None
+        if band is None:
+            for line in self._fwhm_lines:
+                line.setVisible(False)
+            return
+        if self._plot_frequency:
+            omega0 = 2.0 * np.pi * SPEED_OF_LIGHT / lambda_ref_nm * 1e-3
+            xs = [2.0 * np.pi * SPEED_OF_LIGHT / nm * 1e-3 - omega0 for nm in band]
+        else:
+            xs = list(band)
+        for line, x in zip(self._fwhm_lines, xs):
+            line.setPos(float(x))
+            line.setVisible(True)
+
+    def _update_rf_label(self) -> None:
+        """Show f_cfg at the two edges of this shot's own measured FWHM.
+
+        The spectral fringe rate is converted through the dispersive time-mapping
+        calibration in fringe_core (9 nm ~ 310 ps, linear => 29.032 GHz per cycle/nm) and
+        halved: the centrifuge frequency is HALF the fringe beat (``CFG_PER_FRINGE``).
+
+        The band comes from the fitted envelope's FWHM rather than a fixed 802 +- 9 nm
+        window, so the readout stays inside the light that actually exists instead of
+        extrapolating the cubic ~2.5x past the spectrum. The shape_ok gate still applies --
+        the fitted core can be narrower than the FWHM -- so an unverified shape is labelled
+        rather than quoted bare. An un-fitted config (c1 = c2 = c3 = 0) or a degenerate
+        envelope shows nothing at all, rather than a "0 GHz" that would be a lie about a
+        measurement that has not happened.
+        """
+        if self._rf_label is None:
+            return
+        p = self._config.params
+        if not any((p.c1, p.c2, p.c3)):
+            self._rf_label.setText("")
+            return
+        rng = fc.cfg_range((p.c0, p.c1, p.c2, p.c3), p.l0, p.pU)
+        self._rf_label.setText(fc.format_cfg_range(rng, p.shape_ok))
+        self._rf_label.setColor(QColor("white") if p.shape_ok else QColor("orange"))
 
     @property
     def worker_state(self) -> WorkerStatus:
@@ -166,10 +263,9 @@ class StabilizationControlViewModel(QObject):
     def stop(self) -> None:
         self._handle.stop()
 
-    def apply(self, set_phase_deg: float, fit_all_params: bool) -> None:
+    def apply(self, set_phase_deg: float) -> None:
         """Commit pending values into the shared config and send to the subprocess."""
         self._config.set_phase = Angle(set_phase_deg, AngleUnit.DEG)
-        self._config.fit_all_params = fit_all_params
         self._handle.set_config(self._config)
         self._update_curves(rescale=True)
 
@@ -183,3 +279,58 @@ class StabilizationControlViewModel(QObject):
             self.config_updated.emit()
 
         self._dispatcher.post(_apply)
+
+    # ------------------------------------------------------------------ frozen template --
+    @property
+    def template_text(self) -> str:
+        return self._template_text
+
+    @property
+    def has_template(self) -> bool:
+        return self._handle.template is not None
+
+    @property
+    def slow_correction(self) -> bool:
+        return self._config.slow_correction
+
+    def set_slow_correction(self, slow: bool) -> None:
+        """Switch between the frozen-template loop and the cold per-frame one.
+
+        Pushed straight to the subprocess rather than waiting for Apply: this is a mode
+        switch, not a tuning value, and an operator reaching for Fast because the loop is
+        misbehaving wants it now.
+        """
+        if bool(slow) == self._config.slow_correction:
+            return
+        self._config.slow_correction = bool(slow)
+        self._handle.set_config(self._config)
+
+    def capture_reference(self) -> None:
+        self._handle.capture_reference()
+
+    def save_reference(self, path: str) -> bool:
+        """Write the installed template to ``path``. False if there is nothing to write."""
+        tpl = self._handle.template
+        if tpl is None:
+            return False
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(tpl.to_primitive(), fh, indent=2)
+        return True
+
+    def recall_reference(self, path: str) -> None:
+        """Load a template from ``path`` and install it, overriding the current one."""
+        with open(path, encoding="utf-8") as fh:
+            self._handle.recall_reference(PhaseTemplate.from_primitive(json.load(fh)))
+
+    def _on_template_changed(self, event: PhaseTemplateChanged) -> None:
+        if event.state == "capturing":
+            text = f"Reference: capturing {event.captured}/{event.needed} — holding"
+        elif event.state == "locked" and event.template is not None:
+            text = (f"Reference: locked — captured {event.template.captured_utc}, "
+                    f"{event.template.integration_ms:.0f} ms x{event.template.averages}")
+        elif event.state == "locked":
+            text = "Reference: locked"
+        else:
+            text = _TEMPLATE_OFF_TEXT
+        self._template_text = text
+        self._dispatcher.post(lambda: self.template_state_changed.emit(text))

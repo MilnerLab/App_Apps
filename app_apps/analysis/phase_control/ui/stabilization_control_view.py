@@ -4,11 +4,15 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
+    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
@@ -35,7 +39,6 @@ class StabilizationControlView(QWidget):
         self._vm = vm
 
         self._phase_draft: FieldDraft[float] = FieldDraft(vm.config.set_phase.Deg)
-        self._fitall_draft: FieldDraft[bool] = FieldDraft(vm.config.fit_all_params)
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
@@ -61,16 +64,6 @@ class StabilizationControlView(QWidget):
         phase_row.addWidget(self._phase_widget)
         fbox.addLayout(phase_row)
 
-        fitall_row = QHBoxLayout()
-        fitall_row.setSpacing(4)
-        self._fitall_ind = DirtyIndicator()
-        fitall_row.addWidget(self._fitall_ind)
-        self._fit_all_cb = QCheckBox("Fit all params")
-        self._fit_all_cb.setChecked(vm.config.fit_all_params)
-        fitall_row.addWidget(self._fit_all_cb)
-        fitall_row.addStretch()
-        fbox.addLayout(fitall_row)
-
         freq_row = QHBoxLayout()
         freq_row.setSpacing(4)
         self._freq_cb = QCheckBox("Plot in frequency")
@@ -80,6 +73,7 @@ class StabilizationControlView(QWidget):
         fbox.addLayout(freq_row)
 
         row.addWidget(frame)
+        row.addWidget(self._build_reference_frame())
 
         # --- Apply and Config buttons ---
         self._apply_btn = QPushButton("Apply")
@@ -99,21 +93,102 @@ class StabilizationControlView(QWidget):
             self._phase_widget,
             lambda: self._phase_draft.set(phase_spec.get_value(self._phase_widget).Deg),
         )
-        self._fit_all_cb.checkStateChanged.connect(
-            lambda state: self._fitall_draft.set(state == Qt.CheckState.Checked)
-        )
         self._freq_cb.checkStateChanged.connect(
             lambda state: self._vm.set_plot_frequency(state == Qt.CheckState.Checked)
         )
         self._phase_draft.dirty_changed.connect(self._phase_ind.set_dirty)
-        self._fitall_draft.dirty_changed.connect(self._fitall_ind.set_dirty)
 
         self._apply_btn.clicked.connect(self._on_apply)
         self._config_btn.clicked.connect(config_dialog.open)
         vm.worker_state_changed.connect(self._on_worker_state_changed)
+        vm.template_state_changed.connect(self._template_label.setText)
+
+    # --- frozen reference -------------------------------------------------
+    def _build_reference_frame(self) -> QWidget:
+        """Capture / Save / Recall, plus a one-line state readout.
+
+        The readout is not decoration: "capturing 4/10" and "locked" are the difference
+        between a loop that is holding and one that is correcting, and the operator has no
+        other way to tell them apart from the plot.
+        """
+        frame = QFrame()
+        frame.setFrameShape(QFrame.Shape.StyledPanel)
+        frame.setFrameShadow(QFrame.Shadow.Plain)
+        box = QVBoxLayout(frame)
+        box.setContentsMargins(6, 4, 6, 4)
+        box.setSpacing(3)
+
+        self._template_label = QLabel(self._vm.template_text)
+        box.addWidget(self._template_label)
+
+        # Which loop runs. Radio buttons rather than a checkbox: both options are named,
+        # so the one that is NOT selected is still readable off the panel -- and the two
+        # differ by more than a rate, so "not slow" is not a useful way to describe fast.
+        mode = QHBoxLayout()
+        mode.setSpacing(4)
+        self._slow_radio = QRadioButton("Slow")
+        self._slow_radio.setToolTip(
+            "Frozen-template loop: capture a shape, then correct once every "
+            "correction period from the averaged phase. Accurate, and the default.")
+        self._fast_radio = QRadioButton("Fast")
+        self._fast_radio.setToolTip(
+            "Cold per-frame loop: a full fit and a correction on every accepted trace. "
+            "Responsive but noisier — for pulling a badly drifted setup back into range.")
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.addButton(self._slow_radio)
+        self._mode_group.addButton(self._fast_radio)
+        (self._slow_radio if self._vm.slow_correction else self._fast_radio).setChecked(True)
+        self._slow_radio.toggled.connect(self._vm.set_slow_correction)
+        mode.addWidget(QLabel("Correction:"))
+        mode.addWidget(self._slow_radio)
+        mode.addWidget(self._fast_radio)
+        mode.addStretch()
+        box.addLayout(mode)
+
+        btns = QHBoxLayout()
+        btns.setSpacing(4)
+        capture = QPushButton("Capture reference")
+        capture.setToolTip("Collect the next 10 consecutively accepted traces, average "
+                           "them, and freeze the fitted shape as the phase template")
+        capture.clicked.connect(self._vm.capture_reference)
+        save = QPushButton("Save")
+        save.clicked.connect(self._on_save_reference)
+        recall = QPushButton("Recall")
+        recall.setToolTip("Load a saved template, overriding the current one")
+        recall.clicked.connect(self._on_recall_reference)
+        for b in (capture, save, recall):
+            btns.addWidget(b)
+        btns.addStretch()
+        box.addLayout(btns)
+        return frame
+
+    def _on_save_reference(self) -> None:
+        if not self._vm.has_template:
+            QMessageBox.information(self, "Save reference",
+                                    "There is no template installed to save.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save phase reference", "phase_reference.json", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            self._vm.save_reference(path)
+        except OSError as e:
+            QMessageBox.warning(self, "Save reference", f"Could not write the file: {e}")
+
+    def _on_recall_reference(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Recall phase reference", "", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            self._vm.recall_reference(path)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            QMessageBox.warning(self, "Recall reference",
+                                f"That file is not a usable phase reference: {e}")
 
     def _on_apply(self) -> None:
-        self._vm.apply(self._phase_draft.commit(), self._fitall_draft.commit())
+        self._vm.apply(self._phase_draft.commit())
 
     def _on_worker_state_changed(self, status: WorkerStatus) -> None:
         self._worker_ctrl.set_status(status)

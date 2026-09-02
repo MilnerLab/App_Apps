@@ -1,234 +1,244 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
-import inspect
-from typing import (
-    Any,
-    Callable,
-    ClassVar,
-    Sequence,
-    get_type_hints,
-)
-
-import lmfit
-import numpy as np
+from dataclasses import dataclass, field, fields
+from typing import Any
 
 from base_core.framework.serialization.serde import Primitive, PrimitiveSerde
-from base_core.math.functions import spectrum_fit_skew
 from base_core.math.models import Angle, Range
 from base_core.quantities.enums import Prefix
-from base_core.quantities.models import Length, Time
-from base_core.quantities.specific_models import GDD
+from base_core.quantities.models import Length
+
+from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import (
+    FitTunables,
+    FringeFitResult,
+)
+from app_apps.analysis.phase_control.subprocess.domain import fringe_core as fc
+from app_apps.analysis.phase_control.subprocess.domain.fringe_visibility import MIN_VISIBILITY
+from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import LOOP_GAIN
+from app_apps.analysis.phase_control.subprocess.domain.phase_template import SHAPE_MISMATCH_MAX
 
 
-def _first_param(func: Callable) -> str:
-    return next(iter(inspect.signature(func).parameters))
-
-
+# ---------------------------------------------------------------------------
+# Params: the cubic-phase fringe fit's tunable inputs plus its last committed
+# outputs (kept together so the chart overlay can reconstruct the fitted curve
+# without re-fitting, and so both cross the IPC boundary in one payload).
+# ---------------------------------------------------------------------------
 @dataclass
-class SpectralFitParams(PrimitiveSerde):
-    """Fit parameters for a two-arm interference spectrum with independently skewed arms.
+class FringeFitParams(PrimitiveSerde):
+    # --- tunables (user-editable inputs to fringe_fit.analyze_trace) ---
+    # The v3 analysis owns its own calibrated constants (see fringe_core); only these two
+    # are user-facing. The old folded-chirp knobs (ratio, sigma_init, phase_loss_scale,
+    # signal_loss_frac, init_smooth_div) are gone with that pipeline -- from_primitive
+    # ignores them, so configs persisted before this change still load.
+    # Defaults are IMPORTED from fringe_core, not retyped -- a hardcoded 0.40 here while the
+    # standalone had recalibrated to 0.30 is exactly what broke fit parity with a
+    # byte-identical fringe_core.py. Persisted configs still override these on load.
+    trunc_threshold: float = fc.TRUNC_THRESHOLD   # high-visibility core keep-level
+    trust_nsig: float = fc.TRUST_NSIG  # accuracy/yield trade; see FitTunables.trust_nsig.
+                                       # 3.0 = >=98% of reported fits correct, <=5% of good
+                                       # fits declined. Lower to commit more frames while
+                                       # aligning; raising past ~5 buys little accuracy and
+                                       # costs a lot of yield.
+    lambda_ref: Length = field(default_factory=lambda: Length(802.0, Prefix.NANO))
 
-    Theta(Omega) = theta0 + theta1*Omega + theta2*Omega^2
-    Shat_a(Omega) = peak-normalized skew-normal envelope, alpha=0 reduces to a Gaussian (eq:skewnorm)
-    B(Omega)      = R*Shat_{alpha_R}(Omega) + L*Shat_{alpha_L}(Omega)
-    V(Omega)      = 2*sqrt(R*L*Shat_{alpha_R}(Omega)*Shat_{alpha_L}(Omega)) / B(Omega)   (eq:V_skew)
-    I             = B(Omega) * (1 + V(Omega) * cos(Theta(Omega))) + offset
-    """
+    # --- committed fit outputs (results; drive the overlay + phase readout) ---
+    pU: list[float] = field(default_factory=lambda: [0.0, 0.0, 1.0, 0.0])   # upper env Gaussian
+    pLn: list[float] = field(default_factory=lambda: [0.0, 0.0, 1.0, 0.0])  # gap Gaussian
+    l0: float = 0.0                    # phase basis origin (nm) = core centroid
+    c0: float = 0.0                    # cubic phase coeffs in u = lambda - l0
+    c1: float = 0.0
+    c2: float = 0.0
+    c3: float = 0.0
+    phase_ref: float = 0.0             # unwrapped cubic phase at ref_wl (rad)
+    ref_wl: float = 0.0                # WHERE phase_ref was evaluated. This is NOT always
+                                       # lambda_ref: a clip near the core makes the phase at
+                                       # the spectral centre unsupportable, and the fit falls
+                                       # back to the core centroid. Read this, not lambda_ref.
+    ref_fallback: bool = False         # True => the reference moved off the spectral centre
+    shape_ok: bool = True              # the fit can support its CARRIER and CHIRP, not just
+                                       # the phase. Carried through to the UI because the GHz
+                                       # frequency-range readout extrapolates to 802+-9 nm,
+                                       # far outside the fitted core, where a poorly
+                                       # determined c2 enters as d^2. The phase lock does not
+                                       # need this and must not be gated on it.
+    rms_sig: float = 0.0               # last raw-signal fit RMS (counts)
+    rms_frac: float = 0.0              # last scale-free fit residual (rms / median half-amp)
+    inlier_pct: float = 0.0            # last core inlier fraction (%)
 
-    lambda0: Length = Length(802.38, Prefix.NANO)
-    delta_lambda_fwhm: Length = Length(7.4728, Prefix.NANO)
-    R: float = 0.25                 # R-arm (reference) amplitude
-    theta0: Angle = Angle(0.0)                    # constant phase offset [rad]
-    theta1: Time = Time(-0.3, Prefix.PICO)        # linear phase coeff [ps]  (approx -tau)
-    theta2: GDD = GDD(0.0, Prefix.PICO)           # quadratic phase coeff [ps^2]
-    alpha_R: float = 0.0            # R-arm skewness (0 = Gaussian shape)
-    epsilon_R: float = 0.0          # R-arm skew location [rad/ps]
-    s_R: float = 9.2847             # R-arm skew scale [rad/ps]
-    alpha_L: float = 0.0            # L-arm skewness (0 = Gaussian shape)
-    epsilon_L: float = 0.0          # L-arm skew location [rad/ps]
-    s_L: float = 9.2847             # L-arm skew scale [rad/ps]
-    L: float = 0.25                 # L-arm (grating) amplitude
-    offset: float = 0.0
-    residual: float = 0.0
-
-    KIND: ClassVar[str] = "skew"
-
-    # --- fitting -----------------------------------------------------------
-    def _fit_func(self) -> Callable:
-        return spectrum_fit_skew
-
-    def _apply_bounds(self, params: lmfit.Parameters) -> None:
-        params["R"].set(min=0.0)
-        params["L"].set(min=0.0)
-        params["s_R"].set(min=1e-6)
-        params["s_L"].set(min=1e-6)
-
-    def fit_full(self, wavelengths_nm: np.ndarray,
-                 intensities: np.ndarray) -> "SpectralFitParams":
-        """Multi-parameter fit. lambda0/delta_lambda_fwhm fixed; R/L/offset seeded from data."""
-        func = self._fit_func()
-        first_arg = _first_param(func)
-        model = lmfit.Model(func, independent_vars=[first_arg])
-        params = model.make_params(**self.to_fit_kwargs(func))
-        params["lambda0"].set(vary=False)
-        params["delta_lambda_fwhm"].set(vary=False)
-        # R/L together play the old A's role; split evenly with no assumed skew
-        half_pp = float((intensities.max() - intensities.min()) / 2)
-        params["R"].set(value=half_pp / 2, min=0.0)
-        params["L"].set(value=half_pp / 2, min=0.0)
-        params["alpha_R"].set(value=0.0)
-        params["epsilon_R"].set(value=0.0)
-        params["alpha_L"].set(value=0.0)
-        params["epsilon_L"].set(value=0.0)
-        params["offset"].set(value=float(intensities.min()))
-        self._apply_bounds(params)
-        result = model.fit(
-            intensities, params=params,
-            **{first_arg: wavelengths_nm}, max_nfev=1_000_000,
+    # --- convenience ---
+    def tunables(self) -> FitTunables:
+        return FitTunables(
+            trunc_threshold=self.trunc_threshold,
+            trust_nsig=self.trust_nsig,
         )
-        return type(self).from_fit_result(self, result)
 
-    def fit_phase_only(self, wavelengths_nm: np.ndarray,
-                       intensities: np.ndarray) -> "SpectralFitParams":
-        """Phase-only fit — all parameters fixed except theta0."""
-        func = self._fit_func()
-        first_arg = _first_param(func)
-        model = lmfit.Model(func, independent_vars=[first_arg])
-        params = model.make_params(**self.to_fit_kwargs(func))
-        for name, par in params.items():
-            par.vary = (name == "theta0")
-        result = model.fit(intensities, params=params, **{first_arg: wavelengths_nm})
-        return type(self).from_fit_result(self, result)
+    def commit(self, r: FringeFitResult, phase_ref: float) -> None:
+        """Store an accepted fit's outputs for the overlay + readout."""
+        self.pU = [float(v) for v in r.pU]
+        self.pLn = [float(v) for v in r.pLn]
+        self.l0 = float(r.l0)
+        self.c0, self.c1, self.c2, self.c3 = (float(v) for v in r.csig)
+        self.phase_ref = float(phase_ref)
+        self.ref_wl = float(r.ref_wl)
+        self.ref_fallback = bool(r.ref_fallback)
+        self.shape_ok = bool(r.shape_ok)
+        self.rms_sig = float(r.rms_sig)
+        self.rms_frac = float(r.rms_frac)
+        self.inlier_pct = float(r.inlier_pct)
 
-    # --- (un)packing for lmfit --------------------------------------------
-    def to_fit_kwargs(self, func: Callable[..., Any]) -> dict[str, float]:
-        sig = inspect.signature(func)
-        param_names = list(sig.parameters.keys())[1:]
-        kwargs: dict[str, float] = {}
-        type_hints = get_type_hints(type(self))
-        for name in param_names:
-            val = getattr(self, name)
-            field_type = type_hints.get(name, type(val))
-            conv = type(self)._to_float_conv(field_type)
-            kwargs[name] = conv(val)
-        return kwargs
+    def as_result(self) -> FringeFitResult:
+        """Wrap the committed outputs as a FringeFitResult so the chart overlay
+        can reuse ``fringe_fit.display_curve``."""
+        return FringeFitResult(
+            accepted=True,
+            pU=(self.pU[0], self.pU[1], self.pU[2], self.pU[3]),
+            pLn=(self.pLn[0], self.pLn[1], self.pLn[2], self.pLn[3]),
+            l0=self.l0,
+            csig=(self.c0, self.c1, self.c2, self.c3),
+            phase_ref=self.phase_ref,
+            rms_sig=self.rms_sig,
+            rms_frac=self.rms_frac,
+            inlier_pct=self.inlier_pct,
+            has_null=False,
+            ref_wl=self.ref_wl,
+            ref_fallback=self.ref_fallback,
+            shape_ok=self.shape_ok,
+        )
 
-    @classmethod
-    def from_fit_result(cls, base: "SpectralFitParams",
-                        result: lmfit.model.ModelResult) -> "SpectralFitParams":
-        best = result.best_values
-        type_hints: dict[str, type[Any]] = get_type_hints(cls)
-        kwargs: dict[str, Any] = {}
-        for f in fields(cls):
-            name = f.name
-            if name in best:
-                field_type = type_hints.get(name, float)
-                conv = cls._from_float_conv(field_type)
-                kwargs[name] = conv(best[name])
-            elif name == "residual":
-                kwargs[name] = float(np.sum(result.residual ** 2))
-            else:
-                kwargs[name] = getattr(base, name)
-        return cls(**kwargs)
-
-    @classmethod
-    def mean(cls, items: Sequence["SpectralFitParams"]) -> "SpectralFitParams":
-        if not items:
-            raise ValueError("At least one SpectralFitParams is required.")
-        type_hints = get_type_hints(cls)
-        kwargs: dict[str, Any] = {}
-        for f in fields(cls):
-            name = f.name
-            values = [getattr(p, name) for p in items]
-            field_type = type_hints.get(name, type(values[0]))
-            to_float = cls._to_float_conv(field_type)
-            from_float = cls._from_float_conv(field_type)
-            if field_type in cls._TO_FLOAT:
-                nums = [to_float(v) for v in values]
-                kwargs[name] = from_float(sum(nums) / len(nums))
-            else:
-                kwargs[name] = values[0]
-        return cls(**kwargs)
-
-    def copy_from(self, other: "SpectralFitParams") -> None:
+    def copy_from(self, other: "FringeFitParams") -> None:
         for f in fields(self):
             setattr(self, f.name, getattr(other, f.name))
 
-    # --- serialization ----------------------------------------------------
+    # --- serialization ---
     def to_primitive(self) -> Primitive:
-        out: dict[str, Any] = {"kind": self.KIND}
+        out: dict[str, Any] = {}
         for f in fields(self):
             val = getattr(self, f.name)
-            out[f.name] = val.to_primitive() if isinstance(val, (Length, Angle, Time, GDD)) else val
+            out[f.name] = val.to_primitive() if isinstance(val, Length) else val
         return out
 
     @classmethod
-    def from_primitive(cls, v: Primitive) -> "SpectralFitParams":
-        type_hints = get_type_hints(cls)
+    def from_primitive(cls, v: Primitive) -> "FringeFitParams":
+        # Only fields this class still declares are read, so a config persisted before the
+        # v3 port -- which carries the dead folded-chirp knobs (ratio, sigma_init,
+        # phase_loss_scale, signal_loss_frac, init_smooth_div) -- loads cleanly and simply
+        # ignores them. Missing new fields (trust_nsig, ref_wl) fall back to the defaults.
         kwargs: dict[str, Any] = {}
         for f in fields(cls):
             if f.name not in v:
                 continue
-            ft = type_hints.get(f.name, float)
-            if ft is Length:
+            if f.name == "lambda_ref":
                 kwargs[f.name] = Length.from_primitive(v[f.name])
-            elif ft is Angle:
-                kwargs[f.name] = Angle.from_primitive(v[f.name])
-            elif ft is Time:
-                kwargs[f.name] = Time.from_primitive(v[f.name])
-            elif ft is GDD:
-                kwargs[f.name] = GDD.from_primitive(v[f.name])
-            elif ft in (float, int):
-                kwargs[f.name] = ft(v[f.name])
+            elif f.name in ("pU", "pLn"):
+                kwargs[f.name] = [float(x) for x in v[f.name]]
+            elif f.name in ("ref_fallback", "shape_ok"):
+                kwargs[f.name] = bool(v[f.name])
             else:
-                kwargs[f.name] = v[f.name]
+                kwargs[f.name] = float(v[f.name])
         return cls(**kwargs)
-
-    # --- type conversions -------------------------------------------------
-    _TO_FLOAT: ClassVar[dict[type[Any], Callable[[Any], float]]] = {
-        Length: lambda l: float(l.value(Prefix.NANO)),
-        Angle: lambda a: float(a.Rad),
-        Time: lambda t: float(t.value(Prefix.PICO)),
-        GDD: lambda g: float(g.value(Prefix.PICO)),
-        float: float,
-    }
-    _FROM_FLOAT: ClassVar[dict[type[Any], Callable[[float], Any]]] = {
-        Length: lambda v: Length(float(v), Prefix.NANO),
-        Angle: lambda v: Angle(float(v)),
-        Time: lambda v: Time(float(v), Prefix.PICO),
-        GDD: lambda v: GDD(float(v), Prefix.PICO),
-        float: float,
-    }
-
-    @classmethod
-    def _to_float_conv(cls, field_type: type[Any]) -> Callable[[Any], float]:
-        return cls._TO_FLOAT.get(field_type, lambda v: v)
-
-    @classmethod
-    def _from_float_conv(cls, field_type: type[Any]) -> Callable[[float], Any]:
-        return cls._FROM_FLOAT.get(field_type, lambda v: v)
 
 
 # ---------------------------------------------------------------------------
-# Config: holds run/config-level state, decides full vs phase-only fitting.
+# Config: run-level state — the analysis window, the per-shot acceptance gate,
+# and the target phase.
 # ---------------------------------------------------------------------------
 @dataclass
 class StabilizationConfig(PrimitiveSerde):
-    params: SpectralFitParams
-    wavelength_range: Range[Length] = Range(
-        Length(796, Prefix.NANO), Length(810, Prefix.NANO)
-    )
-    residuals_threshold: float = 15
-    avg_spectra: int = 10
-    fit_all_params: bool = True
-    set_phase: Angle = Angle(0)
+    params: FringeFitParams
+    wavelength_range: Range[Length] = field(default_factory=lambda: Range(
+        Length(790, Prefix.NANO), Length(814, Prefix.NANO)
+    ))
+    rms_frac_threshold: float = 0.30    # accept if scale-free fit residual below this
+                                        # (rms / median half-amp). Replaces the old absolute
+                                        # rms_threshold (counts), which rejected bright traces:
+                                        # a good fit's rms scales with fringe amplitude, so an
+                                        # absolute count gate tuned on dim traces (good ~1 ct)
+                                        # rejected bright ones (good ~10 ct). 0.30 is permissive;
+                                        # tighten from the logged rms_frac (good live fits ~0.1).
+    inlier_threshold: float = 80.0      # accept if folded-phase inliers above this (%)
+    min_visibility: float = MIN_VISIBILITY
+                                        # abort the fit ENTIRELY below this fringe-contrast
+                                        # index (fringe_visibility, ~1.9 ms, no optimizer).
+                                        # This is not a quality gate like the two above --
+                                        # those judge a fit that already ran. A washed-out
+                                        # trace costs 47 s in the optimizer and then returns
+                                        # status="ok" with a phase fit to noise, so it has to
+                                        # be caught BEFORE the fit, not after. Editable while
+                                        # running: it can only be tuned against a live trace.
+    set_phase: Angle = field(default_factory=lambda: Angle(0))
+    invert_correction: bool = False     # flip the HWP rotation direction. NOT a tuning knob:
+                                        # the sense of the correction depends on the QUARTER
+                                        # wave plate's orientation, so the same measured error
+                                        # calls for opposite rotations on two setups that are
+                                        # otherwise identical. Safe to change mid-run -- the
+                                        # corrector is retuned in place. If the loop locks
+                                        # stably but pi away from the setpoint, this is the
+                                        # knob: see PhaseCorrector.CORRECTION_SIGN.
+    # --- frozen-template tracking (see template_tracker) -------------------------------
+    slow_correction: bool = True        # WHICH loop runs. True is the frozen-template loop:
+                                        # capture a shape, then issue ONE correction every
+                                        # correction_period_s from the circular mean of every
+                                        # frame in between. False is the cold per-frame loop
+                                        # that predates the template -- a full fit and a
+                                        # correction on every committed trace.
+                                        #
+                                        # Slow is the default because it is the accurate one:
+                                        # averaging first is what keeps the phase noise out of
+                                        # the stage. Fast exists for getting a badly drifted
+                                        # setup back into range, where responding now matters
+                                        # more than responding precisely, and for the case
+                                        # where the shape will not hold still long enough for
+                                        # a template to survive.
+    correction_period_s: float = 15.0   # LOCKED mode issues ONE correction this often, from
+                                        # the circular running mean of every frame's phase.
+                                        # Not per-frame like the cold loop: the closed-form
+                                        # fit runs at the full frame rate, so correcting on
+                                        # each would put the phase noise straight into the
+                                        # stage. Averaging first is what buys the accuracy.
+    shape_mismatch_max: float = SHAPE_MISMATCH_MAX
+                                        # invalidate the template above this per-trace
+                                        # smoothed-Hilbert shape mismatch. See
+                                        # phase_template.SHAPE_MISMATCH_MAX for the sweep the
+                                        # default comes from. Tunable while running because
+                                        # the phase-invariance floor depends on the noise,
+                                        # which depends on the spectrometer settings.
+    min_amplitude_frac: float = 0.10    # hold if the closed-form fit amplitude falls below
+                                        # this fraction of the template's capture amplitude.
+                                        # The amplitude drops ~226x when the fringes wash
+                                        # out, so anything in 0.05-0.3 separates cleanly;
+                                        # this is the in-loop cousin of min_visibility.
+    loop_gain: float = LOOP_GAIN        # fraction of the measured phase error corrected per
+                                        # committed frame; see PhaseCorrector. Lives here and
+                                        # not on FringeFitParams because it is a control-loop
+                                        # property, not a fit property -- the fit is identical
+                                        # whatever this is set to.
 
-    def fit(self, wavelengths_nm: np.ndarray,
-            intensities: np.ndarray) -> SpectralFitParams:
-        if self.fit_all_params:
-            return self.params.fit_full(wavelengths_nm, intensities)
-        return self.params.fit_phase_only(wavelengths_nm, intensities)
+    def accepts(self, r: FringeFitResult) -> bool:
+        """Per-shot quality gate.
+
+        `trust_ok` is the important one and it is NOT redundant with the residual gates: a
+        clipped trace costs lever arm and the phase at the reference goes genuinely
+        underdetermined while the fit still reconstructs at R^2 ~ 0.96. The residual cannot
+        see that -- only the propagated covariance can. Without this clause the app would
+        commit confident-looking phases it has no basis for, which is exactly the failure
+        mode the trust gate exists to stop. Tune it via params.trust_nsig, not by removing it.
+
+        `trust_ok` now covers the PHASE ONLY (c0 at ref_wl). That is deliberate and it is the
+        whole fix for the over-rejection: the loop corrects phase at one wavelength and never
+        reads the carrier or chirp, so gating on those threw away frames for an error it does
+        not act on. Measured over 1240 harness traces, 11 of the 13 fits that fail a
+        four-coefficient grader have a CORRECT phase. Phase-only accuracy of committed fits is
+        99.84% with 0.0% of good fits declined, against 3.7% declined under the fused gate.
+
+        `shape_ok` (c1..c3) is therefore NOT checked here. It exists for consumers that
+        evaluate the fit away from ref_wl -- the chart overlay and the GHz frequency-range
+        readout -- and those must check it themselves. Folding it back in here would
+        reintroduce exactly the rejections this change removed.
+        """
+        return (r.accepted
+                and r.trust_ok
+                and r.rms_frac < self.rms_frac_threshold
+                and r.inlier_pct > self.inlier_threshold)
 
     def copy_from(self, other: "StabilizationConfig") -> None:
         self.params.copy_from(other.params)
@@ -243,23 +253,41 @@ class StabilizationConfig(PrimitiveSerde):
                 "min": self.wavelength_range.min.to_primitive(),
                 "max": self.wavelength_range.max.to_primitive(),
             },
-            "residuals_threshold": self.residuals_threshold,
-            "avg_spectra": self.avg_spectra,
-            "fit_all_params": self.fit_all_params,
+            "rms_frac_threshold": self.rms_frac_threshold,
+            "inlier_threshold": self.inlier_threshold,
+            "min_visibility": self.min_visibility,
             "set_phase": self.set_phase.to_primitive(),
+            "invert_correction": self.invert_correction,
+            "loop_gain": self.loop_gain,
+            "slow_correction": self.slow_correction,
+            "correction_period_s": self.correction_period_s,
+            "shape_mismatch_max": self.shape_mismatch_max,
+            "min_amplitude_frac": self.min_amplitude_frac,
         }
 
     @classmethod
     def from_primitive(cls, v: Primitive) -> "StabilizationConfig":
         wl_range = v["wavelength_range"]
         return cls(
-            params=SpectralFitParams.from_primitive(v["params"]),
+            params=FringeFitParams.from_primitive(v["params"]),
             wavelength_range=Range(
                 Length.from_primitive(wl_range["min"]),
                 Length.from_primitive(wl_range["max"]),
             ),
-            residuals_threshold=float(v["residuals_threshold"]),
-            avg_spectra=int(v["avg_spectra"]),
-            fit_all_params=bool(v["fit_all_params"]),
+            # Backward-compat: a config persisted before the gate switch has
+            # "rms_threshold" (counts) and no "rms_frac_threshold" -> use the default.
+            rms_frac_threshold=float(v.get("rms_frac_threshold", 0.30)),
+            inlier_threshold=float(v["inlier_threshold"]),
+            # Absent in a config persisted before the gate existed -> the calibrated default.
+            min_visibility=float(v.get("min_visibility", MIN_VISIBILITY)),
             set_phase=Angle.from_primitive(v["set_phase"]),
+            # Configs persisted before the toggle existed ran the baseline sign -> False.
+            invert_correction=bool(v.get("invert_correction", False)),
+            # Pre-tunable-gain configs have no "loop_gain" -> the calibrated default.
+            loop_gain=float(v.get("loop_gain", LOOP_GAIN)),
+            # Absent in any config persisted before frozen-template tracking -> defaults.
+            slow_correction=bool(v.get("slow_correction", True)),
+            correction_period_s=float(v.get("correction_period_s", 15.0)),
+            shape_mismatch_max=float(v.get("shape_mismatch_max", SHAPE_MISMATCH_MAX)),
+            min_amplitude_frac=float(v.get("min_amplitude_frac", 0.10)),
         )

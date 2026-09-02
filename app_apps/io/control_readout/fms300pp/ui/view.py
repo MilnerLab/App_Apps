@@ -3,18 +3,16 @@ from __future__ import annotations
 from PySide6.QtWidgets import QWidget
 
 from base_qt.ui.panel_view import PanelView
-from base_qt.ui.worker_control_widget import WorkerControlWidget
 
+from app_apps.io.control_readout.ui.motion_controls import MotionControls
 from app_apps.io.control_readout.fms300pp.ui.view_model import Fms300ppViewModel
 
 
 class Fms300ppView(PanelView):
-    def __init__(self, vm: Fms300ppViewModel, parent: QWidget) -> None:
-        super().__init__("FMS300PP Stage", parent, vm=vm)
-        self._vm = vm
+    """The floating Devices-menu popout. The panel embeds the same ``MotionControls``
+    block directly, so there is one implementation of the controls, not two."""
 
-        ctrl = WorkerControlWidget(vm.start, vm.pause, vm.resume, vm.stop, parent=self)
-        ctrl.set_status(vm.worker_status)
-        vm.worker_state_changed.connect(ctrl.set_status)
-        self.header_layout.addWidget(ctrl)
-        self.header_widget.setVisible(True)
+    def __init__(self, vm: Fms300ppViewModel, parent: QWidget) -> None:
+        super().__init__("FMS300PP Stage (probe)", parent, vm=vm)
+        self._vm = vm
+        self.body_layout.addWidget(MotionControls("FMS300PP Stage (probe)", vm, self))

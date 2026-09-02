@@ -515,3 +515,6 @@ out/
 
 # End of https://www.gitignore.io/api/linux,visualstudiocode,latex
 App_Apps_adm.code-workspace
+
+# XCORR run output (settings.py out_dir default = cwd/xcorr_runs); regenerated per run
+xcorr_runs/

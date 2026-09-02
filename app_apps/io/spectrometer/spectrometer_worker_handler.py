@@ -48,6 +48,12 @@ class SpectrometerWorkerHandle(WriterWorkerHandle[SpectrumBuffer, SpectrumAvaila
         self._config = config
 
     @property
+    def config(self) -> SpectrometerConfig:
+        """The settings in force. Read-only access for consumers that need to know the
+        integration time — the XCORR spectrum recorder derives its motion gate from it."""
+        return self._config
+
+    @property
     def buffer(self) -> SpectrumBuffer:
         assert self._writer_buffer is not None, "buffer not yet created (service not started)"
         return self._writer_buffer
