@@ -104,6 +104,17 @@ class MotionViewModel(PanelViewModel):
             return
         self._handle.get_position()
 
+    def _forget_position(self) -> None:
+        """Declare the position unknown again, and say so on the readout.
+
+        For the case where the device moves without telling us where to -- the RGV's
+        free-running spin. Keeping the last known angle there would be worse than a blank:
+        a relative move would be synthesised from a number that is now stale by however
+        many revolutions have gone by.
+        """
+        self._position = None
+        self.position_changed.emit(None)
+
     def move_absolute(self, position: float) -> None:
         if not self._allow_move(f"move to {position:.{self.decimals}f} {self.units}"):
             return

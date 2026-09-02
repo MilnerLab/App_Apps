@@ -22,3 +22,20 @@ class NewRGVAngle:
 class RgvWorkerStateChanged:
     pass
 
+
+@dataclass(frozen=True)
+class RequestSpinRGV:
+    """Ask for continuous rotation at ``velocity_deg_s``. Sign sets the direction."""
+    velocity_deg_s: float
+
+
+@dataclass(frozen=True)
+class RequestStopSpinRGV:
+    pass
+
+
+@dataclass(frozen=True)
+class RgvSpinStateChanged:
+    """Published whenever the plate starts, changes rate or stops free-running."""
+    spinning: bool
+    velocity_deg_s: float
