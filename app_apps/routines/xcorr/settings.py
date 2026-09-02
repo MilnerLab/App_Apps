@@ -35,35 +35,38 @@ class XcorrSettings:
     # is the *finest* step and low-frequency setpoints are sampled coarsely (up to the
     # 1.0 mm cap).
     probe_start_mm: float = 0.0
-    probe_stop_mm: float = 125.0
-    probe_step_mm: float = 0.2
-    probe_intercept_mm: float = 110.0
+    probe_stop_mm: float = 120.0
+    probe_step_mm: float = 0.15
+    probe_intercept_mm: float = 96.0
 
     # --- grating (axis 3) — chirp difference, mm -----------------------------
-    grating_start_mm: float = -30.0
-    grating_stop_mm: float = -20.0
+    grating_start_mm: float = 15.0
+    grating_stop_mm: float = -75.0
     grating_step_mm: float = 10.0
 
     # --- delay (axis 2) — central frequency, BASE range in mm ----------------
-    delay_base_start_mm: float = 18.0
-    delay_base_stop_mm: float = 19.0
+    delay_base_start_mm: float = 0.0
+    delay_base_stop_mm: float = 0.0
     delay_base_step_mm: float = 1.0
-    delay_slope: float = 0.0
-    delay_intercept_mm: float = 0.0
+    delay_slope: float = -0.004857142857142858
+    delay_intercept_mm: float = 18.585714285714285
 
     # --- adaptive probe step (Nyquist-matched) -------------------------------
     adaptive_probe_step: bool = True
-    probe_oversample: float = 2.0
+    probe_oversample: float = 4.0
     probe_step_max_mm: float = 1.0
 
     # --- acquisition ---------------------------------------------------------
-    n_traces: int = 10
+    n_traces: int = 3
     settle_s: float = 0.0
     timeout_s: float = 130.0
     channel: int = 1
     mock_scope: bool = False
 
     #: Not a form field (no Path widget) — the run directory the writer lands in.
+    #: Folded into the run filename; blank gives the plain timestamped name.
+    run_name: str = "scan_L_1"
+
     out_dir: Path = field(default_factory=lambda: Path.cwd() / "xcorr_runs")
 
     def to_config(self) -> XcorrConfig:
@@ -90,4 +93,5 @@ class XcorrSettings:
             channel=self.channel,
             mock_scope=self.mock_scope,
             out_dir=self.out_dir,
+            run_name=self.run_name,
         )

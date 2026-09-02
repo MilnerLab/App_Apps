@@ -45,6 +45,7 @@ from app_apps.routines.xcorr.events import (
     XcorrGroupWritten,
     XcorrProgress,
     XcorrScanStarted,
+    XcorrSteppingHold,
 )
 from app_apps.routines.xcorr.planner import PlanError, ScanPlan, Setpoint, plan_scan
 from app_apps.routines.xcorr.spectrum_recorder import XcorrSpectrumRecorder, integration_span_ns
@@ -118,6 +119,13 @@ class XcorrRoutine(BaseRoutine):
         # set so a fresh run is never born paused.
         self._resume = threading.Event()
         self._resume.set()
+        # Step mode: the operator advances the run one grating setpoint at a time, so a
+        # mirror can be tweaked at each one. The Event is the MODE; the Semaphore is the
+        # queue of presses. Two objects rather than one because they answer different
+        # questions -- "are we stepping?" and "how many advances are owed?" -- and a
+        # press made before the routine reaches the gate must not be lost.
+        self._step_mode = threading.Event()
+        self._step_permits = threading.Semaphore(0)
         self._running = threading.Event()
         self._run_path: Path | None = None
         super().__init__(bus)
@@ -143,6 +151,11 @@ class XcorrRoutine(BaseRoutine):
             log.warning("XcorrRoutine.start_scan() ignored — a run is already in progress")
             return
         self._abort.clear()
+        # Drain permits left over from a previous run. A press that arrived after the
+        # last setpoint would otherwise be spent silently on the first gate of this one,
+        # advancing past a position the operator never looked at.
+        while self._step_permits.acquire(blocking=False):
+            pass
         self._run_scan()
 
     def abort(self) -> None:
@@ -178,6 +191,98 @@ class XcorrRoutine(BaseRoutine):
         if not self._resume.is_set():
             log.info("XcorrRoutine: resuming scan")
         self._resume.set()
+
+    @property
+    def is_step_mode(self) -> bool:
+        return self._step_mode.is_set()
+
+    def set_step_mode(self, enabled: bool) -> None:
+        """Turn operator-advanced stepping between grating setpoints on or off.
+
+        Takes effect at the next setpoint, so an in-progress probe sweep always
+        finishes — arming this mid-sweep never strands a half-written group. Turning it
+        *off* frees a routine already parked at the gate within one poll interval, so it
+        runs on without waiting for a press it no longer needs.
+        """
+        if enabled == self._step_mode.is_set():
+            return
+        if enabled:
+            log.info("XcorrRoutine: step mode ON — each grating position waits for step()")
+            self._step_mode.set()
+            return
+        log.info("XcorrRoutine: step mode OFF — free running")
+        self._step_mode.clear()
+
+    def step(self, n: int = 1) -> None:
+        """Permit ``n`` more setpoints (grating positions). No-op unless running.
+
+        Safe to call ahead of the routine reaching the gate: permits accumulate, so
+        the count is what the operator pressed, not what happened to be timed right.
+        """
+        if not self._running.is_set():
+            return
+        for _ in range(max(1, n)):
+            self._step_permits.release()
+
+    def _hold_for_alignment(self, si: int, sp: Setpoint, n_setpoints: int) -> None:
+        """Park the probe mid-sweep and wait for the operator (step mode only).
+
+        The probe is driven to the **centre of this setpoint's commanded sweep** before
+        the hold. That is where the correlation peak sits — the coarse trial put it at
+        50-53% of the window at both grating extremes — so it is the position at which
+        maximising the signal is meaningful. Parking anywhere else (in particular the
+        sweep's start, where the stage happens to be) would have the operator optimising
+        on the baseline tail, which is exactly the mistake this gate exists to prevent.
+
+        The sweep then starts from its true beginning; the mid-point park costs one
+        extra probe move per setpoint and nothing else.
+        """
+        if not self._step_mode.is_set():
+            return
+        probe_cmd = sp.probe_base_mm[len(sp.probe_base_mm) // 2] + sp.probe_offset_mm
+        log.info(
+            "XCORR setpoint %d/%d: parking probe at %.4f mm (sweep centre) for alignment",
+            si + 1, n_setpoints, probe_cmd,
+        )
+        self._move(self._probe, probe_cmd, "probe")
+        # Published only once the stages have settled, so a subscriber that starts
+        # streaming here is never looking at an optic in flight.
+        self._bus.publish(XcorrSteppingHold(
+            holding=True,
+            setpoint_index=si,
+            n_setpoints=n_setpoints,
+            grating_mm=sp.grating_mm,
+            delay_mm=sp.delay_mm,
+            probe_mm=probe_cmd,
+        ))
+        try:
+            self._wait_for_step(si, n_setpoints, sp.grating_mm)
+        finally:
+            # In a finally so an abort raised at the gate still tells the display to
+            # stop; a viewer left believing it is still holding keeps polling forever.
+            self._bus.publish(XcorrSteppingHold(
+                holding=False, setpoint_index=si, n_setpoints=n_setpoints))
+
+    def _wait_for_step(self, si: int, n_setpoints: int, grating_mm: float) -> None:
+        """Block between setpoints until a step permit arrives (step mode only).
+
+        Same shape as :meth:`_wait_while_paused`: the spectrum gate is shut for the
+        duration so an operator who spends ten minutes on a mirror does not bury the
+        run under spectra with nothing to attribute them to, and the wait polls so an
+        abort raised while parked is noticed. Consumes exactly one permit per setpoint.
+        """
+        if not self._step_mode.is_set():
+            return
+        log.info(
+            "XCORR holding at setpoint %d/%d (grating %.4f mm) — waiting for step()",
+            si + 1, n_setpoints, grating_mm,
+        )
+        self._gate_close()
+        while not self._step_permits.acquire(timeout=_START_POLL_S):
+            if self._abort.is_set():
+                return
+            if not self._step_mode.is_set():
+                return
 
     def _wait_while_paused(self) -> None:
         """Block the routine thread while paused, staying responsive to abort.
@@ -250,7 +355,7 @@ class XcorrRoutine(BaseRoutine):
 
             self._start_handles()
 
-            self._run_path = default_run_path(self._cfg.out_dir)
+            self._run_path = default_run_path(self._cfg.out_dir, run_name=self._cfg.run_name)
             with XcorrH5Writer(self._run_path) as writer:
                 writer.write_config(self._cfg, plan)
                 writer.write_provenance("esp301", self._esp301_provenance())
@@ -305,6 +410,14 @@ class XcorrRoutine(BaseRoutine):
             # grating position, so this is the order that makes the pair consistent.
             self._move(self._grating, sp.grating_mm, "grating")
             self._move(self._delay, sp.delay_mm, "delay")
+
+            # Blocks here in step mode until the operator releases this setpoint. A no-op
+            # otherwise, so the free-running scan is unchanged.
+            self._hold_for_alignment(si, sp, len(plan.setpoints))
+            if self._abort.is_set():
+                log.info("XCORR aborted while stepping at setpoint %d/%d",
+                         si + 1, len(plan.setpoints))
+                break
 
             rows, aborted = self._sweep_probe(plan, si, sp, points_done, n_points)
             points_done += len(rows)
@@ -556,9 +669,12 @@ class XcorrRoutine(BaseRoutine):
             if not self._wait_for_running(handle):
                 raise XcorrError(
                     f"{label} worker did not reach RUNNING within {_START_TIMEOUT_S:.0f}s. "
-                    f"Check the control_readout subprocess log — the ESP301 is on COM7 "
-                    f"and its connection failure is now non-fatal, so the stage may have "
-                    f"registered without a working serial link."
+                    f"For a stage: check the control_readout subprocess log — the ESP301 "
+                    f"is on COM2 and its connection failure is non-fatal, so the stage may "
+                    f"have registered without a working serial link. For the scope: a "
+                    f"wedged USBTMC link hangs VISA enumeration itself (pyvisa "
+                    f"list_resources() never returns); nothing in software clears that — "
+                    f"power-cycle the scope or replug its USB."
                 )
         log.info("XCORR: all three stage workers RUNNING")
 
@@ -653,7 +769,7 @@ class XcorrRoutine(BaseRoutine):
         reinterpretable. Extend when the query messages exist.
         """
         return {
-            "port": "COM7",
+            "port": "COM2",
             "baud": 921600,
             "axis_probe": 1,
             "axis_delay": 2,

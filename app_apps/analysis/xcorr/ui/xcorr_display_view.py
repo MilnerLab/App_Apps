@@ -23,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
@@ -40,6 +40,12 @@ from PySide6.QtWidgets import (
 )
 
 from base_qt.ui.panel import Panel
+
+#: Live-trace poll periods, ms. Fast while parked at a step gate -- the operator is
+#: turning a mirror and needs the waveform to follow their hand -- and slow otherwise,
+#: where the scope is busy with the scan and nobody is watching the trace.
+SCOPE_POLL_HOLD_MS = 100
+SCOPE_POLL_SCAN_MS = 500
 
 from app_apps.analysis.xcorr.frequency import C_MM_PER_PS, probe_mm_to_ps
 from app_apps.analysis.xcorr.ui.xcorr_display_view_model import Scan, XcorrDisplayViewModel
@@ -116,9 +122,50 @@ class XcorrDisplayView(Panel):
         self._readout = QLabel("no scans yet")
         self._readout.setTextFormat(Qt.PlainText)
 
-        self.body_layout.addWidget(self._intensity, stretch=3)
-        self.body_layout.addWidget(self._frequency, stretch=3)
-        self.body_layout.addWidget(self._readout)
+        # The live oscilloscope trace, shown beside the in-flight plots. Only useful
+        # while a run is parked at a step gate, but built always: a widget that appears
+        # and disappears reflows the whole panel underneath the operator's cursor.
+        self._scope_plot = pg.PlotWidget()
+        self._scope_plot.showGrid(x=True, y=True, alpha=0.3)
+        self._scope_plot.setLabel("left", "V")
+        self._scope_plot.setLabel("bottom", "t (µs)")
+        self._scope_plot.setMinimumHeight(150)
+        self._scope_plot.setMinimumWidth(280)
+        self._scope_curve = self._scope_plot.plot(pen=pg.mkPen("#b04a3a", width=1.5))
+        # Zero line: the reduction only counts samples above it, so where it sits is the
+        # single most useful thing on this plot while aligning.
+        self._scope_plot.addItem(pg.InfiniteLine(
+            angle=0, pos=0.0, pen=pg.mkPen("#6b7280", style=Qt.DashLine)))
+        self._scope_readout = QLabel("scope: idle")
+        self._scope_readout.setTextFormat(Qt.PlainText)
+        self._scope_readout.setWordWrap(True)
+
+        self._hold_banner = QLabel("")
+        self._hold_banner.setWordWrap(True)
+        self._hold_banner.setVisible(False)
+        self._hold_banner.setStyleSheet(
+            "background:#7a4a06; color:#ffffff; padding:6px; border-radius:4px;")
+
+        scope_col = QWidget()
+        scope_v = QVBoxLayout(scope_col)
+        scope_v.setContentsMargins(0, 0, 0, 0)
+        scope_v.addWidget(self._hold_banner)
+        scope_v.addWidget(self._scope_plot, stretch=1)
+        scope_v.addWidget(self._scope_readout)
+
+        inflight_col = QWidget()
+        inflight_v = QVBoxLayout(inflight_col)
+        inflight_v.setContentsMargins(0, 0, 0, 0)
+        inflight_v.addWidget(self._intensity, stretch=1)
+        inflight_v.addWidget(self._frequency, stretch=1)
+        inflight_v.addWidget(self._readout)
+
+        inflight_row = QWidget()
+        irow = QHBoxLayout(inflight_row)
+        irow.setContentsMargins(0, 0, 0, 0)
+        irow.addWidget(inflight_col, stretch=3)
+        irow.addWidget(scope_col, stretch=1)
+        self.body_layout.addWidget(inflight_row, stretch=6)
 
         # --- grid summary panels (R14), side by side — the panel now gets the full
         # window width (it is a tab, not squeezed next to Phase Control), so there is
@@ -154,7 +201,13 @@ class XcorrDisplayView(Panel):
         #: first one did rather than back at the default.
         self._last_import_dir: str = ""
 
+        self._scope_timer = QTimer(self)
+        self._scope_timer.timeout.connect(self.vm.request_trace)
+        self._scope_timer.start(SCOPE_POLL_SCAN_MS)
+
         self._apply_axis_labels()
+        self._connect(self.vm.trace_changed, self._redraw_trace)
+        self._connect(self.vm.hold_changed, self._render_hold)
         self._connect(self.vm.history_changed, self._refresh_nav)
         self._connect(self.vm.selection_changed, self._redraw_selection)
         self._connect(self.vm.summary_changed, self._redraw_summary)
@@ -393,6 +446,30 @@ class XcorrDisplayView(Panel):
         self._follow.setChecked(self.vm.follow_live)
         self._follow.blockSignals(False)
         self._redraw_selection()
+
+    def _redraw_trace(self, samples, dt_s: float, v_mean_pos: float, n_pos: int) -> None:
+        if samples is None or len(samples) == 0:
+            return
+        if dt_s > 0:
+            x = np.arange(len(samples)) * dt_s * 1e6
+            self._scope_plot.setLabel("bottom", "t (µs)")
+        else:
+            # The driver could not report a sample interval; index is honest, a made-up
+            # time base is not.
+            x = np.arange(len(samples), dtype=float)
+            self._scope_plot.setLabel("bottom", "sample")
+        self._scope_curve.setData(x, samples)
+        frac = n_pos / len(samples) if len(samples) else 0.0
+        self._scope_readout.setText(
+            f"v_mean_pos {v_mean_pos:.5f} V   |   Vpp {float(np.ptp(samples)):.4f} V   |   "
+            f"{n_pos}/{len(samples)} samples > 0 ({frac:.0%})"
+        )
+
+    def _render_hold(self, holding: bool, text: str) -> None:
+        self._hold_banner.setVisible(holding)
+        self._hold_banner.setText(text)
+        self._scope_timer.setInterval(
+            SCOPE_POLL_HOLD_MS if holding else SCOPE_POLL_SCAN_MS)
 
     def _apply_axis_labels(self) -> None:
         label = "Delay t (ps)" if self._time_axis else "Probe stage (mm)"

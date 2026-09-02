@@ -21,9 +21,10 @@ class AnalysisXcorrModule(BaseModule):
         from base_qt.app.dispatcher import QtDispatcher
         from app_apps.analysis.xcorr.ui.xcorr_display_view import XcorrDisplayView
         from app_apps.analysis.xcorr.ui.xcorr_display_view_model import XcorrDisplayViewModel
+        from app_apps.io.oscilloscope.oscilloscope_worker_handler import OscilloscopeWorkerHandle
 
         c.register_factory(XcorrDisplayViewModel, lambda c: XcorrDisplayViewModel(
-            ctx.event_bus, c.get(QtDispatcher),
+            ctx.event_bus, c.get(QtDispatcher), c.get(OscilloscopeWorkerHandle),
         ))
         c.register_factory(XcorrDisplayView, lambda c: XcorrDisplayView(
             c.get(XcorrDisplayViewModel), parent=None,

@@ -84,3 +84,22 @@ class XcorrFailed:
     error: str
     path: str = ""
     n_groups_written: int = 0
+
+
+@dataclass(frozen=True)
+class XcorrSteppingHold:
+    """The run has parked at a step gate and is waiting for the operator (step mode).
+
+    Published *after* the grating, delay and probe have all reached the alignment
+    position, so a subscriber that starts streaming on this event is showing a settled
+    optical configuration, never a stage in flight. ``holding=False`` is published when
+    the operator releases it, so the same subscriber can stop.
+    """
+
+    holding: bool
+    setpoint_index: int = 0
+    n_setpoints: int = 0
+    grating_mm: float = 0.0
+    delay_mm: float = 0.0
+    # Where the probe was parked for this setpoint; the alignment readout quotes it.
+    probe_mm: float = 0.0

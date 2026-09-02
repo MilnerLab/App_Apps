@@ -6,7 +6,13 @@ from base_core.framework.events.event_bus import EventBus
 from base_core.ipc.message import ErrorReply, OKReply
 from base_core.ipc.worker_handle import BaseWorkerHandle
 from oscilloscope.config import ScopeConfig
-from oscilloscope.messages import AcquirePoint, AcquirePointReply, SetScopeConfig
+from oscilloscope.messages import (
+    AcquirePoint,
+    AcquirePointReply,
+    AcquireTrace,
+    AcquireTraceReply,
+    SetScopeConfig,
+)
 
 from app_apps.io.oscilloscope.events import OscilloscopeWorkerStateChanged
 
@@ -49,6 +55,28 @@ class OscilloscopeWorkerHandle(BaseWorkerHandle):
         self._request(
             AcquirePoint(n_traces=n_traces, channel=channel, discard=discard, probe_mm=probe_mm),
             lambda reply: on_reply(list(reply.values), list(reply.counts)),
+            (lambda err: on_error(err.error)) if on_error is not None else None,
+        )
+
+    def acquire_trace(
+        self,
+        *,
+        channel: int,
+        on_reply: Callable[[list[float], float, float, int], None],
+        on_error: Callable[[str], None] | None = None,
+    ) -> None:
+        """Fetch one raw trace for live display.
+
+        ``on_reply(samples, dt_s, v_mean_pos, n_positive)``. Intended for the alignment
+        view while a run is parked at a step gate — see :class:`AcquireTrace` for why
+        this one path is allowed to carry bulk data across IPC. Callbacks run on the
+        IPC reader thread; marshal to Qt before touching a widget.
+        """
+        self._request(
+            AcquireTrace(channel=channel),
+            lambda reply: on_reply(
+                list(reply.samples), reply.dt_s, reply.v_mean_pos, reply.n_positive
+            ),
             (lambda err: on_error(err.error)) if on_error is not None else None,
         )
 

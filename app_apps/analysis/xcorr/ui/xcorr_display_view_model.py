@@ -30,13 +30,18 @@ import queue
 import threading
 from dataclasses import dataclass, field
 from functools import partial
+from typing import TYPE_CHECKING
 
 import numpy as np
 from PySide6.QtCore import QTimer, Signal
 
 from base_core.framework.events import EventBus
+from base_core.ipc.worker_handle import WorkerStatus
 from base_qt.app.dispatcher import QtDispatcher
 from base_qt.ui.panel_view_model import PanelViewModel, ui_thread
+
+if TYPE_CHECKING:
+    from app_apps.io.oscilloscope.oscilloscope_worker_handler import OscilloscopeWorkerHandle
 
 from app_apps.analysis.xcorr.frequency import (
     DEFAULT_FWHM_PS,
@@ -52,6 +57,7 @@ from app_apps.routines.xcorr.events import (
     XcorrGroupWritten,
     XcorrProgress,
     XcorrScanStarted,
+    XcorrSteppingHold,
 )
 
 log = logging.getLogger(__name__)
@@ -137,9 +143,23 @@ class XcorrDisplayViewModel(PanelViewModel):
     #: import or a window change shows progress instead of going silent. Both are 0
     #: when nothing is queued, which is the view's cue to hide the counter.
     fit_progress_changed = Signal(int, int)
+    #: One raw scope frame for the alignment view: samples, dt_s, positive-mean, n_positive.
+    trace_changed = Signal(object, float, float, int)
+    #: (holding, banner text). Emitted when a run parks at a step gate and again when it
+    #: is released, so the view starts and stops polling from one place.
+    hold_changed = Signal(bool, str)
 
-    def __init__(self, bus: EventBus, dispatcher: QtDispatcher) -> None:
+    def __init__(self, bus: EventBus, dispatcher: QtDispatcher,
+                 scope: "OscilloscopeWorkerHandle | None" = None) -> None:
         super().__init__(bus, dispatcher)
+        # Optional: the display is useful without a scope (imported runs), and the live
+        # trace is simply unavailable when there is none.
+        self._scope = scope
+        # One request in flight at a time. The timer fires faster than a marginal trigger
+        # replies, and queueing them would build a backlog of frames already stale.
+        self._trace_pending = False
+        self._holding = False
+        self._trace_channel = 1
         self._scans: list[Scan] = []
         self._by_index: dict[int, Scan] = {}
         self._selected: int = -1
@@ -186,6 +206,63 @@ class XcorrDisplayViewModel(PanelViewModel):
         self._sub(XcorrGroupWritten, self._on_group)
         self._sub(XcorrFinished, self._on_finished)
         self._sub(XcorrFailed, self._on_failed)
+        self._sub(XcorrSteppingHold, self._on_hold)
+
+    @property
+    def is_holding(self) -> bool:
+        return self._holding
+
+    def request_trace(self) -> None:
+        """Ask the worker for one frame. Called from the view's timer, on the Qt thread.
+
+        Silently does nothing when a request is already outstanding or the scope worker
+        is not RUNNING — the worker is started by the routine, so before the first scan
+        of a session there is simply nothing to read and that is not an error.
+        """
+        scope = self._scope
+        if scope is None or self._trace_pending:
+            return
+        if scope.state != WorkerStatus.RUNNING:
+            return
+        self._trace_pending = True
+        scope.acquire_trace(
+            channel=self._trace_channel,
+            on_reply=self._on_trace,
+            on_error=self._on_trace_error,
+        )
+
+    def _on_trace(self, samples: list, dt_s: float, v_mean_pos: float,
+                  n_pos: int) -> None:
+        self._post(lambda: self._emit_trace(samples, dt_s, v_mean_pos, n_pos))
+
+    def _emit_trace(self, samples: list, dt_s: float, v_mean_pos: float,
+                    n_pos: int) -> None:
+        self._trace_pending = False
+        self.trace_changed.emit(np.asarray(samples, dtype=float), dt_s, v_mean_pos, n_pos)
+
+    def _on_trace_error(self, message: str) -> None:
+        # No banner: a failed frame during alignment is common (marginal trigger) and a
+        # popup per failure would bury the operator. Just free the slot for the next tick.
+        self._post(self._clear_trace_pending)
+
+    def _clear_trace_pending(self) -> None:
+        self._trace_pending = False
+
+    def _on_hold(self, e: XcorrSteppingHold) -> None:
+        if e.holding:
+            text = (
+                f"ALIGN — setpoint {e.setpoint_index + 1}/{e.n_setpoints}, grating "
+                f"{e.grating_mm:.3f} mm, probe parked at {e.probe_mm:.3f} mm "
+                f"(sweep centre). Maximise the signal, then press Step."
+            )
+        else:
+            text = ""
+        self._post(lambda: self._apply_hold(e.holding, text))
+
+    def _apply_hold(self, holding: bool, text: str) -> None:
+        self._holding = holding
+        self.hold_changed.emit(holding, text)
+
 
     # -- read side (all called on the Qt thread) --------------------------
 

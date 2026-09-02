@@ -34,7 +34,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
 import numpy as np
 
@@ -105,12 +105,15 @@ class XcorrSpectrumRecorder:
         *,
         span_ns: int,
         provenance: dict[str, object] | None = None,
+        on_record: Callable[[SpectrumRecord], None] | None = None,
     ) -> None:
         self._bus = bus
         self._handle = handle
         self._writer = writer
         self._span_ns = int(span_ns)
         self._provenance = dict(provenance or {})
+        #: Optional tap on every accepted record, called on the IPC reader thread.
+        self._on_record = on_record
 
         self._queue: "queue.Queue[SpectrumRecord]" = queue.Queue(maxsize=_QUEUE_MAX)
         self._thread: threading.Thread | None = None
@@ -245,6 +248,8 @@ class XcorrSpectrumRecorder:
             try:
                 self._queue.put_nowait(record)
                 self._bump("n_accepted")
+                if self._on_record is not None:
+                    self._on_record(record)
             except queue.Full:
                 self._bump("n_dropped")
         except Exception:

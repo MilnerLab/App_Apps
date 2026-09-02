@@ -122,12 +122,16 @@ class XcorrConfig:
     #: Bandwidth vs acceleration: GHz per mm of grating travel away from zero separation.
     freq_bw_ghz_per_grating_mm: float = 1.905
     #: Grating position of zero separation / zero bandwidth, mm (matches the default 30.1).
-    grating_zero_mm: float = 30.1
+    grating_zero_mm: float = 30.0
 
     out_dir: Path = Path(".")
 
     #: Traces averaged per probe point. Must be software-averaged: the TDS2012C's
     #: ``ACQuire:NUMAVg`` accepts only 4/16/64/128 (D2).
+    #: Operator label for the run, folded into the filename. Blank keeps the original
+    #: timestamp-only name. Sanitised in ``default_run_path`` -- it reaches a filename.
+    run_name: str = ""
+
     n_traces: int = 10
 
     #: Dwell after each move before acquiring, seconds. ``MD?`` motion-done may or

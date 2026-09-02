@@ -47,6 +47,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, fields as dataclass_fields
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
@@ -73,10 +74,24 @@ FORMAT_VERSION = 2
 _SPECTRA_CHUNK_ROWS = 32
 
 
-def default_run_path(out_dir: Path, when: datetime | None = None) -> Path:
-    """``<out_dir>/XCORR_YYYYmmdd_HHMMSS.h5`` — one file per run."""
+#: Everything outside this set is collapsed to "_" in a run name. Deliberately strict:
+#: the name goes straight into a filename, and a stray slash or colon is the difference
+#: between a run that saves and a run that raises after the scan has already happened.
+_SAFE_RUN_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def default_run_path(out_dir: Path, when: datetime | None = None,
+                     run_name: str = "") -> Path:
+    """``<out_dir>/XCORR_<run_name>_YYYYmmdd_HHMMSS.h5`` — one file per run.
+
+    ``run_name`` is sanitised to ``[A-Za-z0-9._-]`` and omitted entirely when blank,
+    which reproduces the original ``XCORR_YYYYmmdd_HHMMSS.h5`` form. The timestamp
+    always stays last so runs of the same design still sort chronologically.
+    """
     when = when or datetime.now()
-    return Path(out_dir) / f"XCORR_{when:%Y%m%d_%H%M%S}.h5"
+    tag = _SAFE_RUN_NAME.sub("_", run_name.strip()).strip("_")
+    stem = f"XCORR_{tag}_{when:%Y%m%d_%H%M%S}" if tag else f"XCORR_{when:%Y%m%d_%H%M%S}"
+    return Path(out_dir) / f"{stem}.h5"
 
 
 def _write_array(g: h5py.Group, name: str, arr: Sequence[Any], dtype: Any) -> None:

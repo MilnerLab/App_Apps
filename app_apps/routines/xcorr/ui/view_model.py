@@ -64,12 +64,32 @@ class XcorrViewModel(PanelViewModel):
         self._spectrometer = spectrometer
         self._settings = settings
         self._routine: XcorrRoutine | None = None
+        # Panel-level state, not routine state: a fresh Start builds a fresh routine, so
+        # the operator's choice has to survive here and be re-applied there.
+        self._step_mode = True
         self._update: UpdateSink | None = None
 
         self._sub(XcorrProgress, self._on_progress)
         self._sub(XcorrGroupWritten, self._on_group)
         self._sub(XcorrFinished, self._on_finished)
         self._sub(XcorrFailed, self._on_failed)
+
+    def set_step_mode(self, enabled: bool) -> None:
+        """Arm/disarm operator-advanced stepping. Persists across the routine's life
+        only — a fresh Start builds a fresh routine, so it is re-applied there."""
+        self._step_mode = enabled
+        if self._routine is not None and self._routine.is_running:
+            self._routine.set_step_mode(enabled)
+            self._render(
+                "step mode — the run holds at each grating position until Step"
+                if enabled else "step mode off — run free-running",
+                running=True,
+            )
+
+    def step(self) -> None:
+        if self._routine is None or not self._routine.is_running:
+            return
+        self._routine.step()
 
     @property
     def settings(self) -> XcorrSettings:
@@ -100,6 +120,8 @@ class XcorrViewModel(PanelViewModel):
             scope=self._scope,
             spectrometer=self._spectrometer,
         )
+        # Re-applied here rather than carried on the routine: each Start builds a new one.
+        self._routine.set_step_mode(self._step_mode)
         self._render(f"starting scan → {cfg.out_dir}", running=True)
         self._msg("XCORR scan started")
         self._routine.start_scan()
