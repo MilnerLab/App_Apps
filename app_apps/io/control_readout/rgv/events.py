@@ -36,6 +36,12 @@ class RequestStopSpinRGV:
 
 @dataclass(frozen=True)
 class RgvSpinStateChanged:
-    """Published whenever the plate starts, changes rate or stops free-running."""
+    """Published whenever the plate starts, changes rate or stops free-running.
+
+    ``error`` is empty on every ordinary transition. It is filled in only when a spin the
+    handler had already optimistically announced was *rejected* by the controller, so the
+    panel can say why the plate it was told about is not turning.
+    """
     spinning: bool
     velocity_deg_s: float
+    error: str = ""

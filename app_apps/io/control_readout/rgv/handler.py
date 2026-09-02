@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from base_core.framework.events.event_bus import EventBus
-from base_core.ipc.message import OKReply
+from base_core.ipc.message import ErrorReply, OKReply
 from base_core.ipc.worker_handle import BaseWorkerHandle
 from base_core.math.enums import AngleUnit
 from base_core.math.models import Angle
@@ -107,9 +107,26 @@ class RgvHandle(BaseWorkerHandle):
         """
         self._current_angle = None
         self._spinning = True
-        self._request(SpinRGV(velocity_deg_s=float(velocity_deg_s)), self._on_rotate_reply)
+        self._request(SpinRGV(velocity_deg_s=float(velocity_deg_s)),
+                      self._on_rotate_reply, self._on_spin_error)
         self._bus.publish(RgvSpinStateChanged(spinning=True,
                                               velocity_deg_s=float(velocity_deg_s)))
+
+    def _on_spin_error(self, reply: ErrorReply) -> None:
+        """Undo the optimistic announcement when the controller refuses the spin.
+
+        Without this the rejection is invisible and actively harmful: the panel reads
+        "spinning", the tracked angle stays unknown, and -- because a spin outranks the
+        control loop -- every stabilization correction is silently swallowed by a plate
+        that is not turning. The rollback republishes so the toggle and the readout come
+        back, and carries the controller's text so the reason reaches the operator.
+        """
+        log.error("RGV: the controller refused the spin: %s", reply.error)
+        self._spinning = False
+        self._bus.publish(RgvSpinStateChanged(spinning=False, velocity_deg_s=0.0,
+                                              error=str(reply.error)))
+        # The plate never moved, so its pre-spin angle is still valid -- read it back.
+        self._request(GetCurrentRGVAngle(), self._on_angle_reply)
 
     def stop_spin(self) -> None:
         """Ramp the plate to a stop. The worker reports the settled angle afterwards."""

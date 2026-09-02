@@ -144,6 +144,11 @@ class RgvViewModel(MotionViewModel):
     def _on_spin_state(self, event: RgvSpinStateChanged) -> None:
         self.spin_state_changed.emit(event.spinning,
                                      event.velocity_deg_s / DEG_PER_REV)
+        if event.error:
+            # A refusal, not a stop the operator asked for. Say so loudly: the button has
+            # just sprung back to "Spin" on its own, which otherwise looks like a glitch.
+            self._msg(f"RGV100BL refused the spin: {event.error}", MessageLevel.ERROR)
+            return
         # A spin that has ended leaves a plate at a real, if arbitrary, angle. Read it, so
         # the readout fills back in and relative moves work again without a manual Read.
         if not event.spinning:
