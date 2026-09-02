@@ -20,6 +20,7 @@ from app_apps.analysis.phase_control.events import (
     StabilizationConfigChanged,
 )
 from app_apps.io.control_readout.rgv.events import NewRGVAngle, RequestRotateRGV
+from app_apps.io.spectrometer.events import SpectrometerConfigChanged
 from app_apps.analysis.phase_control.subprocess.domain import fringe_core as fc
 from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import display_curve
 
@@ -99,6 +100,10 @@ class StabilizationControlViewModel(QObject):
         # recent correction" readout and the earliest signal that a block just ended.
         self._unsub_rot = bus.subscribe(RequestRotateRGV, self._on_rotate_requested)
         self._unsub_rgv = bus.subscribe(NewRGVAngle, self._on_rgv_angle)
+        # Exposure and averaging change the COUNTS. Frames from either side of that change
+        # cannot go into one mean -- the average would sit at some blend of the two
+        # amplitudes, which reads as a real change in the light and is not one.
+        self._unsub_spec = bus.subscribe(SpectrometerConfigChanged, self._on_spectrometer_config)
 
     def set_chart(self, plot_item: pg.PlotItem) -> None:
         self._plot_item = plot_item
@@ -565,6 +570,9 @@ class StabilizationControlViewModel(QObject):
             self.readout_changed.emit()
 
         self._dispatcher.post(_emit)
+
+    def _on_spectrometer_config(self, _: SpectrometerConfigChanged) -> None:
+        self._dispatcher.post(self.block_reset.emit)
 
     def _on_rgv_angle(self, event: NewRGVAngle) -> None:
         deg = float(event.angle.Deg)
