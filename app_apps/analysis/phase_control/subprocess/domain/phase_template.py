@@ -60,7 +60,24 @@ CAPTURE_N = 10
 # DERIVATIVE of phase, so a constant offset cancels exactly and the metric sees shape only,
 # blind to the one thing that changes every frame. The smallest shape change tested sits
 # 3.8x above that floor, so the threshold has room on both sides. Cost ~1 ms/frame.
-SHAPE_MISMATCH_MAX = 0.009
+#
+# RAISED FROM 0.009 AFTER MEASURING IT ON THE INSTRUMENT. The 0.003 phase-invariance floor
+# above is a SYNTHETIC-noise figure. Live, at the spectrometer settings in normal use, the
+# frame-to-frame mismatch between traces of the SAME shape runs 0.008 to 0.112 (10 captures
+# over 60 s, median ~0.037) -- up to 37x that floor. At 0.009 the loop therefore captured,
+# locked, and invalidated on its very first tracked frame, over and over: ~3 s of capture
+# per lock, one correction issued in a minute, and a counter the operator only ever saw
+# sitting near zero. See tools/run_stabilization_headless.py, which is how this was found.
+#
+# Loosening this is a backstop being loosened, not a guard being removed. The PRIMARY
+# invalidation is command-driven and exact -- PhaseStabilizationHandle invalidates the
+# moment a delay or grating move is REQUESTED, before a corrupted trace can be fit -- and
+# this metric only catches shape changes nobody commanded. Note the honest cost: the
+# smallest deliberate shape change in the original sweep measured 0.0114, which is INSIDE
+# the live same-shape spread, so at these settings the metric cannot separate the two on
+# its own. It is tunable from the panel ("Re-capture above mismatch") and the tracker now
+# logs the live value against it every 2 s, so the headroom is visible rather than assumed.
+SHAPE_MISMATCH_MAX = 0.12
 
 
 def _core_mask(x: np.ndarray, pLn: np.ndarray) -> np.ndarray:

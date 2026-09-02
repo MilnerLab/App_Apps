@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -52,6 +53,10 @@ from app_apps.analysis.phase_control.subprocess.domain.phase_template import (
 from app_apps.analysis.phase_control.subprocess.domain.phase_tracker import PhaseTracker
 
 log = logging.getLogger(__name__)
+
+# Seconds between shape-mismatch lines while LOCKED. Per frame this would be 4 lines/s of
+# a number that barely moves; every 2 s it is a trend.
+_MISMATCH_LOG_PERIOD_S = 2.0
 
 
 class PhaseAverager:
@@ -127,6 +132,7 @@ class TemplateTracker:
         self._prev_template: PhaseTemplate | None = None
         self._run: list[np.ndarray] = []   # the unbroken run of accepted FULL traces
         self._run_wl: np.ndarray | None = None
+        self._last_mismatch_log = 0.0
 
     # -- state ------------------------------------------------------------------------
     @property
@@ -234,6 +240,15 @@ class TemplateTracker:
             return TrackerOutcome(state=self._state)
 
         mismatch = shape_mismatch(wl, inten, tpl)
+        # Rate-limited, because this is the number that decides whether the loop holds
+        # together and there is otherwise no way to see how much headroom it has. A run
+        # that keeps re-capturing and one that is comfortably locked differ only here.
+        now = time.perf_counter()
+        if now - self._last_mismatch_log >= _MISMATCH_LOG_PERIOD_S:
+            self._last_mismatch_log = now
+            log.info("template: shape mismatch %.4f (limit %.4f, %.0f%% of it)",
+                     mismatch, self._config.shape_mismatch_max,
+                     100.0 * mismatch / max(self._config.shape_mismatch_max, 1e-12))
         if not np.isfinite(mismatch) or mismatch > self._config.shape_mismatch_max:
             self.invalidate(f"shape mismatch {mismatch:.4f} > {self._config.shape_mismatch_max:.4f}")
             return TrackerOutcome(state=self._state, template_changed=True)

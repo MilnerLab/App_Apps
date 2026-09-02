@@ -12,7 +12,9 @@ from app_apps.io.control_readout.ui.motion_view_model import MotionViewModel
 
 
 class MfaccViewModel(MotionViewModel):
-    """Pump-probe delay. A commanded move here invalidates the frozen phase template
+    """The CENTRIFUGE delay -- not the pump-probe delay, which this stage does not set.
+
+    A commanded move here invalidates the frozen phase template
     (PhaseStabilizationHandle subscribes to RequestMoveMfacc) -- the fringe shape moves
     with the delay.
 

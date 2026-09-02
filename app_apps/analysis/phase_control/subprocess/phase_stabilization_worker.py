@@ -74,6 +74,9 @@ class PhaseStabilizationWorker(ThreadedWorker):
         self._tp_skip = 0            # frames coalesced/dropped in the window
         self._tp_commit = 0          # fits that passed the gate in the window
         self._tp_fit_ms = 0.0        # summed fit wall time in the window
+        # Last (state, captured, needed) put on the wire, so the per-frame publish below
+        # can stay silent while nothing moves. None = nothing published yet.
+        self._last_state_stamp: tuple | None = None
 
     def _setup(self) -> None:
         self._unsubs.append(self._bus.subscribe(SetStabilizationConfig, self._on_set_config))
@@ -109,6 +112,7 @@ class PhaseStabilizationWorker(ThreadedWorker):
         self._corrector.invert = self._config.invert_correction
         self._averager.reset()
         self._last_correction = time.perf_counter()
+        self._last_state_stamp = None   # a fresh tracker re-announces itself unconditionally
         # Arm the capture immediately in slow mode, rather than waiting to be asked. The
         # tracker starts OFF, which is the cold per-frame loop -- so without this, starting
         # stabilization silently gave the operator the fast loop while the panel offered no
@@ -192,7 +196,13 @@ class PhaseStabilizationWorker(ThreadedWorker):
                 self._notify(ConfigSynced(config=self._config))
             if outcome.template_changed:
                 self._averager.reset()   # a new template redefines what the mean is OF
-                self._publish_template_state()
+            # Publish on every CHANGE of (state, progress), not only when a template
+            # appears. The capture run advances 1..9 with template_changed False, and an
+            # ABANDONED run resets to 0 with it False too -- so gating the notify on it
+            # left the panel frozen at the 0/10 it was armed with, whether the loop was
+            # counting up perfectly or restarting forever. Those two look identical to the
+            # operator, which is precisely the thing the counter exists to tell apart.
+            self._publish_template_state()
             if outcome.state == TemplateState.OFF:
                 # Unchanged cold loop: correct from each committed fit, gain per frame.
                 if outcome.cold_phase is not None:
@@ -233,9 +243,18 @@ class PhaseStabilizationWorker(ThreadedWorker):
             self._notify(CorrectionAvailable(angle=result.angle, sign=result.sign))
 
     def _publish_template_state(self) -> None:
+        """Notify the UI of (state, capture progress), but only when it has changed.
+
+        Called per frame from the fit path, so it has to be cheap and quiet: an unchanged
+        LOCKED state must not put an IPC message on the wire at the frame rate.
+        """
         if self._tracker is None:
             return
         got, need = self._tracker.capture_progress
+        stamp = (self._tracker.state, got, need)
+        if stamp == self._last_state_stamp:
+            return
+        self._last_state_stamp = stamp
         self._notify(TemplateStateChanged(
             state=self._tracker.state.value, captured=got, needed=need,
             template=self._tracker.template,

@@ -85,7 +85,9 @@ class RgvHandle(BaseWorkerHandle):
         relative increments, and routing an absolute target through it would add the target
         to the current position.
         """
-        # wrap=False: this is a position on the +-168 deg stage, not a circular angle.
+        # wrap=False here, but the RGV device folds the target into a shortest-path
+        # relative move on arrival -- so a value outside [0, 360) is an orientation, not a
+        # demand to unwind the plate to it.
         target = Angle(float(angle_deg), AngleUnit.DEG, wrap=False)
         self._current_angle = target
         self._request(RotateRGVTo(angle=target), self._on_rotate_reply)
@@ -162,7 +164,8 @@ class RgvHandle(BaseWorkerHandle):
         # event.angle is a *relative* increment; translate to an absolute target
         # against the last known plate position (the worker moves absolutely).
         base = self._current_angle if self._current_angle is not None else Angle(0, AngleUnit.DEG)
-        # wrap=False: this is a position on the ±168° stage, not a circular angle.
+        # Left unwrapped: base + increment may fall just outside [0, 360), and the RGV
+        # device resolves whatever it is given by the shortest rotation.
         target = Angle(base.Deg + event.angle.Deg, AngleUnit.DEG, wrap=False)
         # Optimistic: keeps back-to-back corrections accumulating before the
         # read-back lands. Overwritten by the true angle in _on_angle_update.

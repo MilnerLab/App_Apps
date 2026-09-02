@@ -38,7 +38,7 @@ from app_apps.io.control_readout.uts150cc.ui.view_model import Uts150ccViewModel
 
 #: (view-model type, block title), in the order they appear. See the module docstring.
 _STAGES = [
-    (MfaccViewModel, "MFA-CC — pump-probe delay"),
+    (MfaccViewModel, "MFA-CC — centrifuge delay"),
     (Uts150ccViewModel, "UTS150CC — grating"),
     (Fms300ppViewModel, "FMS300PP — probe"),
     (ELL14RotatorViewModel, "ELL14 rotator"),

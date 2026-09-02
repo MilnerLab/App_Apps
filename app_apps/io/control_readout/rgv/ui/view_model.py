@@ -57,8 +57,12 @@ class RgvViewModel(MotionViewModel):
 
     units = "deg"
     decimals = 3
-    # The RGV100BL's travel. Advisory only; the device enforces its own limits.
-    limits = (-168.0, 168.0)
+    # One full turn. The RGV100BL is a continuous rotator whose controller coordinate is
+    # an unbounded running total, so the panel works in ORIENTATION: the device reports
+    # position mod 360 and reaches any target by the shortest rotation. A bounded +-168
+    # box would have been a lie in both directions -- it hid two thirds of the circle, and
+    # it implied an unwind the stage never has to perform.
+    limits = (0.0, 360.0)
     default_step = 1.0
 
     def __init__(

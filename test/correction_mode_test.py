@@ -60,8 +60,10 @@ def _worker(slow: bool = True) -> PhaseStabilizationWorker:
     w._config.slow_correction = slow
     w._tracker = None
     w._corrector = None
-    w._notify = lambda msg: None
+    w.notified: list = []
+    w._notify = w.notified.append
     w._reply_ok = lambda msg: None
+    w._last_state_stamp = None
 
     class _Averager:
         def __init__(self) -> None:
@@ -179,6 +181,47 @@ def test_an_ordinary_edit_does_not_disturb_a_locked_template() -> None:
           f"still locked after an unrelated config edit (got {w._tracker.state})")
 
 
+# -- the capture counter ------------------------------------------------------------------
+def _states(w) -> list[tuple]:
+    """(state, captured) from every TemplateStateChanged the worker put on the wire."""
+    return [(m.state, m.captured) for m in w.notified
+            if type(m).__name__ == "TemplateStateChanged"]
+
+
+def test_capture_progress_is_published_as_it_advances() -> None:
+    """The 0/10 bug: progress was only published when a TEMPLATE appeared, so the whole
+    run 1..9 was invisible and an abandoned run resetting to 0 was invisible too. A loop
+    counting up perfectly and one restarting forever looked identical from the panel."""
+    w = _worker(slow=True)
+    PhaseStabilizationWorker._build_tracker(w)
+    w.notified.clear()
+
+    # Walk the tracker's run forward the way _capture does, publishing per frame.
+    for n in range(1, 4):
+        w._tracker._run = [None] * n
+        PhaseStabilizationWorker._publish_template_state(w)
+    check(_states(w) == [("capturing", 1), ("capturing", 2), ("capturing", 3)],
+          f"each accepted trace is announced (got {_states(w)})")
+
+    # A broken/abandoned run drops back to 0 -- which the operator must also see.
+    w.notified.clear()
+    w._tracker._run = []
+    PhaseStabilizationWorker._publish_template_state(w)
+    check(_states(w) == [("capturing", 0)],
+          f"and so is a run collapsing back to zero (got {_states(w)})")
+
+
+def test_an_unchanged_state_is_not_republished() -> None:
+    """Called once per frame now, so silence while nothing moves is what keeps a LOCKED
+    loop from putting an IPC message on the wire at the frame rate."""
+    w = _worker(slow=True)
+    PhaseStabilizationWorker._build_tracker(w)
+    w.notified.clear()
+    for _ in range(5):
+        PhaseStabilizationWorker._publish_template_state(w)
+    check(_states(w) == [], f"an unchanged state is published nothing (got {_states(w)})")
+
+
 TESTS = [
     test_slow_is_the_default,
     test_the_default_survives_a_round_trip,
@@ -188,6 +231,8 @@ TESTS = [
     test_invalidate_still_re_captures,
     test_the_toggle_reaches_the_tracker_both_ways,
     test_an_ordinary_edit_does_not_disturb_a_locked_template,
+    test_capture_progress_is_published_as_it_advances,
+    test_an_unchanged_state_is_not_republished,
 ]
 
 if __name__ == "__main__":
