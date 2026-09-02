@@ -175,6 +175,20 @@ class StabilizationConfig(PrimitiveSerde):
                                         # stably but pi away from the setpoint, this is the
                                         # knob: see PhaseCorrector.CORRECTION_SIGN.
     # --- frozen-template tracking (see template_tracker) -------------------------------
+    slow_correction: bool = True        # WHICH loop runs. True is the frozen-template loop:
+                                        # capture a shape, then issue ONE correction every
+                                        # correction_period_s from the circular mean of every
+                                        # frame in between. False is the cold per-frame loop
+                                        # that predates the template -- a full fit and a
+                                        # correction on every committed trace.
+                                        #
+                                        # Slow is the default because it is the accurate one:
+                                        # averaging first is what keeps the phase noise out of
+                                        # the stage. Fast exists for getting a badly drifted
+                                        # setup back into range, where responding now matters
+                                        # more than responding precisely, and for the case
+                                        # where the shape will not hold still long enough for
+                                        # a template to survive.
     correction_period_s: float = 15.0   # LOCKED mode issues ONE correction this often, from
                                         # the circular running mean of every frame's phase.
                                         # Not per-frame like the cold loop: the closed-form
@@ -245,6 +259,7 @@ class StabilizationConfig(PrimitiveSerde):
             "set_phase": self.set_phase.to_primitive(),
             "invert_correction": self.invert_correction,
             "loop_gain": self.loop_gain,
+            "slow_correction": self.slow_correction,
             "correction_period_s": self.correction_period_s,
             "shape_mismatch_max": self.shape_mismatch_max,
             "min_amplitude_frac": self.min_amplitude_frac,
@@ -271,6 +286,7 @@ class StabilizationConfig(PrimitiveSerde):
             # Pre-tunable-gain configs have no "loop_gain" -> the calibrated default.
             loop_gain=float(v.get("loop_gain", LOOP_GAIN)),
             # Absent in any config persisted before frozen-template tracking -> defaults.
+            slow_correction=bool(v.get("slow_correction", True)),
             correction_period_s=float(v.get("correction_period_s", 15.0)),
             shape_mismatch_max=float(v.get("shape_mismatch_max", SHAPE_MISMATCH_MAX)),
             min_amplitude_frac=float(v.get("min_amplitude_frac", 0.10)),

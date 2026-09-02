@@ -24,10 +24,11 @@ from app_apps.analysis.phase_control.subprocess.domain.phase_template import Pha
 from app_apps.analysis.phase_control.subprocess.domain import fringe_core as fc
 from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import display_curve
 
-# Shown before Capture reference has ever been pressed. In that state the loop runs the
-# per-frame cold fit exactly as it always has, so the wording says what it is doing rather
-# than presenting the absence of a template as a fault.
-_TEMPLATE_OFF_TEXT = "Reference: none — per-frame fit"
+# The OFF state, which now means one thing only: fast correction is selected. Slow mode
+# arms its capture the moment stabilization starts, so OFF is no longer something the
+# operator can arrive at by not having pressed a button. The wording says what the loop is
+# doing rather than presenting the absence of a template as a fault.
+_TEMPLATE_OFF_TEXT = "Fast correction — per-frame fit, no reference"
 
 if TYPE_CHECKING:
     from app_apps.analysis.phase_control.phase_stabilization_handle import PhaseStabilizationHandle
@@ -287,6 +288,22 @@ class StabilizationControlViewModel(QObject):
     @property
     def has_template(self) -> bool:
         return self._handle.template is not None
+
+    @property
+    def slow_correction(self) -> bool:
+        return self._config.slow_correction
+
+    def set_slow_correction(self, slow: bool) -> None:
+        """Switch between the frozen-template loop and the cold per-frame one.
+
+        Pushed straight to the subprocess rather than waiting for Apply: this is a mode
+        switch, not a tuning value, and an operator reaching for Fast because the loop is
+        misbehaving wants it now.
+        """
+        if bool(slow) == self._config.slow_correction:
+            return
+        self._config.slow_correction = bool(slow)
+        self._handle.set_config(self._config)
 
     def capture_reference(self) -> None:
         self._handle.capture_reference()

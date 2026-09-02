@@ -183,6 +183,25 @@ class TemplateTracker:
         self._reset_run()
         return True
 
+    def disable(self, reason: str = "fast correction selected") -> bool:
+        """Drop any template and fall back to the cold per-frame loop. Returns True if
+        anything changed.
+
+        The counterpart to :meth:`request_capture`, and NOT the same as
+        :meth:`invalidate`: invalidate means "this template no longer describes the
+        fringes, get another one" and re-arms capture, whereas this means "stop using
+        templates at all". Routing the fast/slow toggle through invalidate would leave the
+        loop capturing forever and correcting never.
+        """
+        if self._state == TemplateState.OFF:
+            return False
+        log.info("template: disabled (%s) -- cold per-frame loop from here", reason)
+        self._prev_template = self._template or self._prev_template
+        self._template = None
+        self._state = TemplateState.OFF
+        self._reset_run()
+        return True
+
     def retune(self, config: StabilizationConfig) -> None:
         """Adopt a new config. The TEMPLATE survives -- an edit to the accept gate or the
         loop gain does not change the fringe shape, and dropping it would cost a 5 s

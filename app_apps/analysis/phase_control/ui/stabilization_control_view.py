@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QFileDialog,
     QFrame,
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
@@ -118,6 +120,30 @@ class StabilizationControlView(QWidget):
 
         self._template_label = QLabel(self._vm.template_text)
         box.addWidget(self._template_label)
+
+        # Which loop runs. Radio buttons rather than a checkbox: both options are named,
+        # so the one that is NOT selected is still readable off the panel -- and the two
+        # differ by more than a rate, so "not slow" is not a useful way to describe fast.
+        mode = QHBoxLayout()
+        mode.setSpacing(4)
+        self._slow_radio = QRadioButton("Slow")
+        self._slow_radio.setToolTip(
+            "Frozen-template loop: capture a shape, then correct once every "
+            "correction period from the averaged phase. Accurate, and the default.")
+        self._fast_radio = QRadioButton("Fast")
+        self._fast_radio.setToolTip(
+            "Cold per-frame loop: a full fit and a correction on every accepted trace. "
+            "Responsive but noisier — for pulling a badly drifted setup back into range.")
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.addButton(self._slow_radio)
+        self._mode_group.addButton(self._fast_radio)
+        (self._slow_radio if self._vm.slow_correction else self._fast_radio).setChecked(True)
+        self._slow_radio.toggled.connect(self._vm.set_slow_correction)
+        mode.addWidget(QLabel("Correction:"))
+        mode.addWidget(self._slow_radio)
+        mode.addWidget(self._fast_radio)
+        mode.addStretch()
+        box.addLayout(mode)
 
         btns = QHBoxLayout()
         btns.setSpacing(4)

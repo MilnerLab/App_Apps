@@ -109,6 +109,13 @@ class PhaseStabilizationWorker(ThreadedWorker):
         self._corrector.invert = self._config.invert_correction
         self._averager.reset()
         self._last_correction = time.perf_counter()
+        # Arm the capture immediately in slow mode, rather than waiting to be asked. The
+        # tracker starts OFF, which is the cold per-frame loop -- so without this, starting
+        # stabilization silently gave the operator the fast loop while the panel offered no
+        # hint that a button press stood between them and the one they had selected.
+        # Capture holds (issues no correction) for ~5 s at 2 Hz, then locks.
+        if self._config.slow_correction and self._tracker is not None:
+            self._tracker.request_capture()
         self._publish_template_state()
 
     def _on_spectrum(self, msg: ProcessSpectrum) -> None:
@@ -267,6 +274,17 @@ class PhaseStabilizationWorker(ThreadedWorker):
         self._averager.reset()
         if self._tracker is not None:
             self._tracker.retune(self._config)
+            # The fast/slow toggle lives in the config, so it arrives here. Acting on it
+            # only when it actually differs from the running state keeps every other edit
+            # -- a gain nudge, a target change -- from re-arming a capture and dropping a
+            # good template for 5 s.
+            if self._config.slow_correction:
+                if self._tracker.state == TemplateState.OFF:
+                    self._tracker.request_capture()
+                    self._publish_template_state()
+            elif self._tracker.disable():
+                self._averager.reset()
+                self._publish_template_state()
         if self._corrector is not None:
             # Retuned in place, not reconstructed: gain is the knob the operator turns
             # WHILE watching the loop settle, and a fresh PhaseCorrector would be a
