@@ -24,6 +24,14 @@ from app_apps.analysis.phase_control.ui.phase_config_view import PhaseConfigView
 from app_apps.analysis.phase_control.ui.phase_control_view_model import PhaseControlViewModel
 from app_apps.analysis.phase_control.ui.stabilization_control_view import StabilizationControlView
 
+# Every curve on this chart, in screen pixels. One value because the traces are read
+# AGAINST each other -- a raw trace thinner than the fit sitting on top of it reads as the
+# less important of the two, which is backwards. Cosmetic pens throughout, so this stays
+# pixels and does not scale with the wildly mismatched nm/counts axes.
+TRACE_WIDTH = 2.0
+# The one frame after a correction, drawn over the rest.
+POST_WIDTH = 3.0
+
 
 class PhaseControlView(Panel):
     def __init__(self, vm: PhaseControlViewModel, parent: QWidget | None = None) -> None:
@@ -36,25 +44,32 @@ class PhaseControlView(Panel):
         self._plot.setLabel("bottom", "Wavelength (nm)")
         self._plot.setLabel("left", "Intensity")
         self._plot.setMinimumHeight(220)
-        self._live_curve = self._plot.plot()
+        live_pen = QPen(QColor("#d0d0d0"))
+        live_pen.setWidthF(TRACE_WIDTH)
+        live_pen.setCosmetic(True)
+        self._live_curve = self._plot.plot(pen=live_pen)
 
         # The running mean of the raw frames in the current averaging block: the trace the
         # correction is computed from, as opposed to the single frame the eye happens to
         # catch. Drawn here rather than in the view model because, like the live curve, it is
         # built from the raw spectrum and shares its x mapping.
         avg_pen = QPen(QColor("#ffb000"))
+        avg_pen.setWidthF(TRACE_WIDTH)
         avg_pen.setCosmetic(True)
         self._avg_curve = self._plot.plot(pen=avg_pen)
 
-        # The first frame collected after a correction, kept on screen until the next one
-        # replaces it. Thick and purple because it is the one frame that answers "did the
-        # move do what it was supposed to": everything before it describes the old plate
-        # position. It is also, at the instant it is drawn, exactly the running average --
-        # the block has one frame in it -- so it stays visible for either toggle.
-        post_pen = QPen(QColor("#a24bff"))
-        post_pen.setWidthF(2.5)
-        post_pen.setCosmetic(True)
-        self._post_curve = self._plot.plot(pen=post_pen)
+        # The first frame collected after a correction is not a curve of its own -- it is a
+        # temporary PEN on the curves already there, for exactly one frame. On that frame the
+        # raw trace and the running average hold the same data (the block has one frame in
+        # it), so both wear the purple and whichever the operator has switched on is the one
+        # that shows it. An extra item would have had to be shown, hidden and cleared in step
+        # with two toggles, and would have sat on top of them claiming to be a third
+        # measurement.
+        self._live_pen = live_pen
+        self._avg_pen = avg_pen
+        self._post_pen = QPen(QColor("#a24bff"))
+        self._post_pen.setWidthF(POST_WIDTH)
+        self._post_pen.setCosmetic(True)
 
         # Running-average accumulator. Summed rather than averaged incrementally so a
         # resize of the block, or a frame arriving on a different grid, is a reset and not a
@@ -66,6 +81,9 @@ class PhaseControlView(Panel):
         # settle time is the loop's own move_settle_s, so this marks the same frame the loop
         # treats as the first of the new block. None = not armed.
         self._post_at: float | None = None
+        # True for exactly as long as the purple pen is on: the next frame puts the ordinary
+        # pens back, which is what makes this one frame and not a trail.
+        self._post_shown = False
 
         plot_item = self._plot.getPlotItem()
         self.vm.stabilization_vm.set_chart(plot_item)
@@ -124,17 +142,12 @@ class PhaseControlView(Panel):
             self._avg_curve.clear()
         elif self._acc_n:
             self._avg_curve.setData(self._acc_x, self._acc_sum / self._acc_n)
-        self._update_post_visible()
 
-    def _update_post_visible(self) -> None:
-        """The post-correction frame belongs to Raw and to Avg alike.
-
-        At the moment it is drawn the block holds exactly one frame, so it IS the running
-        average as well as a raw trace. Hiding it with only one of the two switches would
-        remove a curve the other switch says should be there.
-        """
-        vm = self.vm.stabilization_vm
-        self._post_curve.setVisible(vm.show_raw or vm.show_avg)
+    def _set_post_pens(self, on: bool) -> None:
+        """Swap both curves onto the purple pen, or back to their own."""
+        self._live_curve.setPen(self._post_pen if on else self._live_pen)
+        self._avg_curve.setPen(self._post_pen if on else self._avg_pen)
+        self._post_shown = on
 
     def _reset_average(self) -> None:
         self._acc_x = None
@@ -160,10 +173,15 @@ class PhaseControlView(Panel):
         if self.vm.stabilization_vm.show_avg:
             self._avg_curve.setData(self._acc_x, self._acc_sum / self._acc_n)
 
+        # Put the ordinary pens back BEFORE considering a new mark: this frame is the "next
+        # frame" that ends the last one. In this order the purple never spans two frames,
+        # however close together two corrections land.
+        if self._post_shown:
+            self._set_post_pens(False)
+
         if self._post_at is not None and time.perf_counter() >= self._post_at:
             self._post_at = None
-            self._post_curve.setData(np.array(x, dtype=float), np.array(y, dtype=float))
-            self._update_post_visible()
+            self._set_post_pens(True)
 
     def _on_save_csv(self) -> None:
         path, _ = QFileDialog.getSaveFileName(

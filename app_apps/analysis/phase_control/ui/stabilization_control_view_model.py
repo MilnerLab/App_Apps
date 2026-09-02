@@ -28,6 +28,10 @@ from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import display
 # is true at that moment rather than a placeholder.
 _IDLE_TEXT = "Reference: not captured"
 
+# Matches PhaseControlView.TRACE_WIDTH -- the fit and target overlays are read against the
+# raw spectrum, so they have to carry the same weight as it does.
+TRACE_WIDTH = 2.0
+
 if TYPE_CHECKING:
     from app_apps.analysis.phase_control.phase_stabilization_handle import PhaseStabilizationHandle
     from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
@@ -113,11 +117,13 @@ class StabilizationControlViewModel(QObject):
         # dash into a long diagonal streak, making the curve look like jagged noise.
         set_phase_pen = QPen(QColor("red"))
         set_phase_pen.setStyle(Qt.PenStyle.DashLine)
+        set_phase_pen.setWidthF(TRACE_WIDTH)
         set_phase_pen.setCosmetic(True)
         self._set_phase_series = pg.PlotDataItem(pen=set_phase_pen)
 
         current_phase_pen = QPen(QColor("green"))
         current_phase_pen.setStyle(Qt.PenStyle.DashDotLine)
+        current_phase_pen.setWidthF(TRACE_WIDTH)
         current_phase_pen.setCosmetic(True)
         self._current_phase_series = pg.PlotDataItem(pen=current_phase_pen)
 
