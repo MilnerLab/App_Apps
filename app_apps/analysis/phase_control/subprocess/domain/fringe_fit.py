@@ -149,7 +149,16 @@ class FringeFitResult:
     ref_fallback: bool = False                # True => ref_wl moved off the spectral centre
     csig_sigma: tuple[float, float, float, float] = (0.0,) * 4   # 1-sigma on c0..c3 at ref_wl
     trunc_side: str = "none"                  # clipped arm: none/left/right/both/all/unknown
-    trunc_hits_core: bool = False             # the fringe-free band overlaps the fitted core
+    trunc_hits_core: bool = False             # the clip landed where the phase wanted to be
+                                              # fit (measured on the NOMINAL core, before the
+                                              # cut and before the dead-end trim)
+    trunc_hits_fit: bool = False              # ...and dead samples are actually IN the fitted
+                                              # set. The stronger statement; see fringe_core.
+    cut_left: float | None = None             # WHERE the knife edge was found (nm). None = no
+    cut_right: float | None = None            # edge on that side. Samples outside [cut_left,
+                                              # cut_right] were EXCLUDED from the fit, so this
+                                              # is the boundary of what the answer rests on --
+                                              # which is why the chart draws it.
     msg: str = ""
 
     def phase_at(self, lambda_ref_nm: float) -> float:
@@ -231,17 +240,22 @@ def analyze_trace(
     inlier_pct = 100.0 * float((np.abs(resid) < 3.0 * mad).mean())
 
     trunc = R.get("trunc") or {}
+    applied_lo, applied_hi = fc.applied_cuts(trunc)
     ref_wl = float(R["ref_wl"])
 
     if log.isEnabledFor(logging.WARNING):
         c = R["csig"]
         log.warning(
             "FITDIAG core=%d span=%.1fnm q=%d null=%s | c=[%.4g,%.4g,%.4g,%.4g] "
-            "| ref=%.2fnm%s trust=%s | trunc=%s%s | rms=%.1f rms_frac=%.3f inl=%.0f%% %.0fms",
+            "| ref=%.2fnm%s trust=%s | trunc=%s%s%s | rms=%.1f rms_frac=%.3f inl=%.0f%% %.0fms",
             len(R["x"]), float(R["x"][-1] - R["x"][0]), R["order"], R["has_null"],
             c[0], c[1], c[2], c[3], ref_wl,
             " (MOVED off centre)" if R["ref_fallback"] else "",
             R["trust_ok"], trunc.get("side", "?"),
+            # Where the knife edge actually landed. Blank when nothing was cut.
+            " CUT[%s,%s]" % ("" if applied_lo is None else "%.2f" % applied_lo,
+                             "" if applied_hi is None else "%.2f" % applied_hi)
+            if (applied_lo is not None or applied_hi is not None) else "",
             " HITS-CORE" if trunc.get("hits_core") else "",
             rms_sig, rms_frac, inlier_pct, R.get("t_run", float("nan")),
         )
@@ -265,6 +279,13 @@ def analyze_trace(
         csig_sigma=tuple(float(v) for v in R["csig_sigma"]),  # type: ignore[arg-type]
         trunc_side=str(trunc.get("side", "unknown")),
         trunc_hits_core=bool(trunc.get("hits_core", False)),
+        trunc_hits_fit=bool(trunc.get("hits_fit", False)),
+        # `fc.applied_cuts`, NOT the raw keys: the detector reports a candidate edge on both
+        # sides whenever it finds a dead run, but the fit only honours the side it claims.
+        # Reading the raw keys draws a knife edge at 810.98 nm on live_desktop_spectrum,
+        # which is a CLEAN trace -- caught by test_knife_edge_reaches_the_ui.
+        cut_left=_opt_nm(applied_lo),
+        cut_right=_opt_nm(applied_hi),
         msg=str(R.get("msg", "")),
     )
 
@@ -347,6 +368,19 @@ def _recover_truncation(R, x, y, t, anchor, ref_policy, lambda_ref_nm):
             pass
     R2["recovered"] = True
     return R2
+
+
+def _opt_nm(v) -> float | None:
+    """A cut edge as a plain float, or None when there is no edge on that side.
+
+    NaN is deliberately mapped to None rather than passed through: this value crosses the
+    IPC boundary into the persisted config, and a NaN there is both un-plottable and, in
+    strict JSON, unrepresentable.
+    """
+    if v is None:
+        return None
+    f = float(v)
+    return None if f != f else f
 
 
 def display_curve(r: FringeFitResult, wl: np.ndarray):

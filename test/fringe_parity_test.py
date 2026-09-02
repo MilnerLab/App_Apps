@@ -402,6 +402,74 @@ def test_config_view_field_routing() -> None:
     assert ok
 
 
+def test_knife_edge_reaches_the_ui() -> None:
+    """The knife-edge marker's data must survive every hop from the fit to the chart.
+
+    The marker is only as trustworthy as the weakest link in fit -> FringeFitResult ->
+    FringeFitParams.commit -> IPC -> the view model. A silently dropped field here does not
+    crash anything: the line simply never appears, and the operator reads "no clip" off a
+    clipped frame. That is the failure this guards.
+
+    Two halves, because only one of them can import: the FIT half runs for real (fringe_fit
+    imports cleanly), the CONFIG half is read via AST like the other config tests, since
+    phase_stabilization_config needs base_core.
+    """
+    import ast
+
+    std, _ = _load_standalone()          # for baseline_anchor, as the other tests do
+    from app_apps.analysis.phase_control.subprocess.domain import fringe_fit as ff
+
+    # --- half 1: a real clipped frame reports an edge, a clean one reports none ---
+    CASES = (
+        ("2020607181645_truncated.csv", True),    # left-arm clip inside the core
+        ("live_desktop_spectrum.csv", False),     # clean control: nothing to draw
+    )
+    ok = True
+    for name, want_cut in CASES:
+        path = os.path.join(STANDALONE_DIR, name)
+        if not os.path.exists(path):
+            print(f"{name:34s}  (missing, skipped)")
+            continue
+        lam, amp = _read(path)
+        m = (lam >= ZOOM[0]) & (lam <= ZOOM[1])
+        r = ff.analyze_trace(lam[m], amp[m], ff.FitTunables(),
+                             anchor=std.baseline_anchor(lam, amp), lambda_ref_nm=802.0)
+        got = [c for c in (r.cut_left, r.cut_right) if c is not None]
+        # An edge must be a real wavelength inside the analysis window -- a NaN or a value
+        # parked at the window edge would plot as a clip that is not there.
+        sane = all(ZOOM[0] <= c <= ZOOM[1] for c in got)
+        hit = (bool(got) == want_cut) and sane
+        ok &= hit
+        print(f"{'PASS' if hit else 'FAIL'}  {name:34s} side={r.trunc_side:6s} "
+              f"cut_left={r.cut_left} cut_right={r.cut_right}"
+              f"{'' if hit else '  <- expected ' + ('an edge' if want_cut else 'no edge')}")
+
+    # --- half 2: the config carries both fields, and commit() actually sets them ---
+    cfg_p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "app_apps", "analysis", "phase_control", "subprocess", "domain",
+                         "phase_stabilization_config.py")
+    tree = ast.parse(open(cfg_p, encoding="utf-8").read())
+    cls = next(n for n in ast.walk(tree)
+               if isinstance(n, ast.ClassDef) and n.name == "FringeFitParams")
+    declared = {s.target.id for s in cls.body
+                if isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name)}
+    commit = next(n for n in ast.walk(cls)
+                  if isinstance(n, ast.FunctionDef) and n.name == "commit")
+    assigned = {t.attr for st in ast.walk(commit) if isinstance(st, ast.Assign)
+                for t in st.targets if isinstance(t, ast.Attribute)}
+    as_result = next(n for n in ast.walk(cls)
+                     if isinstance(n, ast.FunctionDef) and n.name == "as_result")
+    passed = {k.arg for n in ast.walk(as_result) if isinstance(n, ast.Call)
+              for k in n.keywords if k.arg}
+    for f in ("cut_left", "cut_right"):
+        hits = (f in declared, f in assigned, f in passed)
+        ok &= all(hits)
+        print(f"{'PASS' if all(hits) else 'FAIL'}  FringeFitParams carries {f} "
+              f"(declared={hits[0]} committed={hits[1]} in as_result={hits[2]})")
+
+    assert ok, "the knife-edge marker's data does not reach the UI"
+
+
 def test_truncation_recovery() -> None:
     """Every truncated instrument frame must COMMIT, and the scan must earn its cost.
 
@@ -504,6 +572,7 @@ if __name__ == "__main__":
     # The old `return <bool>` style avoided that but made the tests unable to fail under
     # pytest at all (it only warns on a returned value). Raise for pytest, catch here.
     failures = []
+    skipped: list[str] = []
     for fn in (
         test_core_files_identical,
         test_tunable_defaults_are_not_copied,
@@ -514,20 +583,36 @@ if __name__ == "__main__":
         test_no_hidden_state,
         test_reference_policy_hysteresis,
         test_config_view_field_routing,
+        test_knife_edge_reaches_the_ui,
         test_truncation_recovery,
     ):
         try:
             fn()
         except AssertionError as e:
             failures.append(f"{fn.__name__}: {e or 'assertion failed'}")
-        except Exception as e:                       # noqa: BLE001 - report, don't mask
+        # BaseException, not Exception: pytest's Skipped derives from BaseException, so an
+        # `except Exception` never sees it and the skip escapes as a crash.
+        except BaseException as e:                   # noqa: BLE001 - report, don't mask
+            # A test that calls pytest.skip() outside pytest raises Skipped, which is NOT
+            # a failure -- the three parity tests that need the external standalone do
+            # exactly that when it is absent. Counting those as failures buried the real
+            # signal: the suite read "PARITY FAILED (4)" on a tree where nothing was wrong.
+            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                raise
+            if type(e).__name__ == "Skipped":
+                skipped.append(f"{fn.__name__}: {e}")
+                print(f"SKIP  {fn.__name__}: {e}")
+                continue
             failures.append(f"{fn.__name__}: {type(e).__name__}: {e}")
 
     print()
+    for s_ in skipped:
+        print(f"skipped: {s_}")
     if not failures:
-        print("ALL PARITY TESTS PASS")
+        print(f"ALL PARITY TESTS PASS ({len(skipped)} skipped)" if skipped
+              else "ALL PARITY TESTS PASS")
         sys.exit(0)
-    print(f"PARITY FAILED ({len(failures)} of 10)")
+    print(f"PARITY FAILED ({len(failures)} of 11)")
     for f in failures:
         print(f"  - {f}")
     sys.exit(1)

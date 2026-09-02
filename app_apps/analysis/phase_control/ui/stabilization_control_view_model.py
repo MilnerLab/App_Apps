@@ -40,6 +40,7 @@ class StabilizationControlViewModel(QObject):
     config_updated = Signal()              # subprocess synced new fit params
     plot_mode_changed = Signal(bool)       # plot-in-frequency toggled
     template_state_changed = Signal(str)   # human-readable frozen-template state
+    knife_edges_changed = Signal(bool)     # knife-edge markers toggled
 
     def __init__(
         self,
@@ -58,8 +59,10 @@ class StabilizationControlViewModel(QObject):
         self._current_phase_series: pg.PlotDataItem | None = None
         self._rf_label: pg.TextItem | None = None
         self._fwhm_lines: list[pg.InfiniteLine] = []
+        self._knife_lines: list[pg.InfiniteLine] = []
         self._active = False
         self._plot_frequency = False
+        self._show_knife_edges = True
         self._unsub = bus.subscribe(PhaseTrackingStateChanged, self._on_state_changed)
         self._unsub_cfg = bus.subscribe(StabilizationConfigChanged, self._on_config_updated)
         self._unsub_tpl = bus.subscribe(PhaseTemplateChanged, self._on_template_changed)
@@ -99,6 +102,22 @@ class StabilizationControlViewModel(QObject):
         self._rf_label = pg.TextItem(color=QColor("white"), anchor=(0, 0))
         self._rf_label.setZValue(100)
 
+        # Knife-edge markers: where the truncation detector put the clip, i.e. the boundary
+        # of the data the committed fit actually rests on. Two lines, one per side; a frame
+        # clipped on one side only ever shows one. Cosmetic pen for the same reason as the
+        # curves above -- dash lengths must be in screen pixels, not data units.
+        for side in ("left", "right"):
+            pen = QPen(QColor("red"))
+            pen.setStyle(Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            line = pg.InfiniteLine(angle=90, movable=False, pen=pen,
+                                   label="knife " + side,
+                                   labelOpts={"color": "red", "position": 0.92,
+                                              "movable": False})
+            line.setZValue(50)
+            line.setVisible(False)
+            self._knife_lines.append(line)
+
     def set_active(self, active: bool) -> None:
         """Attach/detach the spectrum_fit overlay curves to the shared chart."""
         if active == self._active:
@@ -121,6 +140,17 @@ class StabilizationControlViewModel(QObject):
         self._update_curves()
         self.plot_mode_changed.emit(enabled)
 
+    @property
+    def show_knife_edges(self) -> bool:
+        return self._show_knife_edges
+
+    def set_show_knife_edges(self, enabled: bool) -> None:
+        if enabled == self._show_knife_edges:
+            return
+        self._show_knife_edges = enabled
+        self._update_knife_lines()
+        self.knife_edges_changed.emit(enabled)
+
     def _attach_curves(self) -> None:
         if self._plot_item is None or self._set_phase_series is None or self._current_phase_series is None:
             return
@@ -128,7 +158,7 @@ class StabilizationControlViewModel(QObject):
             # Excluded from auto-range so the view stays driven by the live spectrum,
             # not by whatever the fit curves happen to be before a config is applied.
             self._plot_item.addItem(series, ignoreBounds=True)
-        for line in self._fwhm_lines:
+        for line in (*self._fwhm_lines, *self._knife_lines):
             self._plot_item.addItem(line, ignoreBounds=True)
         if self._rf_label is not None:
             self._rf_label.setParentItem(self._plot_item.getViewBox())
@@ -140,7 +170,7 @@ class StabilizationControlViewModel(QObject):
         for series in (self._set_phase_series, self._current_phase_series):
             if series is not None:
                 self._plot_item.removeItem(series)
-        for line in self._fwhm_lines:
+        for line in (*self._fwhm_lines, *self._knife_lines):
             self._plot_item.removeItem(line)
         if self._rf_label is not None:
             self._rf_label.setParentItem(None)
@@ -177,7 +207,8 @@ class StabilizationControlViewModel(QObject):
         self._set_phase_series.setData(x, set_phase_curve)
         self._current_phase_series.setData(x, current_phase_curve)
         self._update_rf_label()
-        self._update_fwhm_lines(lambda_ref)
+        self._update_fwhm_lines()
+        self._update_knife_lines()
 
         if rescale and self._plot_item is not None:
             x_lo, x_hi = float(x.min()), float(x.max())
@@ -188,7 +219,39 @@ class StabilizationControlViewModel(QObject):
             self._plot_item.setXRange(x_lo - x_pad, x_hi + x_pad, padding=0)
             self._plot_item.setYRange(y_lo - y_pad, y_hi + y_pad, padding=0)
 
-    def _update_fwhm_lines(self, lambda_ref_nm: float) -> None:
+    def _to_plot_x(self, wl_nm: float) -> float:
+        """A wavelength in the plot's current x units.
+
+        The knife edge is measured in nm, but the chart may be showing detuning, so the
+        marker has to go through the SAME mapping as the curves -- otherwise it would sit at
+        a plausible-looking but wrong place, which is worse than not drawing it.
+        """
+        if not self._plot_frequency:
+            return float(wl_nm)
+        lambda_ref = self._config.params.lambda_ref.value(Prefix.NANO)
+        return float(2.0 * np.pi * SPEED_OF_LIGHT / wl_nm * 1e-3
+                     - 2.0 * np.pi * SPEED_OF_LIGHT / lambda_ref * 1e-3)
+
+    def _update_knife_lines(self) -> None:
+        """Place/hide the two knife-edge markers from the committed fit.
+
+        Hidden when the toggle is off, and hidden per side when that side has no cut -- an
+        unclipped frame must show nothing at all rather than a marker parked at an edge of
+        the window, which would read as a clip that is not there.
+        """
+        if not self._knife_lines:
+            return
+        p = self._config.params
+        for line, cut in zip(self._knife_lines, (p.cut_left, p.cut_right)):
+            if cut is None or not self._show_knife_edges:
+                line.setVisible(False)
+                continue
+            line.setPos(self._to_plot_x(float(cut)))
+            # Re-shown explicitly: a side that was hidden on an unclipped frame has to come
+            # back when the clip returns, and setPos alone does not do that.
+            line.setVisible(True)
+
+    def _update_fwhm_lines(self) -> None:
         """Place the two verticals at this shot's own FWHM edges.
 
         Same band the f_cfg readout quotes -- ``fringe_core.fwhm_band_nm`` on the committed
@@ -209,13 +272,8 @@ class StabilizationControlViewModel(QObject):
             for line in self._fwhm_lines:
                 line.setVisible(False)
             return
-        if self._plot_frequency:
-            omega0 = 2.0 * np.pi * SPEED_OF_LIGHT / lambda_ref_nm * 1e-3
-            xs = [2.0 * np.pi * SPEED_OF_LIGHT / nm * 1e-3 - omega0 for nm in band]
-        else:
-            xs = list(band)
-        for line, x in zip(self._fwhm_lines, xs):
-            line.setPos(float(x))
+        for line, nm in zip(self._fwhm_lines, band):
+            line.setPos(self._to_plot_x(float(nm)))
             line.setVisible(True)
 
     def _update_rf_label(self) -> None:
