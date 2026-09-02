@@ -17,6 +17,7 @@ from app_apps.io.control_readout.uts150cc.handler import Uts150ccHandle
 from app_apps.io.oscilloscope.module import OscilloscopeModule
 from app_apps.io.oscilloscope.oscilloscope_worker_handler import OscilloscopeWorkerHandle
 from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
+from app_apps.routines.cfg_auto_calibration.fit import CentrifugeFitMap
 from app_apps.routines.cfg_calibration.cfg_range import CfgRange
 from app_apps.routines.xcorr.config import XcorrConfig
 from app_apps.routines.xcorr.routine import XcorrRoutine
@@ -62,6 +63,22 @@ class RoutinesModule(BaseModule):
             settings=c.get(XcorrSettings),
         ))
         c.register_factory(XcorrView, lambda c: XcorrView(c.get(XcorrViewModel), parent=None))
+
+        # --- CFG auto-calibration (operator-driven send-to; distinct from the above) ---
+        c.register_singleton(CentrifugeFitMap, lambda _: CentrifugeFitMap())
+
+        from app_apps.routines.cfg_auto_calibration.ui.view_model import CfgAutoCalibrationViewModel
+        from app_apps.routines.cfg_auto_calibration.ui.view import CfgAutoCalibrationView
+
+        c.register_factory(CfgAutoCalibrationViewModel, lambda c: CfgAutoCalibrationViewModel(
+            bus=ctx.event_bus,
+            dispatcher=c.get(QtDispatcher),
+            grating=c.get(Uts150ccHandle),
+            delay=c.get(MfaccHandle),
+            probe=c.get(Fms300ppHandle),
+            fit_map=c.get(CentrifugeFitMap),
+        ))
+        c.register_factory(CfgAutoCalibrationView, lambda c: CfgAutoCalibrationView(c.get(CfgAutoCalibrationViewModel), parent=None))
 
     @staticmethod
     def _register_xcorr(c: Container, ctx: AppContext) -> None:

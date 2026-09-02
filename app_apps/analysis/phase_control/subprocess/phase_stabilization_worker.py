@@ -11,6 +11,7 @@ from base_core.ipc.threaded_worker import ThreadedWorker, worker_thread
 from base_core.math.models import Angle
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import PhaseCorrector
+from app_apps.analysis.phase_control.subprocess.domain.phase_template import PhaseTemplate
 from app_apps.analysis.phase_control.subprocess.domain.template_tracker import (
     PhaseAverager,
     TemplateState,
@@ -22,6 +23,8 @@ from app_apps.analysis.phase_control.subprocess.messages import (
     ConfigSynced,
     InvalidateTemplate,
     ProcessSpectrum,
+    CorrectionStatus,
+    RunningPhaseMean,
     RecallReference,
     SetStabilizationConfig,
     SpectrumProcessed,
@@ -36,6 +39,9 @@ _TWO_PI = 2.0 * math.pi
 # circularly averaged error, so the noise has already been taken out of it. config.loop_gain
 # is not unused in this mode -- it is the weight in that average.
 _TEMPLATE_CORRECTION_GAIN = 1.0
+# Seconds between running-mean readouts to the panel. The fit runs at the full frame rate
+# and this is only a curve on a chart; 4 Hz is smooth to the eye and cheap on the bus.
+_MEAN_PUBLISH_PERIOD_S = 0.25
 
 if TYPE_CHECKING:
     from base_core.framework.events.event_bus import EventBus
@@ -65,6 +71,7 @@ class PhaseStabilizationWorker(ThreadedWorker):
         # the last correction went out.
         self._averager = PhaseAverager()
         self._last_correction = time.perf_counter()
+        self._last_mean_publish = 0.0
         self._paused = True
         self._latest_item_id = -1     # newest arrival (drop-stale coalescing)
         self._skipped_since_fit = 0   # frames coalesced away since the last real fit
@@ -77,6 +84,17 @@ class PhaseStabilizationWorker(ThreadedWorker):
         # Last (state, captured, needed) put on the wire, so the per-frame publish below
         # can stay silent while nothing moves. None = nothing published yet.
         self._last_state_stamp: tuple | None = None
+        # THE REFERENCE, kept OUTSIDE the tracker so it survives the tracker being rebuilt
+        # -- which is what Stop/Start does, and what a routine restarting stabilization does.
+        # It holds the most recent reference however it arrived: recalled off a file (pinned)
+        # or captured from live traces (not pinned). Without this, Start threw the operator's
+        # reference away and the loop came back up with nothing installed.
+        self._seed_template: PhaseTemplate | None = None
+        self._seed_pinned = False
+        # A Capture reference pressed while stabilization is STOPPED. Held rather than
+        # dropped: there is no tracker to arm yet, and silently discarding the press leaves
+        # the operator watching a loop that never captures and never says why.
+        self._capture_pending = False
 
     def _setup(self) -> None:
         self._unsubs.append(self._bus.subscribe(SetStabilizationConfig, self._on_set_config))
@@ -113,13 +131,20 @@ class PhaseStabilizationWorker(ThreadedWorker):
         self._averager.reset()
         self._last_correction = time.perf_counter()
         self._last_state_stamp = None   # a fresh tracker re-announces itself unconditionally
-        # Arm the capture immediately in slow mode, rather than waiting to be asked. The
-        # tracker starts OFF, which is the cold per-frame loop -- so without this, starting
-        # stabilization silently gave the operator the fast loop while the panel offered no
-        # hint that a button press stood between them and the one they had selected.
-        # Capture holds (issues no correction) for ~5 s at 2 Hz, then locks.
+        self._corrector.deadband = self._config.correction_deadband_rad
+        # Start does NOT capture. A 10-trace refit is only ever started by an explicit
+        # Capture reference -- from the panel or from a routine -- because one that fires on
+        # its own replaces the shape the loop is holding against at a moment nobody chose.
+        # So slow mode with no template starts IDLE: the cold fit runs for the display, and
+        # nothing moves the plate. A recalled template is installed and locks at once.
         if self._config.slow_correction and self._tracker is not None:
-            self._tracker.request_capture()
+            if self._seed_template is not None:
+                self._tracker.install(self._seed_template, pinned=self._seed_pinned)
+            elif self._capture_pending:
+                self._capture_pending = False
+                self._tracker.request_capture()
+            else:
+                self._tracker.idle("stabilization started without a reference")
         self._publish_template_state()
 
     def _on_spectrum(self, msg: ProcessSpectrum) -> None:
@@ -196,6 +221,12 @@ class PhaseStabilizationWorker(ThreadedWorker):
                 self._notify(ConfigSynced(config=self._config))
             if outcome.template_changed:
                 self._averager.reset()   # a new template redefines what the mean is OF
+                # A capture that just landed becomes THE reference: held outside the tracker
+                # so Stop/Start restores it rather than coming back up empty. Not pinned --
+                # pinned means "recalled off a file", which is what the panel colours yellow.
+                if outcome.state == TemplateState.LOCKED and self._tracker.template is not None:
+                    self._seed_template = self._tracker.template
+                    self._seed_pinned = self._tracker.pinned
             # Publish on every CHANGE of (state, progress), not only when a template
             # appears. The capture run advances 1..9 with template_changed False, and an
             # ABANDONED run resets to 0 with it False too -- so gating the notify on it
@@ -221,26 +252,53 @@ class PhaseStabilizationWorker(ThreadedWorker):
         assert self._corrector is not None
         self._averager.add(phase_abs, self._config.loop_gain)
         now = time.perf_counter()
+        # The panel draws the averaged trace from this, so it has to arrive while the mean
+        # is being ACCUMULATED, not once per correction period -- a curve that steps once
+        # every 10 s is not the thing the loop is working on, it is a snapshot of it.
+        # Rate-limited because the fit runs at the full frame rate and this is a readout.
+        if now - self._last_mean_publish >= _MEAN_PUBLISH_PERIOD_S:
+            self._last_mean_publish = now
+            mean_now = self._averager.value()
+            if mean_now is not None:
+                self._notify(RunningPhaseMean(mean_phase_rad=mean_now,
+                                              frames=self._averager.count,
+                                              coherence=self._averager.coherence))
         if now - self._last_correction < self._config.correction_period_s:
             return
         self._last_correction = now
         mean = self._averager.value()
         if mean is None:
+            self._notify(CorrectionStatus(reason="no accepted frames since the last one",
+                                          period_s=self._config.correction_period_s))
             return
         n = self._averager.count
         self._averager.reset()
         log.info("template: correcting on the mean of %d frames, phi=%.3f rad", n, mean)
-        self._emit_correction(Angle(mean % _TWO_PI), _TEMPLATE_CORRECTION_GAIN)
+        self._emit_correction(Angle(mean % _TWO_PI), _TEMPLATE_CORRECTION_GAIN, frames=n)
 
-    def _emit_correction(self, phase: Angle, gain: float) -> None:
+    def _emit_correction(self, phase: Angle, gain: float, frames: int = 1) -> None:
         assert self._corrector is not None
         # Set per call rather than at construction: the two modes correct at different
         # cadences and so need different gains, and the corrector is the one place the gain
         # is clamped before it can reach the stage.
         self._corrector.gain = gain
+        error = float(Angle(phase - self._corrector.target_phase).Rad)
         result = self._corrector.update(phase)
         if result is not None:
             self._notify(CorrectionAvailable(angle=result.angle, sign=result.sign))
+        # Reported either way: a correction WITHHELD because the error was inside the
+        # deadband is exactly what the panel needs to show, and from outside it is
+        # indistinguishable from a dead loop unless it is said out loud.
+        self._notify(CorrectionStatus(
+            phase_error_rad=error,
+            commanded_deg=0.0 if result is None else float(result.angle.Deg),
+            applied=result is not None,
+            reason="" if result is not None else
+                   (f"error {abs(error):.3f} rad is inside the "
+                    f"{self._corrector.deadband.Rad:.3f} rad deadband"),
+            period_s=self._config.correction_period_s,
+            frames=frames,
+        ))
 
     def _publish_template_state(self) -> None:
         """Notify the UI of (state, capture progress), but only when it has changed.
@@ -251,27 +309,47 @@ class PhaseStabilizationWorker(ThreadedWorker):
         if self._tracker is None:
             return
         got, need = self._tracker.capture_progress
-        stamp = (self._tracker.state, got, need)
+        stamp = (self._tracker.state, got, need, self._tracker.pinned,
+                 self._tracker.abandoned_runs)
         if stamp == self._last_state_stamp:
             return
         self._last_state_stamp = stamp
         self._notify(TemplateStateChanged(
             state=self._tracker.state.value, captured=got, needed=need,
-            template=self._tracker.template,
+            template=self._tracker.template, pinned=self._tracker.pinned,
+            abandoned=self._tracker.abandoned_runs,
         ))
 
     @worker_thread
     def _on_capture_reference(self, msg: CaptureReference) -> None:
+        # Capture is the operator asking for a FRESH shape, so it retires whatever reference
+        # is held: otherwise the next Start would silently resurrect the one being replaced.
+        # The capture that lands installs itself as the new one (see _process_spectrum).
+        self._seed_template = None
+        self._seed_pinned = False
         if self._tracker is not None:
             self._tracker.request_capture()
             self._averager.reset()
             self._publish_template_state()
+        else:
+            # Pressed before Start: run it when there is something to run it on.
+            self._capture_pending = True
         self._reply_ok(msg)
 
     @worker_thread
     def _on_recall_reference(self, msg: RecallReference) -> None:
-        if self._tracker is not None and msg.template is not None:
-            self._tracker.install(msg.template)
+        # Remembered whether or not a tracker exists right now: Recall is usable while
+        # stabilization is stopped, and that is in fact when it is normally used.
+        # template=None is the operator deselecting the recall.
+        self._seed_template = msg.template
+        self._seed_pinned = msg.template is not None
+        if self._tracker is not None:
+            if msg.template is not None:
+                self._tracker.install(msg.template, pinned=True)
+            elif self._config.slow_correction:
+                # Deselected while running: back to where Start would have left it, which is
+                # IDLE. Deselecting a recall is not a request for a new capture.
+                self._tracker.idle("recall deselected")
             self._averager.reset()
             self._publish_template_state()
         self._reply_ok(msg)
@@ -299,7 +377,12 @@ class PhaseStabilizationWorker(ThreadedWorker):
             # good template for 5 s.
             if self._config.slow_correction:
                 if self._tracker.state == TemplateState.OFF:
-                    self._tracker.request_capture()
+                    # Same precedence as _build_tracker, and the same rule: switching to slow
+                    # does not start a capture.
+                    if self._seed_template is not None:
+                        self._tracker.install(self._seed_template, pinned=self._seed_pinned)
+                    else:
+                        self._tracker.idle()
                     self._publish_template_state()
             elif self._tracker.disable():
                 self._averager.reset()
@@ -310,6 +393,7 @@ class PhaseStabilizationWorker(ThreadedWorker):
             # behaviour change mid-run for a value they did not touch.
             self._corrector.target_phase = self._config.set_phase
             self._corrector.gain = self._config.loop_gain
+            self._corrector.deadband = self._config.correction_deadband_rad
             self._corrector.invert = self._config.invert_correction
         self._notify(ConfigSynced(config=self._config))
         self._reply_ok(msg)

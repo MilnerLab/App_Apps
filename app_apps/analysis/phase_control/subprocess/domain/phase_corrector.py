@@ -7,7 +7,13 @@ import numpy as np
 from base_core.math.enums import AngleUnit
 from base_core.math.models import Angle
 
-PHASE_TOLERANCE = Angle(10, AngleUnit.DEG)
+# Deadband: below this much phase error the loop does nothing. It is not a nicety -- every
+# correction is a physical plate move with its own settling and backlash, so correcting a
+# 0.02 rad error costs more disturbance than it removes. 0.1 rad (5.7 deg) is the default and
+# it is a CONFIG value (StabilizationConfig.correction_deadband_rad), because how small an
+# error is worth moving for depends on the experiment.
+DEADBAND_RAD = 0.1
+PHASE_TOLERANCE = Angle(DEADBAND_RAD, AngleUnit.RAD)
 CONVERSION_CONST = 1 / 4
 # Baseline direction: which way the plate must turn to REDUCE a positive phase error.
 # It is not a free parameter of the loop -- it is a property of the optics, and it FLIPS
@@ -20,8 +26,16 @@ CONVERSION_CONST = 1 / 4
 # at the OTHER fixed point -- stable, and exactly pi off target. A stable lock half a turn
 # from where you asked for it is the signature of this sign, not of a bad gain.
 CORRECTION_SIGN = -1
-# Fraction of the measured error corrected per frame. Corrections are relative, so the
-# loop integrates and this alone sets its bandwidth: ~1/LOOP_GAIN frames to pull in.
+# What this means depends on WHICH loop is running, and the two readings are not the same
+# number wearing one name:
+#
+#   fast (cold) loop   the fraction of the measured error corrected per frame. Corrections
+#                      are relative, so the loop integrates and this alone sets its
+#                      bandwidth: ~1/LOOP_GAIN frames to pull in.
+#   slow (template)    NOT the step size -- that correction runs at gain 1.0 and drives the
+#                      averaged error to zero in one move. Here it is the weight in
+#                      PhaseAverager's circular EWMA, so it sets the averaging MEMORY:
+#                      ~1/LOOP_GAIN frames. 0.05 is "average the last 20 frames".
 # Deliberately slow. The phase noise is faster than the ~0.5 s measure-and-move cycle
 # and so cannot be tracked; chasing it just injects it into the stage. We correct
 # long-term drift and average the noise away. This also keeps the loop overdamped
@@ -53,11 +67,14 @@ class PhaseCorrector:
 
     The result is a relative increment, never an absolute position: the corrector
     never knows where the stage is, only how far off the phase is.
+
+    Errors inside ``deadband`` produce no correction at all -- ``update`` returns None.
     """
     _correction_angle: Angle = Angle(0, AngleUnit.DEG)
     _target_phase: Angle = Angle(0, AngleUnit.DEG)
     _gain: float = LOOP_GAIN
     _invert: bool = False
+    _deadband: Angle = PHASE_TOLERANCE
 
     @property
     def target_phase(self) -> Angle:
@@ -80,6 +97,18 @@ class PhaseCorrector:
         self._gain = min(max(float(value), GAIN_MIN), GAIN_MAX)
 
     @property
+    def deadband(self) -> Angle:
+        """Phase error below which no correction is issued. See DEADBAND_RAD."""
+        return self._deadband
+
+    @deadband.setter
+    def deadband(self, value: float | Angle) -> None:
+        # Clamped at zero only: a negative deadband is meaningless, but there is no upper
+        # bound to enforce -- a large one is a deliberate "hold unless it is badly off".
+        rad = float(value.Rad if isinstance(value, Angle) else value)
+        self._deadband = Angle(max(rad, 0.0), AngleUnit.RAD)
+
+    @property
     def invert(self) -> bool:
         return self._invert
 
@@ -94,7 +123,7 @@ class PhaseCorrector:
         # Angle() wraps to (-pi, pi], so this is already the shortest way round.
         phase_error = Angle(phase - self._target_phase)
 
-        if np.abs(phase_error) <= PHASE_TOLERANCE:
+        if np.abs(phase_error) <= self._deadband:
             return None
 
         self._correction_angle = self._convert_phase_to_hwp(phase_error)

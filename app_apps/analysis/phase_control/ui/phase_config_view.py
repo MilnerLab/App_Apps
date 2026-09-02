@@ -52,10 +52,14 @@ class PhaseConfigView(DirtyForm):
         "rms_frac_threshold": FloatSpec("Accept rms/amp below",    0.0,   2.0,     decimals=3, step=0.02),
         "inlier_threshold":  FloatSpec("Accept inliers above (%)", 0.0,   100.0,   decimals=0, step=1.0),
         "min_visibility":    FloatSpec("Abort fit below visibility", 0.0, 1.0,   decimals=3, step=0.01),
-        "loop_gain":         FloatSpec("Loop gain (err/frame)", GAIN_MIN, GAIN_MAX, decimals=2, step=0.01),
+        "loop_gain":         FloatSpec("Loop gain (1/frames avgd)", GAIN_MIN, GAIN_MAX, decimals=3, step=0.01),
+        "correction_deadband_rad": FloatSpec("Do not correct below (rad)", 0.0, 3.14,
+                                             decimals=3, step=0.01),
         "invert_correction": BoolSpec("Invert correction sign"),
         "correction_period_s":  FloatSpec("Correct every (s)",      1.0,  600.0,  decimals=1, step=1.0),
-        "shape_mismatch_max":   FloatSpec("Re-capture above mismatch", 0.0, 1.0,  decimals=4, step=0.001),
+        # Diagnostic scale only: the mismatch is logged as a percentage OF this. Nothing
+        # is dropped on it -- see TemplateTracker._track.
+        "shape_mismatch_max":   FloatSpec("Mismatch reference (log only)", 0.0, 1.0, decimals=4, step=0.001),
         "min_amplitude_frac":   FloatSpec("Hold below amp fraction", 0.0,  1.0,   decimals=2, step=0.05),
     }
     _groups = [
@@ -66,7 +70,7 @@ class PhaseConfigView(DirtyForm):
             "wavelength_range", "rms_frac_threshold", "inlier_threshold", "min_visibility",
         ]),
         ("Control loop", [
-            "loop_gain", "invert_correction",
+            "loop_gain", "correction_deadband_rad", "invert_correction",
         ]),
         # All three are editable while running, and for the same reason min_visibility is:
         # they can only be judged against a live trace and a running loop.

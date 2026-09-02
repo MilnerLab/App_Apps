@@ -76,6 +76,10 @@ class PhaseControlView(Panel):
         self._save_csv_btn.clicked.connect(self._on_save_csv)
         self._connect(self.vm.spectrum_updated, self._on_spectrum_updated)
         self._connect(self.vm.stabilization_vm.plot_mode_changed, self._update_axis_label)
+        # The live curve is owned here, not by the stabilization model, so its toggle
+        # arrives as a signal rather than being applied with the two fit overlays.
+        self._connect(self.vm.stabilization_vm.raw_visible_changed,
+                      self._live_curve.setVisible)
 
     def _on_save_csv(self) -> None:
         path, _ = QFileDialog.getSaveFileName(

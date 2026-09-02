@@ -74,13 +74,16 @@ class AppShell(LabMainWindow):
     def _build_routines_menu(self, container: Container) -> None:
         from base_qt.ui.view_host import ViewHost
         from app_apps.routines.cfg_calibration.ui.view import CfgCalibrationView
+        from app_apps.routines.cfg_auto_calibration.ui.view import CfgAutoCalibrationView
         from app_apps.routines.xcorr.ui.view import XcorrView
 
         menu = self.menuBar().addMenu("Routines")
         self._cfg_calibration_host = ViewHost(container, CfgCalibrationView, parent=self)
+        self._cfg_auto_calibration_host = ViewHost(container, CfgAutoCalibrationView, parent=self)
         self._xcorr_host = ViewHost(container, XcorrView, parent=self)
 
         menu.addAction("CFG Calibration", self._cfg_calibration_host.open)
+        menu.addAction("CFG Auto-Calibration", self._cfg_auto_calibration_host.open)
         menu.addAction("XCORR Scan", self._xcorr_host.open)
 
     def closeEvent(self, event: QCloseEvent) -> None:

@@ -94,6 +94,35 @@ class StabilizationControlView(QWidget):
         freq_row.addStretch()
         fbox.addLayout(freq_row)
 
+        # --- which traces are drawn ---------------------------------------------------
+        # Three curves overlap on one chart and each answers a different question: where the
+        # fringes are RIGHT NOW, where the loop's average says they are (which is what the
+        # correction is computed from), and where they are being held. All on by default --
+        # the comparison between them is the point -- but any one of them can be taken off
+        # to read the others.
+        trace_row = QHBoxLayout()
+        trace_row.setSpacing(4)
+        trace_row.addWidget(QLabel("Traces:"))
+        self._raw_cb = QCheckBox("Raw")
+        self._raw_cb.setToolTip("The live spectrometer trace, one frame, uncorrected.")
+        self._raw_cb.setChecked(vm.show_raw)
+        trace_row.addWidget(self._raw_cb)
+        self._mean_cb = QCheckBox("Averaged")
+        self._mean_cb.setToolTip(
+            "The reference shape moved to the loop's circular running mean -- the trace the "
+            "correction is actually computed from. Needs a reference installed."
+        )
+        self._mean_cb.setChecked(vm.show_mean)
+        trace_row.addWidget(self._mean_cb)
+        self._target_cb = QCheckBox("Target")
+        self._target_cb.setToolTip(
+            "The installed reference: red when captured, yellow when recalled from a file."
+        )
+        self._target_cb.setChecked(vm.show_target)
+        trace_row.addWidget(self._target_cb)
+        trace_row.addStretch()
+        fbox.addLayout(trace_row)
+
         row.addWidget(frame)
         row.addWidget(self._build_reference_frame())
 
@@ -121,6 +150,15 @@ class StabilizationControlView(QWidget):
         self._auto_cut_btn.clicked.connect(self._vm.clear_manual_cut_left)
         self._vm.cut_left_changed.connect(
             lambda _nm, manual: self._auto_cut_btn.setEnabled(bool(manual)))
+        self._raw_cb.checkStateChanged.connect(
+            lambda state: self._vm.set_show_raw(state == Qt.CheckState.Checked)
+        )
+        self._mean_cb.checkStateChanged.connect(
+            lambda state: self._vm.set_show_mean(state == Qt.CheckState.Checked)
+        )
+        self._target_cb.checkStateChanged.connect(
+            lambda state: self._vm.set_show_target(state == Qt.CheckState.Checked)
+        )
         self._knife_cb.checkStateChanged.connect(
             lambda state: self._vm.set_show_knife_edges(state == Qt.CheckState.Checked)
         )
@@ -148,6 +186,14 @@ class StabilizationControlView(QWidget):
 
         self._template_label = QLabel(self._vm.template_text)
         box.addWidget(self._template_label)
+
+        # Where the plate is, what it was last told to do, and when it will be told again.
+        self._plate_label = QLabel(self._vm.plate_text)
+        self._plate_label.setToolTip(
+            "The RGV waveplate's current orientation, the rotation the loop last commanded "
+            "(or why it held), and the time until the next correction instant")
+        self._vm.plate_status_changed.connect(self._plate_label.setText)
+        box.addWidget(self._plate_label)
 
         # Which loop runs. Radio buttons rather than a checkbox: both options are named,
         # so the one that is NOT selected is still readable off the panel -- and the two
@@ -182,9 +228,19 @@ class StabilizationControlView(QWidget):
         save = QPushButton("Save")
         save.clicked.connect(self._on_save_reference)
         recall = QPushButton("Recall")
-        recall.setToolTip("Load a saved template, overriding the current one")
+        recall.setToolTip("Load a saved template and hold it: it is drawn on the chart at "
+                          "once, and nothing automatic replaces it until it is cleared")
         recall.clicked.connect(self._on_recall_reference)
-        for b in (capture, save, recall):
+        # Deselecting the recall is the ONLY way back to automatic capture short of pressing
+        # Capture reference, so it needs a control of its own -- enabled only when there is
+        # actually a recalled template to clear.
+        self._clear_recall_btn = QPushButton("Clear recall")
+        self._clear_recall_btn.setToolTip(
+            "Stop holding the recalled template and let the loop capture its own again")
+        self._clear_recall_btn.setEnabled(self._vm.has_recall)
+        self._clear_recall_btn.clicked.connect(self._vm.clear_recall)
+        self._vm.recall_changed.connect(self._clear_recall_btn.setEnabled)
+        for b in (capture, save, recall, self._clear_recall_btn):
             btns.addWidget(b)
         btns.addStretch()
         box.addLayout(btns)

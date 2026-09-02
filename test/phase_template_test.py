@@ -23,8 +23,20 @@ from app_apps.analysis.phase_control.subprocess.domain.phase_template import (  
     instantaneous_frequency,
     shape_mismatch,
 )
+from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import (  # noqa: E402
+    FringeFitParams,
+    StabilizationConfig,
+)
+from base_core.math.enums import AngleUnit  # noqa: E402
+from base_core.math.models import Angle  # noqa: E402
+from app_apps.analysis.phase_control.subprocess.domain.phase_corrector import (  # noqa: E402
+    DEADBAND_RAD,
+    PhaseCorrector,
+)
 from app_apps.analysis.phase_control.subprocess.domain.template_tracker import (  # noqa: E402
     PhaseAverager,
+    TemplateState,
+    TemplateTracker,
 )
 
 X = np.linspace(792.0, 812.0, 700)
@@ -230,6 +242,154 @@ def test_phase_averager_is_circular() -> None:
     check(b.value() is None and b.count == 0, "reset flushes")
 
 
+def test_a_template_is_never_dropped_automatically() -> None:
+    """Once installed, a reference survives anything short of being told to go.
+
+    Every automatic drop is gone: the per-frame shape-mismatch backstop (which could not tell
+    a real shape change from its own live spread -- 0.008..0.112, with the smallest
+    deliberate change ever measured at 0.0114, inside it) and the stage-move trigger that
+    fired at every setpoint of every scan. A reference the operator captured or recalled is
+    theirs until they replace it.
+    """
+    cfg = StabilizationConfig(params=FringeFitParams())
+    tracker = TemplateTracker(cfg)
+    tracker.install(make_template())
+
+    off = list(CSIG); off[1] *= 1.25     # a shape 25% off in carrier: mismatch ~0.25
+    bad = trace(0.0, csig=tuple(off))
+    for _ in range(100):
+        tracker.update(X, bad)
+    check(tracker.state is TemplateState.LOCKED,
+          "100 frames of a badly mismatched shape do not drop the template")
+    check(tracker.template is not None, "and it is still installed")
+
+    out = tracker.update(X, trace(0.4))
+    check(out.phase_abs is not None,
+          "and the loop is still tracking against it, not merely holding")
+
+    # invalidate() survives as the COMMANDED drop -- for a routine that knows the shape moved.
+    check(tracker.invalidate("routine asked for it") is True, "an explicit drop still works")
+    check(tracker.state is TemplateState.IDLE and tracker.template is None,
+          "and lands in IDLE with no template, awaiting an explicit capture")
+
+
+def test_an_abandoned_capture_retries() -> None:
+    """A run of 10 the averaged-trace gates reject must start another run, not give up."""
+    cfg = StabilizationConfig(params=FringeFitParams())
+    tracker = TemplateTracker(cfg)
+    tracker.request_capture()
+    check(tracker.abandoned_runs == 0, "a fresh capture has no abandoned runs behind it")
+
+    # A run of washed-out traces: no fringes, so the averaged-visibility gate rejects it.
+    # Reaching _build_template is the point -- this is the path that used to stop silently.
+    tracker._run_wl = X
+    tracker._run = [fc.gauss(X, *PU) for _ in range(10)]
+    check(tracker._build_template() is False, "the averaged run is rejected")
+    check(tracker.state is TemplateState.CAPTURING,
+          "and the tracker is still capturing -- it retries rather than giving up")
+    check(tracker.abandoned_runs == 1, "the rejected run is counted, so the panel can say so")
+
+    tracker._run_wl = X
+    tracker._run = [fc.gauss(X, *PU) for _ in range(10)]
+    tracker._build_template()
+    check(tracker.abandoned_runs == 2, "and they accumulate until one lands")
+
+    tracker.request_capture()
+    check(tracker.abandoned_runs == 0, "a fresh Capture reference starts the count over")
+
+
+def test_a_recalled_template_locks_and_stays() -> None:
+    """Recall installs a shape and the loop keeps it, however far off the live fringes are.
+
+    This is the operator's explicit choice, made with stabilization usually STOPPED, and the
+    loop used to answer it by collecting 10 new traces before the panel had drawn the file
+    once.
+    """
+    cfg = StabilizationConfig(params=FringeFitParams())
+    tracker = TemplateTracker(cfg)
+    off = list(CSIG); off[1] *= 1.25
+    tracker.install(make_template(csig=tuple(off)))
+    check(tracker.state is TemplateState.LOCKED, "recall installs and locks")
+
+    for _ in range(50):
+        tracker.update(X, trace(0.4))
+    check(tracker.state is TemplateState.LOCKED and tracker.template is not None,
+          "and a badly mismatched recall is still held 50 frames later")
+
+
+def test_a_pinned_recall_is_retired_only_by_the_operator() -> None:
+    """``pinned`` records that the shape came off disk, so the panel can say so and Clear
+    recall can clear it. Capture reference retires it -- that IS the operator asking for a
+    different shape."""
+    cfg = StabilizationConfig(params=FringeFitParams())
+    tracker = TemplateTracker(cfg)
+    tracker.install(make_template(), pinned=True)
+    check(tracker.pinned, "install(pinned=True) pins")
+    check(tracker.state is TemplateState.LOCKED, "and locks")
+
+    tracker.request_capture()
+    check(not tracker.pinned and tracker.state is TemplateState.CAPTURING,
+          "Capture reference is how the operator retires a pinned recall")
+    check(tracker.invalidate("delay move") is False
+          and tracker.state is TemplateState.CAPTURING,
+          "an invalidation during that capture restarts the run, it does not cancel it")
+
+
+def test_nothing_starts_a_capture_but_an_explicit_request() -> None:
+    """A 10-trace refit is an act, never a consequence.
+
+    It used to be a consequence of three things: pressing Start, switching to slow, and any
+    invalidation -- and the last of those fires on every commanded delay move, i.e. at every
+    setpoint of every scan. Each one replaced the shape the loop was holding against with
+    whatever the fringes looked like at a moment nobody chose. The tracker now drops to IDLE
+    and stays there; only request_capture() (the panel button, or a routine through
+    PhaseStabilizationHandle.capture_reference) starts one.
+    """
+    cfg = StabilizationConfig(params=FringeFitParams())
+    tracker = TemplateTracker(cfg)
+
+    tracker.idle()
+    check(tracker.state is TemplateState.IDLE, "a fresh slow-mode loop sits idle")
+    out = tracker.update(X, trace(0.4))
+    check(out.phase_abs is None and out.cold_phase is None,
+          "and issues nothing, by either path, however many frames arrive")
+    check(tracker.state is TemplateState.IDLE, "and does not drift into a capture")
+
+    tracker.install(make_template())
+    check(tracker.state is TemplateState.LOCKED, "a template locks it")
+    check(tracker.invalidate("commanded by a routine") is True,
+          "an explicit invalidation drops the template")
+    check(tracker.state is TemplateState.IDLE, "-- to IDLE, not into a capture")
+    for _ in range(30):
+        tracker.update(X, trace(0.4))
+    check(tracker.state is TemplateState.IDLE, "and it stays there")
+
+    tracker.request_capture()
+    check(tracker.state is TemplateState.CAPTURING, "an explicit request is what starts one")
+
+
+def test_the_deadband_is_config_and_holds_small_errors() -> None:
+    """Below the configured deadband the loop commands nothing at all."""
+    corr = PhaseCorrector()
+    check(abs(corr.deadband.Rad - DEADBAND_RAD) < 1e-12,
+          f"the default deadband is {DEADBAND_RAD} rad")
+    check(abs(StabilizationConfig(params=FringeFitParams()).correction_deadband_rad
+              - DEADBAND_RAD) < 1e-12, "and the config carries the same default")
+
+    corr.deadband = 0.1
+    check(corr.update(Angle(0.09, AngleUnit.RAD)) is None,
+          "0.09 rad is inside a 0.1 rad deadband -- nothing commanded")
+    check(corr.update(Angle(-0.09, AngleUnit.RAD)) is None, "and so is -0.09 rad")
+    check(corr.update(Angle(0.5, AngleUnit.RAD)) is not None,
+          "0.5 rad is outside it -- a rotation is commanded")
+
+    corr.deadband = 0.0
+    check(corr.update(Angle(0.01, AngleUnit.RAD)) is not None,
+          "a zero deadband corrects everything (the loop is tunable, not hardcoded)")
+    corr.deadband = -1.0
+    check(corr.deadband.Rad == 0.0, "a negative deadband clamps to zero")
+
+
 TESTS = [
     test_closed_form_matches_brute_force,
     test_cost,
@@ -240,6 +400,12 @@ TESTS = [
     test_align_sign_enforces_continuity,
     test_absolute_phase_is_continuous_across_recapture,
     test_phase_averager_is_circular,
+    test_a_template_is_never_dropped_automatically,
+    test_an_abandoned_capture_retries,
+    test_a_recalled_template_locks_and_stays,
+    test_a_pinned_recall_is_retired_only_by_the_operator,
+    test_nothing_starts_a_capture_but_an_explicit_request,
+    test_the_deadband_is_config_and_holds_small_errors,
 ]
 
 if __name__ == "__main__":

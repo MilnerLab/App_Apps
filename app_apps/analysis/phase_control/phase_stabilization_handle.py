@@ -8,6 +8,8 @@ from base_core.ipc.service_connector import ServicePipelineConnector
 from base_core.ipc.worker_handle import BaseWorkerHandle
 from base_core.quantities.enums import Prefix
 from app_apps.analysis.phase_control.events import (
+    PhaseCorrectionReported,
+    PhaseMeanReported,
     PhaseTemplateChanged,
     PhaseTrackingStateChanged,
     StabilizationConfigChanged,
@@ -19,15 +21,15 @@ from app_apps.analysis.phase_control.subprocess.messages import (
     CaptureReference,
     ConfigSynced,
     CorrectionAvailable,
+    CorrectionStatus,
     InvalidateTemplate,
     RecallReference,
+    RunningPhaseMean,
     SetStabilizationConfig,
     SpectrumProcessed,
     TemplateStateChanged,
 )
-from app_apps.io.control_readout.mfa_cc.events import RequestMoveMfacc
 from app_apps.io.control_readout.rgv.events import RequestRotateRGV
-from app_apps.io.control_readout.uts150cc.events import RequestMoveUts150cc
 from app_apps.io.spectrometer.events import SpectrumAck
 from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
 
@@ -47,17 +49,17 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
 
     def subscribe(self) -> None:
         self._subscribe_service(CorrectionAvailable, self._on_correction_available)
+        self._subscribe_service(CorrectionStatus, self._on_correction_status)
+        self._subscribe_service(RunningPhaseMean, self._on_running_mean)
         self._subscribe_service(SpectrumProcessed, self._on_spectrum_processed)
         self._subscribe_service(TemplateStateChanged, self._on_template_state)
-        # Command-driven template invalidation. This is the PRIMARY trigger and it has zero
-        # lag: a commanded delay (MFA-CC) or grating (UTS150CC) move changes the fringe shape,
-        # so the template is invalidated the moment the move is REQUESTED, before the
-        # corrupted spectra can be fit. Deterministic, no threshold. The per-trace Hilbert
-        # check in the worker is the backstop for shape changes nobody commanded.
-        #
-        # The probe stage (FMS300PP) is deliberately absent: it does not change the shape.
-        self._subscribe(RequestMoveMfacc, self._on_delay_move)
-        self._subscribe(RequestMoveUts150cc, self._on_grating_move)
+        # NO automatic template invalidation. A commanded delay (MFA-CC) or grating
+        # (UTS150CC) move does change the fringe shape, and this used to drop the template
+        # the moment such a move was requested -- which meant the reference was thrown away
+        # at every setpoint of every scan, i.e. during exactly the runs it exists to hold
+        # together. The reference is now installed and dropped by the operator only;
+        # InvalidateTemplate is still handled by the worker for a routine that wants to
+        # command it explicitly.
         self._spectrum_writer.register_consumer(self.CONSUMER_ID)
 
     def unsubscribe(self) -> None:
@@ -87,6 +89,21 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
     def _on_correction_available(self, msg: CorrectionAvailable) -> None:
         self._bus.publish(RequestRotateRGV(angle=msg.angle))
 
+    def _on_running_mean(self, msg: RunningPhaseMean) -> None:
+        # Straight through: the panel draws the averaged trace from this.
+        self._bus.publish(PhaseMeanReported(
+            mean_phase_rad=msg.mean_phase_rad, frames=msg.frames,
+            coherence=msg.coherence, valid=msg.frames > 0,
+        ))
+
+    def _on_correction_status(self, msg: CorrectionStatus) -> None:
+        # Straight through to the bus: this is a readout, and the panel is the only consumer.
+        self._bus.publish(PhaseCorrectionReported(
+            phase_error_rad=msg.phase_error_rad, commanded_deg=msg.commanded_deg,
+            applied=msg.applied, reason=msg.reason, period_s=msg.period_s,
+            frames=msg.frames,
+        ))
+
     def _on_spectrum_processed(self, msg: SpectrumProcessed) -> None:
         self._bus.publish(SpectrumAck(slot=msg.slot, item_id=msg.item_id, consumer_id=msg.consumer_id))
 
@@ -113,14 +130,14 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
     def capture_reference(self) -> None:
         self._request(CaptureReference(), self._on_set_config_reply)
 
-    def recall_reference(self, template: PhaseTemplate) -> None:
+    def recall_reference(self, template: PhaseTemplate | None) -> None:
+        """Install a pinned template, or ``None`` to deselect the recalled one."""
         self._request(RecallReference(template=template), self._on_set_config_reply)
 
-    def _on_delay_move(self, event: RequestMoveMfacc) -> None:
-        self._emit(InvalidateTemplate(reason="delay move"))
-
-    def _on_grating_move(self, event: RequestMoveUts150cc) -> None:
-        self._emit(InvalidateTemplate(reason="grating move"))
+    def invalidate_template(self, reason: str) -> None:
+        """Drop the installed reference. For a routine that knows the shape has changed --
+        nothing calls this automatically."""
+        self._emit(InvalidateTemplate(reason=reason))
 
     def _on_template_state(self, msg: TemplateStateChanged) -> None:
         self._template = msg.template
@@ -134,4 +151,5 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
             msg.template.averages = int(cfg.average)
         self._bus.publish(PhaseTemplateChanged(
             state=msg.state, captured=msg.captured, needed=msg.needed, template=msg.template,
+            pinned=msg.pinned, abandoned=msg.abandoned,
         ))
