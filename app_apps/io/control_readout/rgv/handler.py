@@ -57,6 +57,22 @@ class RgvHandle(BaseWorkerHandle):
     def home(self) -> None:
         self._request(HomeRGV(), self._on_rotate_reply)
 
+    def move_to(self, angle_deg: float) -> None:
+        """Command an ABSOLUTE plate angle, in degrees.
+
+        The device panel needs this; the loop does not and never calls it. Kept separate
+        from the RequestRotateRGV path on purpose -- that one exists to translate the loop's
+        relative increments, and routing an absolute target through it would add the target
+        to the current position.
+        """
+        # wrap=False: this is a position on the +-168 deg stage, not a circular angle.
+        target = Angle(float(angle_deg), AngleUnit.DEG, wrap=False)
+        self._current_angle = target
+        self._request(RotateRGVTo(angle=target), self._on_rotate_reply)
+
+    def get_position(self) -> None:
+        self._request(GetCurrentRGVAngle(), self._on_angle_reply)
+
     def _on_request_rotate(self, event: RequestRotateRGV) -> None:
         # event.angle is a *relative* increment; translate to an absolute target
         # against the last known plate position (the worker moves absolutely).

@@ -1,43 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from PySide6.QtWidgets import QWidget
 
-from PySide6.QtWidgets import QHBoxLayout, QPushButton, QWidget
+from base_qt.ui.panel_view import PanelView
 
-from base_core.math.enums import AngleUnit
-from base_core.math.models import Angle
-from base_qt.ui.form import AngleSpec, ConfigForm
-from base_qt.ui.worker_control_widget import WorkerControlWidget
-
+from app_apps.io.control_readout.ui.motion_controls import MotionControls
 from app_apps.io.control_readout.ell14.ui.view_model import ELL14RotatorViewModel
 
-
-@dataclass
-class _RotateCommand:
-    angle: Angle = Angle(0, AngleUnit.DEG, wrap=False)
+TITLE = "ELL14 Rotator"
 
 
-class ELL14RotatorView(ConfigForm):
-    _specs = {
-        "angle": AngleSpec("Rotate by"),
-    }
-
+class ELL14RotatorView(PanelView):
     def __init__(self, vm: ELL14RotatorViewModel, parent: QWidget) -> None:
+        super().__init__(TITLE, parent, vm=vm)
         self._vm = vm
-        super().__init__("ELL14 Rotator", _RotateCommand(), parent, vm=vm)
-
-        ctrl = WorkerControlWidget(vm.start, vm.pause, vm.resume, vm.stop, parent=self)
-        ctrl.set_status(vm.worker_status)
-        vm.worker_state_changed.connect(ctrl.set_status)
-        self.header_layout.addWidget(ctrl)
-        self.header_widget.setVisible(True)
-
-        home_row = QHBoxLayout()
-        home_row.addStretch(1)
-        home_btn = QPushButton("Home")
-        home_btn.clicked.connect(vm.home)
-        home_row.addWidget(home_btn)
-        self.body_layout.addLayout(home_row)
-
-    def on_apply(self) -> None:
-        self._vm.rotate(self._config.angle)
+        self.body_layout.addWidget(MotionControls(TITLE, vm, self))

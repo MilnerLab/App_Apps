@@ -23,6 +23,7 @@ class AppPanelWindow(PanelWindow):
     def _build_panels(self, container: Container) -> None:
         from app_apps.analysis.phase_control.ui.phase_control_view import PhaseControlView
         from app_apps.analysis.xcorr.ui.xcorr_display_view import XcorrDisplayView
+        from app_apps.io.control_readout.ui.devices_view import DevicesView
 
         c = container
         # Both panels go into the *same* dock area and are then tabbed on top of each
@@ -39,7 +40,16 @@ class AppPanelWindow(PanelWindow):
             lambda: c.get(XcorrDisplayView),
             Qt.DockWidgetArea.LeftDockWidgetArea,
         )
+        # Devices joins the same stack rather than sitting beside the plots: it is a page the
+        # operator switches TO during alignment and away from while running, not something
+        # watched alongside a spectrum.
+        devices = self.register_panel(
+            "Devices",
+            lambda: c.get(DevicesView),
+            Qt.DockWidgetArea.LeftDockWidgetArea,
+        )
         self.tabifyDockWidget(phase, xcorr)
+        self.tabifyDockWidget(xcorr, devices)
         # Tabs on top so it is obvious there is more than one panel stacked here (the
         # default bottom tab bar is easy to miss).
         self.setTabPosition(Qt.DockWidgetArea.LeftDockWidgetArea, QTabWidget.TabPosition.North)

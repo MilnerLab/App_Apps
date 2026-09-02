@@ -28,12 +28,12 @@ class ControlReadoutService(SubprocessService):
         return "control_readout.control_readout_process"
 
     def release_hardware(self, timeout: float = 12.0) -> None:
-        """Ask the subprocess to disconnect its controllers (close COM7 etc.) and
+        """Ask the subprocess to disconnect its controllers (close COM2 etc.) and
         block until it confirms, *before* stop() hard-kills it.
 
         This is the graceful half of shutdown (defect G19): stop() on Windows is an
         uncatchable ``TerminateProcess``, so without this the subprocess never closes
-        its serial ports and COM7 is left to an abrupt OS-reclaimed close — the class
+        its serial ports and COM2 is left to an abrupt OS-reclaimed close — the class
         of action that wedged the ESP301's USB bridge. Call this immediately before
         stop().
 
@@ -56,10 +56,10 @@ class ControlReadoutService(SubprocessService):
         except Exception:
             log.exception(
                 "ControlReadoutService: failed to send hardware-release request; "
-                "proceeding to terminate (COM7 may close abruptly)")
+                "proceeding to terminate (COM2 may close abruptly)")
             return
         if not done.wait(timeout):
             log.warning(
                 "ControlReadoutService: hardware release not confirmed within %.1fs; "
-                "proceeding to terminate (COM7 may close abruptly)", timeout,
+                "proceeding to terminate (COM2 may close abruptly)", timeout,
             )

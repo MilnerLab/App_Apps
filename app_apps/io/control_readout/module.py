@@ -65,8 +65,13 @@ class ControlReadoutModule(BaseModule):
         c.register_factory(Uts150ccViewModel, lambda c: Uts150ccViewModel(
             ctx.event_bus, c.get(QtDispatcher), c.get(Uts150ccHandle)
         ))
+        # PhaseControlService, not PhaseStabilizationHandle: the envelope worker drives the
+        # same half-wave plate, and stop_worker() stops whichever of the two is active.
+        # Resolved lazily inside the factory, so module registration order does not matter.
+        from app_apps.analysis.phase_control.service import PhaseControlService
         c.register_factory(RgvViewModel, lambda c: RgvViewModel(
-            ctx.event_bus, c.get(QtDispatcher), c.get(RgvHandle)
+            ctx.event_bus, c.get(QtDispatcher), c.get(RgvHandle),
+            c.get(PhaseControlService),
         ))
         c.register_factory(PicomotorViewModel, lambda c: PicomotorViewModel(
             ctx.event_bus, c.get(QtDispatcher), c.get(PicomotorHandle)
@@ -79,6 +84,9 @@ class ControlReadoutModule(BaseModule):
         c.register_factory(RgvView, lambda c: RgvView(c.get(RgvViewModel), parent=None))
         c.register_factory(PicomotorView, lambda c: PicomotorView(c.get(PicomotorViewModel), parent=None))
 
+        from app_apps.io.control_readout.ui.devices_view import DevicesView
+        c.register_factory(DevicesView, lambda c: DevicesView(c))
+
     def on_startup(self, c: Container, ctx: AppContext) -> None:
         c.get(ControlReadoutService).start()
         if ctx.status == AppStatus.CONNECTED:
@@ -89,7 +97,7 @@ class ControlReadoutModule(BaseModule):
     def on_shutdown(self, c: Container, ctx: AppContext) -> None:
         service = c.get(ControlReadoutService)
         # stop() MUST always run — otherwise the subprocess is orphaned still holding
-        # COM7. So the graceful steps (pause + the COM7 release handshake) go in a try
+        # COM2. So the graceful steps (pause + the COM2 release handshake) go in a try
         # whose finally is stop(); a failure in any of them (e.g. a dead connector
         # raising BrokenPipeError from pause()) must not skip the terminate (G25-class
         # orphan). Each pause() is guarded individually so one bad handle can't stop
@@ -101,7 +109,7 @@ class ControlReadoutModule(BaseModule):
                 except Exception:
                     log.exception("control_readout shutdown: pause(%s) failed",
                                   handle_type.__name__)
-            # Close the serial ports (COM7) gracefully in the subprocess BEFORE stop()
+            # Close the serial ports (COM2) gracefully in the subprocess BEFORE stop()
             # hard-kills it — otherwise the ESP301's USB bridge is left to an abrupt
             # close and can wedge (defect G19).
             service.release_hardware()

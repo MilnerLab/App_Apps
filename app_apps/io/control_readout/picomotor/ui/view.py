@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from base_core.ipc.worker_handle import WorkerStatus
 from base_qt.ui.panel_view import PanelView
 from base_qt.ui.worker_control_widget import WorkerControlWidget
 from control_readout.picomotor.config import MirrorAxes
@@ -40,34 +41,52 @@ from app_apps.io.control_readout.picomotor.ui.view_model import (
 )
 
 
-class PicomotorView(PanelView):
-    def __init__(self, vm: PicomotorViewModel, parent: QWidget) -> None:
-        super().__init__("Mirror picomotors (8742)", parent, vm=vm)
+TITLE = "Mirror picomotors (8742)"
+
+
+class PicomotorControls(QWidget):
+    """The controls themselves, free of any window. The Devices PANEL embeds this
+    directly and the Devices-MENU popout wraps it, so there is one implementation."""
+
+    def __init__(self, vm: PicomotorViewModel, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
         self._vm = vm
         #: Per-axis readout labels, keyed by axis number.
         self._readouts: dict[int, QLabel] = {}
 
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.addStretch(1)
         ctrl = WorkerControlWidget(vm.start, vm.pause, vm.resume, vm.stop, parent=self)
         ctrl.set_status(vm.worker_status)
         vm.worker_state_changed.connect(ctrl.set_status)
-        self.header_layout.addWidget(ctrl)
-        self.header_widget.setVisible(True)
+        header.addWidget(ctrl)
+        lay.addLayout(header)
 
-        self.body_layout.addWidget(self._build_increment_row())
+        lay.addWidget(self._build_increment_row())
         for mirror in vm.mirrors:
-            self.body_layout.addWidget(self._build_mirror(mirror))
+            lay.addWidget(self._build_mirror(mirror))
 
         note = QLabel("Counts are open-loop controller steps — not a calibrated "
                       "position. Use Zero to re-reference.")
         note.setWordWrap(True)
         note.setEnabled(False)
-        self.body_layout.addWidget(note)
+        lay.addWidget(note)
 
         vm.steps_changed.connect(self._render_steps)
-        # Read the counters once on open, so the panel shows where the axes are
-        # without the operator having to move one to find out.
-        vm.refresh()
+        # Read the counters when the controller comes up, so the panel shows where the axes
+        # are without the operator having to move one to find out. NOT at construction: the
+        # Devices panel is built at app start, when the handle may have no connector yet.
+        vm.worker_state_changed.connect(self._on_worker_state)
+        self._on_worker_state(vm.worker_status)
         self._render_steps()
+
+    def _on_worker_state(self, status: WorkerStatus) -> None:
+        if status == WorkerStatus.RUNNING:
+            self._vm.refresh()
 
     # -- construction -----------------------------------------------------
 
@@ -190,3 +209,10 @@ class PicomotorView(PanelView):
             # "—" not "0": an unread counter and a counter reading zero are different
             # facts, and only one of them means the axis is referenced.
             label.setText("—" if steps is None else f"{steps:+d}")
+
+
+class PicomotorView(PanelView):
+    def __init__(self, vm: PicomotorViewModel, parent: QWidget) -> None:
+        super().__init__(TITLE, parent, vm=vm)
+        self._vm = vm
+        self.body_layout.addWidget(PicomotorControls(vm, self))
