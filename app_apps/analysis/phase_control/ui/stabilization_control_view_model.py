@@ -43,6 +43,9 @@ class StabilizationControlViewModel(QObject):
                                            # own -- PhaseControlView draws it, so the toggle
                                            # has to travel out rather than act here
     cut_left_changed = Signal(float, bool)  # terminal nm, True when manually set
+    roi_changed = Signal(bool)             # an ROI is (or is no longer) in force. The panel
+                                           # reads this to enable "Auto"/"Zoom to ROI" and to
+                                           # say, in words, that the quality gates are off.
     avg_visible_changed = Signal(bool)     # the running-average curve, drawn by
                                            # PhaseControlView for the same reason Raw is
     block_reset = Signal()                 # a new averaging block started: the running
@@ -69,6 +72,9 @@ class StabilizationControlViewModel(QObject):
         self._rf_label: pg.TextItem | None = None
         self._fwhm_lines: list[pg.InfiniteLine] = []
         self._knife_lines: list[pg.InfiniteLine] = []
+        self._roi_lines: list[pg.InfiniteLine] = []
+        self._roi_last: tuple[float, float] | None = None
+        self._zoomed_to_roi = False   # so dropping the ROI can undo the zoom
         self._active = False
         self._plot_frequency = False
         self._show_knife_edges = True
@@ -165,6 +171,26 @@ class StabilizationControlViewModel(QObject):
                 line.sigPositionChangeFinished.connect(self._on_knife_dragged)
             self._knife_lines.append(line)
 
+        # ROI bounds -- the analysis region, asserted by the operator. GREEN and SOLID, and
+        # deliberately unlike everything else on the chart: the knife edges are red dashed
+        # (where the fit says the data ran out) and the FWHM markers cyan dotted (where the
+        # readout is quoted). This pair is the only one that CHANGES THE FIT, so it must not
+        # be mistakable for either. Hidden entirely when there is no ROI -- a pair of bounds
+        # parked at the window edges would read as an ROI that is not there.
+        for _ in ("lo", "hi"):
+            pen = QPen(QColor("#39d353"))
+            pen.setCosmetic(True)
+            line = pg.InfiniteLine(angle=90, movable=True, pen=pen, label="ROI",
+                                   labelOpts={"color": "#39d353", "position": 0.08,
+                                              "movable": False})
+            line.setZValue(60)
+            line.setVisible(False)
+            # On RELEASE, like the knife edge: the value crosses IPC into the persisted
+            # config AND reconfigures the fit, so a write per pixel of drag would re-tune the
+            # running loop hundreds of times for one gesture.
+            line.sigPositionChangeFinished.connect(self._on_roi_dragged)
+            self._roi_lines.append(line)
+
     def set_active(self, active: bool) -> None:
         """Attach/detach the spectrum_fit overlay curves to the shared chart."""
         if active == self._active:
@@ -238,7 +264,7 @@ class StabilizationControlViewModel(QObject):
             # Excluded from auto-range so the view stays driven by the live spectrum,
             # not by whatever the fit curves happen to be before a config is applied.
             self._plot_item.addItem(series, ignoreBounds=True)
-        for line in (*self._fwhm_lines, *self._knife_lines):
+        for line in (*self._fwhm_lines, *self._knife_lines, *self._roi_lines):
             self._plot_item.addItem(line, ignoreBounds=True)
         if self._rf_label is not None:
             self._rf_label.setParentItem(self._plot_item.getViewBox())
@@ -250,7 +276,7 @@ class StabilizationControlViewModel(QObject):
         for series in (self._set_phase_series, self._current_phase_series):
             if series is not None:
                 self._plot_item.removeItem(series)
-        for line in (*self._fwhm_lines, *self._knife_lines):
+        for line in (*self._fwhm_lines, *self._knife_lines, *self._roi_lines):
             self._plot_item.removeItem(line)
         if self._rf_label is not None:
             self._rf_label.setParentItem(None)
@@ -298,6 +324,7 @@ class StabilizationControlViewModel(QObject):
         self._update_rf_label()
         self._update_fwhm_lines()
         self._update_knife_lines()
+        self._update_roi_lines()
 
         if rescale and self._plot_item is not None:
             x_lo, x_hi = float(x.min()), float(x.max())
@@ -378,6 +405,145 @@ class StabilizationControlViewModel(QObject):
         self._update_knife_lines()
         cut = self.effective_cut_left
         self.cut_left_changed.emit(float("nan") if cut is None else cut, False)
+
+    # ------------------------------------------------------------------------- ROI --
+    @property
+    def roi(self) -> tuple[float, float] | None:
+        """The analysis region in nm, or None for auto."""
+        return self._config.roi
+
+    def set_roi(self, lo_nm: float, hi_nm: float) -> None:
+        """Assert the analysis region. This CHANGES THE FIT -- see StabilizationConfig.roi.
+
+        Ordered here rather than trusted from the caller: the two bounds are independent
+        draggable lines and nothing stops the operator pulling one past the other.
+        """
+        lo, hi = sorted((float(lo_nm), float(hi_nm)))
+        if not (np.isfinite(lo) and np.isfinite(hi)) or hi - lo <= 0.0:
+            self._update_roi_lines()      # snap back rather than store a degenerate ROI
+            return
+        self._config.roi_lo, self._config.roi_hi = lo, hi
+        self._push_roi()
+
+    def clear_roi(self) -> None:
+        """Back to Auto: the full pipeline, every guard, exactly as it was before the ROI."""
+        if self._config.roi_lo is None and self._config.roi_hi is None:
+            return
+        self._roi_last = self._config.roi          # so re-ticking the box restores it
+        self._config.roi_lo = self._config.roi_hi = None
+        self._push_roi()
+
+    def set_roi_enabled(self, enabled: bool) -> None:
+        """The whole ROI control: one switch, on or off.
+
+        Turning it ON restores the bounds you last used, or -- the first time -- takes them
+        from what is on screen, so the gesture is "zoom to the fringes you trust, tick the
+        box". Either way the bounds are then draggable; turning it OFF is the way back.
+        """
+        if enabled == (self._config.roi is not None):
+            return
+        if not enabled:
+            self.clear_roi()
+            return
+        if self._roi_last is not None:
+            self.set_roi(*self._roi_last)
+        else:
+            self.set_roi_from_view()
+
+    def _push_roi(self) -> None:
+        # Dropping the ROI while the chart is framed on it would leave the operator staring
+        # at 2 nm of a fit that is once again using the whole window -- a view that says
+        # the opposite of what is happening. Zoom is view-only in both directions, so
+        # undoing it here costs nothing and keeps the picture honest.
+        if self._config.roi is None and self._zoomed_to_roi:
+            self._zoom_window()
+        self._handle.set_config(self._config)
+        self._update_roi_lines()
+        self.roi_changed.emit(self._config.roi is not None)
+
+    def set_roi_from_view(self) -> None:
+        """Take the ROI from what is currently on screen, clipped to the analysis window.
+
+        "Zoom to the fringes you trust, then say so" is the gesture this exists for, and it
+        is the only place the view and the fit are allowed to meet -- zoom itself never
+        touches the fit, and this is an explicit command, not a side effect of panning.
+        """
+        if self._plot_item is None:
+            return
+        (x_lo, x_hi), _ = self._plot_item.getViewBox().viewRange()
+        lo, hi = sorted((self._from_plot_x(x_lo), self._from_plot_x(x_hi)))
+        w_lo = self._config.wavelength_range.min.value(Prefix.NANO)
+        w_hi = self._config.wavelength_range.max.value(Prefix.NANO)
+        self.set_roi(max(lo, w_lo), min(hi, w_hi))
+
+    def zoom_to_roi(self) -> None:
+        """View only. Sets the chart's x limits and reaches nothing else.
+
+        With no ROI set this frames the analysis window, which is the useful thing to do
+        with a "zoom" button when there is no region to zoom to.
+        """
+        if self._plot_item is None:
+            return
+        roi = self._config.roi
+        if roi is None:
+            lo = self._config.wavelength_range.min.value(Prefix.NANO)
+            hi = self._config.wavelength_range.max.value(Prefix.NANO)
+        else:
+            lo, hi = roi
+        pad = (hi - lo) * 0.15
+        x0, x1 = sorted((self._to_plot_x(lo - pad), self._to_plot_x(hi + pad)))
+        self._plot_item.setXRange(x0, x1, padding=0)
+        # Y is left to autorange: the counts scale by ~50x between a dim and a bright frame,
+        # so a y range carried over from the wide view would put the fringes off screen.
+        self._plot_item.enableAutoRange(axis="y")
+        self._zoomed_to_roi = roi is not None
+
+    def _zoom_window(self) -> None:
+        """View only: back to the configured analysis window."""
+        if self._plot_item is None:
+            return
+        lo = self._config.wavelength_range.min.value(Prefix.NANO)
+        hi = self._config.wavelength_range.max.value(Prefix.NANO)
+        x0, x1 = sorted((self._to_plot_x(lo), self._to_plot_x(hi)))
+        self._plot_item.setXRange(x0, x1, padding=0.02)
+        self._plot_item.enableAutoRange(axis="y")
+        self._zoomed_to_roi = False
+
+    def _on_roi_dragged(self, _line) -> None:
+        """Either bound moved: read BOTH back, so a bound dragged past the other still
+        yields an ordered ROI rather than an empty one."""
+        lo, hi = (self._from_plot_x(float(ln.value())) for ln in self._roi_lines)
+        self.set_roi(lo, hi)
+
+    def _update_roi_lines(self) -> None:
+        if not self._roi_lines:
+            return
+        roi = self._config.roi
+        if roi is None:
+            for line in self._roi_lines:
+                line.setVisible(False)
+            return
+        for line, nm in zip(self._roi_lines, roi):
+            line.setPos(self._to_plot_x(float(nm)))
+            line.setVisible(True)
+
+    # ------------------------------------------------------------------- quality --
+    @property
+    def quality_text(self) -> str:
+        """The three gates the ROI turns off, as a readout.
+
+        They are computed either way -- the fit already paid for them -- so with an ROI set
+        they are shown instead of enforced. The operator took the judgement when they drew
+        the region; this is what they judge with. Under Auto the same numbers are still the
+        honest description of the committed fit, so it is shown in both modes.
+        """
+        p = self._config.params
+        if not any((p.c1, p.c2, p.c3)):
+            return "Fit: —"
+        gated = "advisory" if self._config.roi is not None else "gating"
+        trust = "trust ✓" if p.trust_ok else "trust ✗"
+        return (f"Fit: {trust}  rms/amp {p.rms_frac:.3f}  inliers {p.inlier_pct:.0f}%"
+                f"  ({gated})")
 
     def _update_knife_lines(self) -> None:
         """Place/hide the two knife-edge markers from the committed fit.

@@ -1,9 +1,14 @@
 """Optimizer-free fringe-contrast index — the cheap gate in front of the cold fit.
 
-**Why this is not in ``fringe_core.py``.** That file is a verbatim copy of the standalone
-and may not be patched on this side (see ``fringe_fit``'s header). This metric is also not
-analysis: it decides whether the control loop is allowed to *act*, which is loop policy.
-It lives App-side for both reasons.
+**Why this is not in ``fringe_core.py``.** It is not analysis: it decides whether the
+control loop is allowed to *act*, which is loop policy. (The other half of the reason --
+that ``fringe_core`` was a verbatim copy that could not be patched on this side -- no longer
+applies; there is now an argument for folding this back in, which nobody has made yet.)
+
+**It is NOT applied under an ROI.** Its continuum reference is the 5th percentile of the
+array it is handed and its core mask is ``above > 0.5*peak``; both assume the whole bump
+with its wings, so on a 2 nm array it reads 0.0000 on a perfectly good trace. On the auto
+path it is fed 790-814 and never sees a narrow array, so that misfire is unreachable there.
 
 **The failure it exists to stop.** While instrument settings change, the fringes fly and
 average away, leaving a clean bright Gaussian with no oscillation. Measured on a synthetic

@@ -90,6 +90,44 @@ class StabilizationControlView(QWidget):
         freq_row.addStretch()
         fbox.addLayout(freq_row)
 
+        # --- ROI + zoom -----------------------------------------------------------
+        # One switch, because there is only one thing to decide: does the operator assert
+        # the region, or does the pipeline find it. Ticking it takes the region from what is
+        # on screen the first time and from the bounds you last used after that; the two
+        # green markers on the chart are how you adjust it. "Zoom to ROI" sits next to it
+        # and does the OPPOSITE kind of thing -- it moves the chart and nothing the fit
+        # reads. Keeping zoom out of the fit is the whole point of the ROI existing
+        # separately from the wavelength range: narrowing the window used to be how you
+        # zoomed, and it silently starved the envelope fit.
+        roi_row = QHBoxLayout()
+        roi_row.setSpacing(4)
+        self._roi_cb = QCheckBox("ROI")
+        self._roi_cb.setChecked(vm.roi is not None)
+        self._roi_cb.setToolTip(
+            "Fit ONLY the region between the two green markers, taken from the visible "
+            "range the first time you tick this. Drag the markers to adjust. This changes "
+            "the analysis: inside an ROI the fit trusts your region and stops looking for "
+            "one of its own — the contrast crop, the end-trim, the truncation detector "
+            "and its recovery scan are all skipped, and the trust / residual / inlier gates "
+            "become the readout on the right instead of rejections. Below ~2 nm the phase "
+            "is still visible but noisy. Untick for the full automatic pipeline, every "
+            "guard on, which is the default and the normal case.")
+        roi_row.addWidget(self._roi_cb)
+        self._zoom_roi_btn = QPushButton("Zoom to ROI")
+        self._zoom_roi_btn.setToolTip(
+            "View only: frame the ROI on the chart. Touches nothing the fit reads. "
+            "With no ROI set, frames the whole analysis window.")
+        roi_row.addWidget(self._zoom_roi_btn)
+        self._quality_label = QLabel(vm.quality_text)
+        self._quality_label.setToolTip(
+            "The three quality measures the ROI stops enforcing: whether the fit's own "
+            "covariance supports the phase at the reference, the scale-free residual, and "
+            "the inlier fraction. With the ROI box unticked they are gates; with it ticked "
+            "they are yours to read.")
+        roi_row.addWidget(self._quality_label)
+        roi_row.addStretch()
+        fbox.addLayout(roi_row)
+
         # The four traces the panel draws, and a switch for each. "Fit" is the frozen shape
         # sitting at the phase this frame measured; "Target" is the same shape at the
         # setpoint. The gap between them IS the error the loop corrects, so being able to
@@ -147,6 +185,12 @@ class StabilizationControlView(QWidget):
         self._auto_cut_btn.clicked.connect(self._vm.clear_manual_cut_left)
         self._vm.cut_left_changed.connect(
             lambda _nm, manual: self._auto_cut_btn.setEnabled(bool(manual)))
+        self._roi_cb.checkStateChanged.connect(
+            lambda state: self._vm.set_roi_enabled(state == Qt.CheckState.Checked)
+        )
+        self._zoom_roi_btn.clicked.connect(self._vm.zoom_to_roi)
+        self._vm.roi_changed.connect(self._on_roi_changed)
+        self._vm.config_updated.connect(self._refresh_quality)
         self._knife_cb.checkStateChanged.connect(
             lambda state: self._vm.set_show_knife_edges(state == Qt.CheckState.Checked)
         )
@@ -221,6 +265,18 @@ class StabilizationControlView(QWidget):
         btns.addStretch()
         box.addLayout(btns)
         return frame
+
+    def _on_roi_changed(self, active: bool) -> None:
+        # The box can be out of step with the config: an empty view makes "set from view"
+        # refuse, and the config also arrives from the worker. The config is the truth.
+        if self._roi_cb.isChecked() != active:
+            was = self._roi_cb.blockSignals(True)
+            self._roi_cb.setChecked(active)
+            self._roi_cb.blockSignals(was)
+        self._refresh_quality()
+
+    def _refresh_quality(self) -> None:
+        self._quality_label.setText(self._vm.quality_text)
 
     def _refresh_readouts(self) -> None:
         # A dash, not 0.00: zero is a legitimate plate angle and a legitimate correction, so

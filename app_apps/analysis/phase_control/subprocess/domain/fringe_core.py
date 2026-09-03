@@ -1,17 +1,10 @@
 """Cubic-phase fringe analysis — THE source of truth for the fit math.
 
-This module is the ONE place the analysis lives. `plot_traces.py` imports it for the
-standalone/harness path, and the App_Apps production port carries a VERBATIM COPY of this
-file plus a thin adapter (`fringe_fit.py`). Nothing here may be hand-edited in only one of
-those two places.
-
-That rule exists because breaking it is what produced every bug found on 2026-07-16: the
-port had drifted into passing Nelder-Mead's absolute `fatol` as L-BFGS-B's relative `ftol`
-(envelope offset 255 against a truth of 155), into seeding the cubic with `c1=0` (carrier
-wrong on every real trace), and into having no baseline anchor at all. Two hand-maintained
-copies of the same math is the defect, not the symptom. `test/fringe_parity_test.py` in the
-app asserts this file's `analyze()` and the app's adapter agree bit-for-bit, and it fails
-loudly the moment the copies diverge.
+This module is the ONE place the analysis lives, and it is edited HERE. It used to be a
+verbatim copy of an out-of-tree standalone, pinned by `test/fringe_parity_test.py`; that
+pin is gone (the standalone is far behind) and so is the test. `fringe_fit.py` remains a
+thin adapter with no math in it -- that part of the rule still stands, because the reason
+the two ever drifted was a second hand-maintained copy of the same equations.
 
 Pure numpy/scipy: no matplotlib, no file I/O, no globals mutated at runtime. Safe to import
 from a subprocess worker.
@@ -35,6 +28,17 @@ from scipy.ndimage import gaussian_filter1d, median_filter, uniform_filter1d
 # ============================ TUNABLE PARAMETERS =============================
 # --- Data window ---
 ZOOM = (790, 814)     # analysis window (nm) around the ~802 nm peak
+ENV_BAND = (790.0, 814.0)
+                      # domain the two envelope Gaussians are ALWAYS fit on, whatever window
+                      # or ROI the caller hands in. They are unidentifiable on a window
+                      # narrower than the bump (sigma ~3.6 nm): measured on a +-2 nm window,
+                      # pU collapses onto a single fringe lobe (sigma 3.60 -> 0.60) and the
+                      # gap Gaussian pLn wanders OUT of the window and moves every frame, so
+                      # everything downstream is derived from a fictional envelope. The full
+                      # frame is worse in the other direction -- pLn's sigma inflates to
+                      # 2.0-3.8 nm and wanders, fitting ~148 nm of noise floor. Both are
+                      # analytic Gaussians, so evaluating them back on a short ROI grid is
+                      # free. With ZOOM == ENV_BAND the auto path sees no change at all.
 
 # --- Envelope fit (asymmetric pinball / quantile loss) ---
 RATIO = 10            # penalty ratio above:below the fit; higher hugs the crests tighter.
@@ -1650,7 +1654,7 @@ def applied_cuts(trunc):
 
 def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
                   trunc_threshold=None, ref_primary=None, force_trunc=None,
-                  scanfree=None, trunc_method=None):
+                  scanfree=None, trunc_method=None, roi=None):
     """Run the full recovery pipeline on one in-window trace.
 
     `trust_nsig` / `trunc_threshold` override TRUST_NSIG / TRUNC_THRESHOLD for this call
@@ -1669,6 +1673,13 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
     reference falls back immediately whenever the spectral centre cannot be trusted.
     The reference actually used is R["ref_wl"]; the coefficients in R["csig_at_centre"]
     are expressed at it. Callers must READ ref_wl rather than assume 802.
+
+    `roi` is an operator-asserted (lo_nm, hi_nm) analysis region. None (the default) is
+    byte-identical to the previous behaviour. When set, the operator has STATED where the
+    good data is, so the machinery that exists to FIND it is skipped: the truncation
+    detector, the contrast crop, the oscillation end-trim and the truncation trim. The core
+    is the ROI, exactly. The envelopes are unaffected either way -- they are always fit on
+    ENV_BAND, never on the ROI.
 
     `anchor` is the (U_base, D) continuum measurement from baseline_anchor() on the FULL
     frame, taken BEFORE this window was cut -- ZOOM itself contains no continuum, so the
@@ -1696,6 +1707,12 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
     pU_prelim = None      # set only when DEADZONE_REFIT actually replaces the envelope
     try:
         use_scanfree = SCANFREE if scanfree is None else scanfree
+        # The ROI path is implemented on the classic branch only. Silently ignoring an ROI
+        # here would be the worst outcome -- the operator would see their bounds on the
+        # chart and a fit that never used them -- so an ROI simply takes the classic branch,
+        # where it skips the same crop/trim machinery the scan-free pipeline was avoiding.
+        if roi is not None:
+            use_scanfree = False
         if use_scanfree:
             # ===== Scan-free deterministic pipeline (replaces the 12 s recovery scan) =====
             # On the realistic synth suite this BEATS the scan (99.6% vs 98.8%, fewer wrong)
@@ -1814,8 +1831,20 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
             # --- Truncated-arm detection (runs FIRST: it needs only the raw trace) ----
             # In its own try/except: a detector failure degrades to "no truncation known"
             # and the fit proceeds exactly as it would without this feature.
+            #
+            # SKIPPED ENTIRELY UNDER AN ROI. The detector, the cut it applies and the
+            # recovery scan above it all exist to LOCATE the fringe-bearing region; the
+            # operator has just stated it. Running them on top of an ROI is not a second
+            # opinion, it is the crop eating a region that is already only a few nm wide
+            # (measured: the crop cuts a 4 nm ROI down to a 1.5 nm sliver and the fit then
+            # reports "too_few: core has 0 pts").
             t_tr0 = time.perf_counter()
-            if force_trunc is not None:
+            if roi is not None:
+                trunc = {"side": "none", "detected": False, "v": None, "dead": None,
+                         "live": None, "x_lo": None, "x_hi": None, "left_nm": 0.0,
+                         "right_nm": 0.0, "cut_left": None, "cut_right": None,
+                         "msg": "roi override: detector not consulted"}
+            elif force_trunc is not None:
                 # The recovery scan supplies the cut directly; the detector is not consulted.
                 trunc = dict(force_trunc)
             else:
@@ -1837,7 +1866,7 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
             # So the fringe-free band is excluded from the envelopes AND from the phase fit.
             # An untruncated trace has fit_lo/fit_hi = -inf/+inf, so its path is untouched.
             fit_lo, fit_hi = applied_cuts(trunc)
-            if trunc.get("side") == "all":
+            if roi is None and trunc.get("side") == "all":
                 t_run = (time.perf_counter() - t_run0) * 1e3 - t_trunc
                 return {"status": "dead_window", "csig": None, "trunc": trunc,
                         "t_run": t_run, "t_trunc": t_trunc, "x_all": x, "y_all": y,
@@ -1853,6 +1882,7 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
                         "t_run": t_run, "t_trunc": t_trunc, "x_all": x, "y_all": y,
                         "msg": f"only {int(np.count_nonzero(fit_ok))} fringe-bearing pts "
                                f"survive the arm truncation"}
+            xw_all, yw_all = x, y
             xw, yw = x[fit_ok], y[fit_ok]
 
             # --- Envelopes (fit ONLY where fringes exist) ----------------------------
@@ -1864,17 +1894,26 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
             # Only pU is anchored. pLn is fit to the NEGATED RESIDUAL, whose "baseline" is not
             # the continuum at all, so the U_base/P5 statistic does not transfer to it -- that
             # needs its own derivation and is deliberately left unbounded rather than guessed.
-            pU = fit_upper_envelope(xw, yw, off_bounds=anchor_bounds(anchor))
-            resid_env = yw - gauss(xw, *pU)
-            pLn = fit_upper_envelope(xw, -resid_env)  # upper envelope of the negated residual
+            # ...and on ENV_BAND, never on the ROI. See the ENV_BAND comment: a Gaussian
+            # cannot be identified on a domain narrower than itself, and the ROI is allowed
+            # to be 2 nm wide. `env` is ENV_BAND intersected with what the caller supplied,
+            # falling back to the fringe-bearing band when too little of it is present (a
+            # caller windowing somewhere other than 790-814 entirely).
+            env = fit_ok & (xw_all >= ENV_BAND[0]) & (xw_all <= ENV_BAND[1])
+            if int(np.count_nonzero(env)) < 24:
+                env = fit_ok
+            xe, ye = xw_all[env], yw_all[env]
+            pU = fit_upper_envelope(xe, ye, off_bounds=anchor_bounds(anchor))
+            resid_env = ye - gauss(xe, *pU)
+            pLn = fit_upper_envelope(xe, -resid_env)  # upper envelope of the negated residual
 
             # --- Dead-window / no-fringe detection -----------------------------------
             # Peak envelope gap (U-L at its center) vs the overall count span; plus the
             # variance of the envelope-removed trace. Either collapsing => no fringes.
             aLn, muLn, sLn, offLn = pLn
             peak_gap = abs(aLn + offLn)
-            span = float(np.ptp(yw)) + 1e-12          # judged on the fringe-bearing band, to
-            detrended = yw - gauss(xw, *pU)           # match what the envelopes were fit on
+            span = float(np.ptp(ye)) + 1e-12          # judged on the ENVELOPE domain, to
+            detrended = ye - gauss(xe, *pU)           # match what the envelopes were fit on
             if peak_gap < DEAD_GAP_FRAC * span or np.std(detrended) < DEAD_OSC_STD * (span + 1):
                 t_run = (time.perf_counter() - t_run0) * 1e3
                 return {"status": "dead_window", "csig": None, "pU": pU, "pLn": pLn,
@@ -1882,16 +1921,21 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
                         "msg": f"envelope gap {peak_gap:.3g} vs span {span:.3g}: no fringes"}
 
             # --- Truncation bounds (closed-form Gaussian threshold crossings) --------
-            max_diff = aLn + offLn                                 # Gaussian peak, at muLn
-            min_diff = min(gauss(x[0], *pLn), gauss(x[-1], *pLn))  # gap falls off toward edges
-            thr = TRUNC_THRESHOLD if trunc_threshold is None else float(trunc_threshold)
-            level = min_diff + (max_diff - min_diff) * thr
-            arg = (level - offLn) / aLn                            # exp(-(x-mu)^2/2s^2) at crossing
-            if 0.0 < arg < 1.0:
-                delta = abs(sLn) * np.sqrt(-2.0 * np.log(arg))
-                x_left, x_right = muLn - delta, muLn + delta
+            # Under an ROI the bounds ARE the ROI: the contrast crop is a search for the
+            # high-visibility region and the operator has already answered it.
+            if roi is not None:
+                x_left, x_right = float(roi[0]), float(roi[1])
             else:
-                x_left, x_right = x[0], x[-1]
+                max_diff = aLn + offLn                                 # Gaussian peak, at muLn
+                min_diff = min(gauss(x[0], *pLn), gauss(x[-1], *pLn))  # gap falls off toward edges
+                thr = TRUNC_THRESHOLD if trunc_threshold is None else float(trunc_threshold)
+                level = min_diff + (max_diff - min_diff) * thr
+                arg = (level - offLn) / aLn                            # exp(-(x-mu)^2/2s^2) at crossing
+                if 0.0 < arg < 1.0:
+                    delta = abs(sLn) * np.sqrt(-2.0 * np.log(arg))
+                    x_left, x_right = muLn - delta, muLn + delta
+                else:
+                    x_left, x_right = x[0], x[-1]
 
             # --- Normalize the fringes using both envelopes --------------------------
             Ud = gauss(x, *pU)
@@ -1927,6 +1971,8 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
             # A clean core is alive edge-to-edge (lo_i=0, hi_i=last) and is left untouched.
             osc = fringe_oscillating(n)
             live = osc > OSC_DEAD_THR
+            if roi is not None:
+                live = np.zeros(0, bool)      # ROI stated: no end-trim, no interior search
             if live.any():
                 lo_i = int(np.argmax(live))
                 hi_i = len(live) - 1 - int(np.argmax(live[::-1]))
@@ -2100,7 +2146,7 @@ def _analyze_once(x, y, anchor=None, ref_policy=None, trust_nsig=None,
 
 
 def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold=None,
-            ref_primary=None, recover=True, scanfree=None, trunc_method=None):
+            ref_primary=None, recover=True, scanfree=None, trunc_method=None, roi=None):
     """Fit one trace, and if the model cannot explain it, find the cut that can.
 
     Fit normally first. If that explains the trace (`_explains`), return it -- this is the
@@ -2124,9 +2170,14 @@ def analyze(x, y, anchor=None, ref_policy=None, trust_nsig=None, trunc_threshold
     """
     R = _analyze_once(x, y, anchor=anchor, ref_policy=ref_policy, trust_nsig=trust_nsig,
                       trunc_threshold=trunc_threshold, ref_primary=ref_primary,
-                      scanfree=scanfree, trunc_method=trunc_method)
+                      scanfree=scanfree, trunc_method=trunc_method, roi=roi)
     R["recovered"] = False
     R["rms_frac"] = _rms_frac(R)
+    # An ROI is a statement about WHERE to fit, so there is nothing left for the scan to
+    # search for -- and the scan is the entire cost blow-up on a weak trace (measured:
+    # 3821 ms with the scan against 380 ms without, on a fringe-free 591-px trace).
+    if roi is not None:
+        return R
     # Scan-free pipeline: the deterministic fit is the ONLY fit path (PLAN constraint #1/#2).
     # It lands the truncated fit in one pass, so there is no recovery scan to fall back to.
     use_scanfree = SCANFREE if scanfree is None else scanfree

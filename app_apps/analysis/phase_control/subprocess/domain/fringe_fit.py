@@ -1,8 +1,8 @@
 """Thin adapter between the app and ``fringe_core`` — the verified fringe analysis.
 
-**There is no math in this file, and none may be added.** ``fringe_core.py`` is a VERBATIM
-COPY of the standalone ``Data/20260709/spectrometer/fringe_core.py``; this module only
-translates between the app's frozen dataclasses and that module's ``analyze()``.
+**There is no math in this file, and none may be added.** ``fringe_core.py`` owns the
+analysis outright; this module only translates between the app's frozen dataclasses and
+that module's ``analyze()``.
 
 That rule is the whole point. Until 2026-07-16 this file carried a hand-maintained second
 copy of the math, and every bug found that day was drift between the two copies:
@@ -19,12 +19,11 @@ copy of the math, and every bug found that day was drift between the two copies:
     gate simply never arrived.
 
 None of that was a hard bug to write; it was inevitable given two copies. ``analyze_trace``
-now delegates, and ``test/fringe_parity_test.py`` asserts this module and the standalone
-agree bit-for-bit on the real traces, so the copies cannot drift again in silence.
+delegates, and that is what keeps it fixed.
 
-If you need to change the analysis, change the standalone ``fringe_core.py``, re-run its
-harnesses (``verify_phase.py``, ``synth_test.py``, ``synth_truncation.py``), and copy the
-file across whole. Do not patch this side.
+``fringe_core.py`` is now edited in place -- it is no longer pinned to an out-of-tree
+standalone, and the parity test that pinned it is gone. The rule that survives is the one
+that actually mattered: the math lives in ``fringe_core``, this file translates.
 """
 from __future__ import annotations
 
@@ -56,11 +55,10 @@ ReferencePolicy = fc.ReferencePolicy
 # It is a TIME budget and not an iteration cap on purpose: an iteration cap also throttles
 # successful recoveries, which are the whole reason the scan exists.
 #
-# Why the loop is here and not in `fc.analyze` where it belongs: `fringe_core.py` is a
-# verbatim copy of the standalone and may not be patched on this side (see the module
-# docstring). So `analyze_trace` calls it with `recover=False` and runs the budgeted scan
-# out here, delegating every decision back to fringe_core -- `_analyze_once` does the
-# fitting, `_explains` does the judging, `TRUNCREC_*` set the grid. No math is restated;
+# Why the loop is here and not in `fc.analyze`: this side needs the wall clock and the
+# standalone did not. `analyze_trace` calls `fc.analyze` with `recover=False` and runs the
+# budgeted scan out here, delegating every decision back to fringe_core -- `_analyze_once`
+# does the fitting, `_explains` the judging, `TRUNCREC_*` set the grid. No math is restated;
 # only the loop that walks the grid, and the ordering it walks in (smallest cut first,
 # alternating sides, first success wins) is preserved exactly. If this ever moves into the
 # standalone, delete this and pass `recover=True`.
@@ -189,6 +187,7 @@ def analyze_trace(
     anchor: tuple[float, float] | None = None,
     ref_policy: fc.ReferencePolicy | None = None,
     lambda_ref_nm: float | None = None,
+    roi: tuple[float, float] | None = None,
 ) -> FringeFitResult:
     """Fit one already-windowed trace. Always a cold, independent fit.
 
@@ -209,6 +208,11 @@ def analyze_trace(
     ``ref_policy`` is a ``ReferencePolicy`` carried ACROSS frames by the caller, so the
     reported reference cannot chatter between two wavelengths. Omit it and the reference
     falls back immediately.
+
+    ``roi`` is the operator's asserted analysis region, ``(lo_nm, hi_nm)`` or None. None is
+    the pre-ROI behaviour exactly. When set, ``fringe_core`` fits the ROI directly and the
+    truncation recovery scan below is not run -- there is nothing left for it to search for,
+    and it is the one thing in this pipeline that can cost 3.8 s on a bad frame.
     """
     x = np.asarray(wl, dtype=float)
     y = np.asarray(intensity, dtype=float)
@@ -216,9 +220,9 @@ def analyze_trace(
         R = fc.analyze(
             x, y, anchor=anchor, ref_policy=ref_policy,
             trust_nsig=t.trust_nsig, trunc_threshold=t.trunc_threshold,
-            ref_primary=lambda_ref_nm, recover=False,
+            ref_primary=lambda_ref_nm, recover=False, roi=roi,
         )
-        if not fc._explains(R):
+        if roi is None and not fc._explains(R):
             R = _recover_truncation(R, x, y, t, anchor, ref_policy, lambda_ref_nm)
     except Exception as e:  # fringe_core already guards its own internals; belt and braces
         log.warning("FITDIAG rejected: %s: %s", type(e).__name__, e)

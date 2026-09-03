@@ -88,8 +88,15 @@ class PhaseTracker:
         # handed straight to the control loop. ~1.9 ms here buys that back; see
         # fringe_visibility. On abort: no fit, no commit, no correction. The spectrometer
         # stream is untouched and the loop simply holds until the fringes come back.
+        # ...unless an ROI is set. Then it is skipped, for two independent reasons: it
+        # MISFIRES on a short array (its continuum reference is the 5th percentile of the
+        # array it is given and its core mask is above>0.5*peak -- it reads 0.0000 on a good
+        # 801-803 trace), and the cost it was buying back is the RECOVERY SCAN, which the
+        # ROI path already turns off (3821 ms -> 380 ms on a fringe-free trace). What
+        # protects the loop under an ROI is min_amplitude_frac on the LOCKED path, which is
+        # relative to the capture's own amplitude and drops 226x when the fringes wash out.
         vis = fringe_visibility(inten)
-        if vis < self._config.min_visibility:
+        if self._config.roi is None and vis < self._config.min_visibility:
             now = time.perf_counter()
             if now - self._last_hold_log >= _HOLD_LOG_PERIOD_S:
                 self._last_hold_log = now
@@ -97,12 +104,12 @@ class PhaseTracker:
                          vis, self._config.min_visibility, skipped)
             return False
 
-        lam_ref = self._config.params.lambda_ref.value(Prefix.NANO)
+        lam_ref = self._config.pinned_lambda_ref()
         t0 = time.perf_counter()
         try:
             result = analyze_trace(wl, inten, self._config.params.tunables(),
                                    anchor=anchor, ref_policy=self._ref_policy,
-                                   lambda_ref_nm=lam_ref)
+                                   lambda_ref_nm=lam_ref, roi=self._config.roi)
         except Exception:
             # A fresh fit can still fail on a degenerate frame. There is no seed state to
             # unwind (every fit is cold and independent), so just log and let the next
@@ -142,4 +149,21 @@ class PhaseTracker:
         lo = self._config.wavelength_range.min.value(Prefix.NANO)
         hi = self._config.wavelength_range.max.value(Prefix.NANO)
         mask = (wl >= lo) & (wl <= hi)
+        return wl[mask], inten[mask]
+
+    def roi_window(self, wavelengths_nm: np.ndarray,
+                   intensities: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """The analysis window narrowed to the ROI, or the plain window when there is none.
+
+        This is what the FROZEN-TEMPLATE path must fit on. The template's polynomial was fit
+        on the ROI and is only supported there; evaluating it across the whole window would
+        weight the closed-form phase by samples where the frozen model is an extrapolation,
+        which is the same error the ROI was set to avoid -- and it would silently rescale
+        ``amp_ref``, i.e. the in-loop strength gate.
+        """
+        wl, inten = self.window(wavelengths_nm, intensities)
+        roi = self._config.roi
+        if roi is None:
+            return wl, inten
+        mask = (wl >= roi[0]) & (wl <= roi[1])
         return wl[mask], inten[mask]

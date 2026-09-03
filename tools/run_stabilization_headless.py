@@ -38,6 +38,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--capture-n", type=int, default=None,
                     help="override capture_n, to see how many consecutively accepted "
                          "traces the live signal can actually string together")
+    ap.add_argument("--window", type=float, nargs=2, metavar=("LO", "HI"), default=None,
+                    help="analysis window in nm, e.g. --window 800 804. This is the same "
+                         "knob the panel calls the wavelength range; narrowing it is what "
+                         "'zooming in' means to the fit.")
+    ap.add_argument("--avg", type=int, default=None, help="override avg_spectra")
+    ap.add_argument("--invert", dest="invert", action="store_true", default=None,
+                    help="force invert_correction on")
+    ap.add_argument("--integration-ms", type=float, default=None,
+                    help="override the spectrometer integration time (ms)")
+    ap.add_argument("--averages", type=int, default=None,
+                    help="override the spectrometer hardware average count")
+    ap.add_argument("--roi", type=float, nargs=2, metavar=("LO", "HI"), default=None,
+                    help="analysis ROI in nm, e.g. --roi 800 804. UNLIKE --window this is "
+                         "the operator override: the fit uses exactly this region, the "
+                         "envelopes stay on 790-814, and the crop / end-trim / truncation "
+                         "detector / recovery scan and the trust+residual+inlier gates are "
+                         "all off. Omit it for today's fully automatic behaviour.")
     ap.add_argument("--no-correct", action="store_true",
                     help="observe only: swallow corrections so the plate never turns")
     args = ap.parse_args(argv)
@@ -94,6 +111,23 @@ def main(argv: list[str] | None = None) -> int:
         cfg = c.get(StabilizationConfig)
         if args.capture_n is not None:
             cfg.capture_n = int(args.capture_n)
+        if args.avg is not None:
+            cfg.avg_spectra = int(args.avg)
+        if args.invert is not None:
+            cfg.invert_correction = bool(args.invert)
+        if args.roi is not None:
+            cfg.roi_lo, cfg.roi_hi = float(args.roi[0]), float(args.roi[1])
+        if args.window is not None:
+            from base_core.math.models import Range
+            from base_core.quantities.enums import Prefix as _P
+            from base_core.quantities.models import Length
+            lo, hi = args.window
+            cfg.wavelength_range = Range(Length(lo, _P.NANO), Length(hi, _P.NANO))
+        from base_core.quantities.enums import Prefix as _P2
+        log.warning("window %.2f-%.2f nm  lambda_ref=%.2f nm",
+                    cfg.wavelength_range.min.value(_P2.NANO),
+                    cfg.wavelength_range.max.value(_P2.NANO),
+                    cfg.params.lambda_ref.value(_P2.NANO))
         log.warning("min_visibility=%.3f  rms_frac<%.2f  inliers>%.0f%%"
                     "  %d frames per correction  deadband %.1f deg",
                     cfg.min_visibility, cfg.rms_frac_threshold,
@@ -109,6 +143,15 @@ def main(argv: list[str] | None = None) -> int:
                 RequestRotateRGV,
                 lambda e: log.warning("correction %.4f deg SWALLOWED (--no-correct)",
                                       e.angle.Deg)))
+
+        from base_core.quantities.models import Time
+        if args.integration_ms is not None:
+            spectro.config.exposure_time = Time(args.integration_ms, _P2.MILLI)
+        if args.averages is not None:
+            spectro.config.average = int(args.averages)
+        log.warning("spectrometer: %.0f ms x %d averages",
+                    spectro.config.exposure_time.value(_P2.MILLI),
+                    spectro.config.average)
 
         log.info("starting the spectrometer")
         spectro.start()

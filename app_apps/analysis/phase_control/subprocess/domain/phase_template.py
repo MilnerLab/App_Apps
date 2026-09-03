@@ -53,34 +53,23 @@ from app_apps.analysis.phase_control.subprocess.domain import fringe_core as fc
 # the most recent fit, which is also what the setpoint is measured against.
 CAPTURE_N = 10
 
-# Shape-mismatch gate for the per-trace Hilbert check. Measured:
+# NOTE: there is no shape-mismatch gate. `shape_mismatch` below survives as a DIAGNOSTIC
+# only -- the tracker logs it every 2 s -- and nothing has gated on it since auto-
+# invalidation was removed. The constant that used to hold the threshold is gone with it,
+# because a named threshold nobody reads is an invitation to believe a backstop exists.
+#
+# Its measurement record, kept because it is the reason not to bring the gate back:
 #
 #   same shape, phase +0.0 / +1.5 / -3.0 / +pi   0.0029 / 0.0029 / 0.0023 / 0.0014
 #   delay move: c1 +1% / +5% / +25%              0.0109 / 0.0508 / 0.2493
 #   grating:    c2 x2 / x0.5 / ->0 / c3 x5       0.0464 / 0.0231 / 0.0468 / 0.0367
 #
-# Phase-invariant to ~0.003 across a full pi -- because instantaneous frequency is the
-# DERIVATIVE of phase, so a constant offset cancels exactly and the metric sees shape only,
-# blind to the one thing that changes every frame. The smallest shape change tested sits
-# 3.8x above that floor, so the threshold has room on both sides. Cost ~1 ms/frame.
-#
-# RAISED FROM 0.009 AFTER MEASURING IT ON THE INSTRUMENT. The 0.003 phase-invariance floor
-# above is a SYNTHETIC-noise figure. Live, at the spectrometer settings in normal use, the
-# frame-to-frame mismatch between traces of the SAME shape runs 0.008 to 0.112 (10 captures
-# over 60 s, median ~0.037) -- up to 37x that floor. At 0.009 the loop therefore captured,
-# locked, and invalidated on its very first tracked frame, over and over: ~3 s of capture
-# per lock, one correction issued in a minute, and a counter the operator only ever saw
-# sitting near zero. See tools/run_stabilization_headless.py, which is how this was found.
-#
-# Loosening this is a backstop being loosened, not a guard being removed. The PRIMARY
-# invalidation is command-driven and exact -- PhaseStabilizationHandle invalidates the
-# moment a delay or grating move is REQUESTED, before a corrupted trace can be fit -- and
-# this metric only catches shape changes nobody commanded. Note the honest cost: the
-# smallest deliberate shape change in the original sweep measured 0.0114, which is INSIDE
-# the live same-shape spread, so at these settings the metric cannot separate the two on
-# its own. It is tunable from the panel ("Re-capture above mismatch") and the tracker now
-# logs the live value against it every 2 s, so the headroom is visible rather than assumed.
-SHAPE_MISMATCH_MAX = 0.12
+# Those are SYNTHETIC-noise figures. Live, at the settings in normal use, the frame-to-frame
+# mismatch between traces of the SAME shape runs 0.008 to 0.112 (median ~0.037) -- which
+# overlaps the smallest deliberate shape change in the sweep (0.0114). The metric cannot
+# separate the two on this instrument, which is why invalidation is command-driven instead:
+# PhaseStabilizationHandle invalidates the moment a delay or grating move is REQUESTED,
+# before a corrupted trace can be fit.
 
 
 def _core_mask(x: np.ndarray, pLn: np.ndarray) -> np.ndarray:
@@ -109,6 +98,10 @@ class PhaseTemplate(PrimitiveSerde):
     match the one the template was captured under changes the noise, and silently.
     """
 
+    lambda_ref: float = 0.0  # the PINNED phase reference (nm) this template was captured
+                             # at, and the wavelength its setpoint means. 0.0 = a template
+                             # from before the pin existed; the caller falls back to the
+                             # config's lambda_ref, which is what it did then anyway.
     l0: float = 0.0
     csig: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0])
     pU: list[float] = field(default_factory=lambda: [0.0, 0.0, 1.0, 0.0])
@@ -152,6 +145,7 @@ class PhaseTemplate(PrimitiveSerde):
     # --- serialization ---------------------------------------------------------------
     def to_primitive(self) -> Primitive:
         return {
+            "lambda_ref": self.lambda_ref,
             "l0": self.l0,
             "csig": list(self.csig),
             "pU": list(self.pU),
@@ -168,6 +162,7 @@ class PhaseTemplate(PrimitiveSerde):
     def from_primitive(cls, v: Primitive) -> "PhaseTemplate":
         d: dict[str, Any] = dict(v)  # type: ignore[arg-type]
         return cls(
+            lambda_ref=float(d.get("lambda_ref", 0.0)),
             l0=float(d.get("l0", 0.0)),
             csig=[float(c) for c in d.get("csig", [0.0] * 4)],
             pU=[float(c) for c in d.get("pU", [0.0, 0.0, 1.0, 0.0])],
