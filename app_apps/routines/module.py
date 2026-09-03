@@ -18,6 +18,7 @@ from app_apps.io.oscilloscope.module import OscilloscopeModule
 from app_apps.io.oscilloscope.oscilloscope_worker_handler import OscilloscopeWorkerHandle
 from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
 from app_apps.routines.cfg_calibration.cfg_range import CfgRange
+from app_apps.routines.spectrum_soak.settings import SoakSettings
 from app_apps.routines.xcorr.config import XcorrConfig
 from app_apps.routines.xcorr.routine import XcorrRoutine
 from app_apps.routines.xcorr.settings import XcorrSettings
@@ -41,6 +42,8 @@ class RoutinesModule(BaseModule):
         from app_apps.routines.cfg_calibration.ui.view import CfgCalibrationView
         from app_apps.routines.xcorr.ui.view_model import XcorrViewModel
         from app_apps.routines.xcorr.ui.view import XcorrView
+        from app_apps.routines.spectrum_soak.ui.view_model import SpectrumSoakViewModel
+        from app_apps.routines.spectrum_soak.ui.view import SpectrumSoakView
 
         c.register_factory(CfgCalibrationViewModel, lambda c: CfgCalibrationViewModel(
             bus=ctx.event_bus,
@@ -62,6 +65,20 @@ class RoutinesModule(BaseModule):
             settings=c.get(XcorrSettings),
         ))
         c.register_factory(XcorrView, lambda c: XcorrView(c.get(XcorrViewModel), parent=None))
+
+        # Singleton settings so the panel keeps its duration/period across open/close,
+        # the way XcorrSettings does. The StabilizationConfig is injected READ-ONLY --
+        # the soak records what the loop is doing, it never configures it.
+        c.register_singleton(SoakSettings, lambda _: SoakSettings())
+        c.register_factory(SpectrumSoakViewModel, lambda c: SpectrumSoakViewModel(
+            bus=ctx.event_bus,
+            dispatcher=c.get(QtDispatcher),
+            spectrometer=c.get(SpectrometerWorkerHandle),
+            config=c.get(StabilizationConfig),
+            settings=c.get(SoakSettings),
+        ))
+        c.register_factory(SpectrumSoakView,
+                           lambda c: SpectrumSoakView(c.get(SpectrumSoakViewModel), parent=None))
 
     @staticmethod
     def _register_xcorr(c: Container, ctx: AppContext) -> None:

@@ -36,7 +36,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import h5py
 import numpy as np
@@ -202,12 +202,17 @@ class SpectrumSoakRecorder:
         *,
         period_s: float = 0.0,
         duration_s: float = 60.0,
+        on_progress: Callable[[int, int, float], None] | None = None,
     ) -> None:
         self._bus = bus
         self._handle = handle
         self._writer = writer
         self._period_ns = max(0, int(float(period_s) * 1e9))
         self._duration_ns = max(0, int(float(duration_s) * 1e9))
+        #: Called on the WRITER thread after each batch reaches the file, with
+        #: (n_kept, n_seen, elapsed_s). Deliberately not the IPC thread: a panel that
+        #: repaints must never sit between a spectrum and its ack.
+        self._on_progress = on_progress
 
         self._queue: "queue.Queue[tuple[np.ndarray, int]]" = queue.Queue(maxsize=_QUEUE_MAX)
         self._thread: threading.Thread | None = None
@@ -267,6 +272,11 @@ class SpectrumSoakRecorder:
         self._writer.close(n_dropped=self.n_dropped)
         log.info("soak recording stopped: %d seen, %d recorded, %d dropped",
                  self.n_seen, self.n_kept, self.n_dropped)
+
+    @property
+    def path(self):
+        """Where this recording is being written."""
+        return self._writer.path
 
     @property
     def elapsed_s(self) -> float:
@@ -330,6 +340,8 @@ class SpectrumSoakRecorder:
                     if wl is not None:
                         self._writer.open_axis(wl)
                     self._writer.append([c for c, _ in batch], [t for _, t in batch])
+                    if self._on_progress is not None:
+                        self._on_progress(self.n_kept, self.n_seen, self.elapsed_s)
                 except Exception:
                     # Recording is additive: a storage failure loses spectra, never the
                     # run. Keep draining so the queue cannot back up into drops.
