@@ -202,23 +202,41 @@ class SpectrumSoakRecorder:
         *,
         period_s: float = 0.0,
         duration_s: float = 60.0,
+        roi: tuple[float, float] | None = None,
         on_progress: Callable[[int, int, float], None] | None = None,
+        on_data: Callable[[np.ndarray, np.ndarray], None] | None = None,
     ) -> None:
         self._bus = bus
         self._handle = handle
         self._writer = writer
         self._period_ns = max(0, int(float(period_s) * 1e9))
         self._duration_ns = max(0, int(float(duration_s) * 1e9))
+        #: Wavelength band to keep, or None for the whole detector. Applied as a column
+        #: slice on the way in, so the file holds exactly what was recorded and needs no
+        #: second opinion about which region was under study when it is read back.
+        self._roi = None if roi is None else (float(roi[0]), float(roi[1]))
+        #: Column slice derived from the first spectrum's axis. None until then.
+        self._cut: slice | None = None
         #: Called on the WRITER thread after each batch reaches the file, with
         #: (n_kept, n_seen, elapsed_s). Deliberately not the IPC thread: a panel that
         #: repaints must never sit between a spectrum and its ack.
         self._on_progress = on_progress
+        #: Called on the WRITER thread with (wavelength_nm[px], block[n, px]) for each
+        #: batch that reached the file -- what the panel draws. It sees exactly the rows
+        #: that were stored, ROI crop included, so the picture cannot drift from the file.
+        self._on_data = on_data
 
         self._queue: "queue.Queue[tuple[np.ndarray, int]]" = queue.Queue(maxsize=_QUEUE_MAX)
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._done = threading.Event()
         self._unsub = None
+        # Paused time does not count against the duration: "record for 5 minutes" means
+        # five minutes of data. A pause that ate into the clock would silently shorten
+        # the run, and the two arms of a comparison would no longer be the same length.
+        self._paused = threading.Event()
+        self._paused_ns = 0
+        self._paused_at: int | None = None
 
         # Touched only on the IPC reader thread once started, but read by wait()/close()
         # on the caller's, so they are guarded together with the counters.
@@ -240,8 +258,29 @@ class SpectrumSoakRecorder:
         # our ack, so there must be no window where we are pending but not listening.
         self._unsub = self._bus.subscribe(SpectrumAvailable, self._on_spectrum)
         self._handle.register_consumer(self.CONSUMER_ID)
-        log.info("soak recording started: %.1f s at %.3f s period -> %s",
-                 self._duration_ns / 1e9, self._period_ns / 1e9, self._writer.path)
+        log.info("soak recording started: %.1f s at %.3f s period%s -> %s",
+                 self._duration_ns / 1e9, self._period_ns / 1e9,
+                 "" if self._roi is None else " over %.2f-%.2f nm" % self._roi,
+                 self._writer.path)
+
+    def pause(self) -> None:
+        """Stop keeping spectra. The stream, the registration and the acks continue --
+        only the filing stops, so a pause costs the phase loop nothing."""
+        with self._lock:
+            if self._paused_at is None:
+                self._paused_at = time.time_ns()
+        self._paused.set()
+
+    def resume(self) -> None:
+        with self._lock:
+            if self._paused_at is not None:
+                self._paused_ns += time.time_ns() - self._paused_at
+                self._paused_at = None
+        self._paused.clear()
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused.is_set()
 
     def wait(self, timeout: float | None = None) -> bool:
         """Block until the duration has elapsed. Returns False on timeout.
@@ -274,29 +313,49 @@ class SpectrumSoakRecorder:
                  self.n_seen, self.n_kept, self.n_dropped)
 
     @property
+    def wavelengths(self) -> np.ndarray | None:
+        """The axis actually being recorded (ROI-cropped), or None before the first
+        spectrum has arrived."""
+        with self._lock:
+            return self._wavelengths
+
+    @property
     def path(self):
         """Where this recording is being written."""
         return self._writer.path
 
     @property
     def elapsed_s(self) -> float:
+        """Recording time so far, with paused spans taken out -- the same clock the
+        duration is measured against, so the panel's progress cannot disagree with it."""
         with self._lock:
             if self._first_ns is None:
                 return 0.0
-            return (time.time_ns() - self._first_ns) / 1e9
+            return self._recorded_ns(time.time_ns()) / 1e9
+
+    def _recorded_ns(self, now_ns: int) -> int:
+        """Caller holds the lock."""
+        if self._first_ns is None:
+            return 0
+        paused = self._paused_ns
+        if self._paused_at is not None:
+            paused += now_ns - self._paused_at
+        return max(0, now_ns - self._first_ns - paused)
 
     # -- consumer (IPC reader thread -- must stay short) -------------------
 
     def _on_spectrum(self, event: SpectrumAvailable) -> None:
         try:
             ts = int(event.timestamp_ns)
+            paused = self._paused.is_set()
             with self._lock:
                 self.n_seen += 1
-                if self._first_ns is None:
+                if self._first_ns is None and not paused:
                     self._first_ns = ts
-                over = self._duration_ns and (ts - self._first_ns) >= self._duration_ns
-                due = (self._last_kept_ns is None
-                       or ts - self._last_kept_ns >= self._period_ns)
+                over = self._duration_ns and self._recorded_ns(ts) >= self._duration_ns
+                due = (not paused
+                       and (self._last_kept_ns is None
+                            or ts - self._last_kept_ns >= self._period_ns))
                 if due and not self._done.is_set():
                     self._last_kept_ns = ts
                 else:
@@ -307,8 +366,12 @@ class SpectrumSoakRecorder:
                 counts = np.array(buf.intensities(event.slot), dtype=np.float64)
                 with self._lock:
                     if self._wavelengths is None:
-                        self._wavelengths = np.array(buf.wavelengths(event.slot),
-                                                     dtype=np.float64)
+                        wl = np.array(buf.wavelengths(event.slot), dtype=np.float64)
+                        self._cut = self._slice_for(wl)
+                        self._wavelengths = wl[self._cut]
+                    cut = self._cut
+                if cut is not None:
+                    counts = counts[cut]
                 try:
                     self._queue.put_nowait((counts, ts))
                     with self._lock:
@@ -328,6 +391,25 @@ class SpectrumSoakRecorder:
             self._bus.publish(SpectrumAck(slot=event.slot, item_id=event.item_id,
                                           consumer_id=self.CONSUMER_ID))
 
+    def _slice_for(self, wl: np.ndarray) -> slice:
+        """Columns to keep. A contiguous slice rather than a boolean mask because the
+        axis is monotonic and a slice keeps the HDF5 rows contiguous too.
+
+        An ROI that selects nothing -- a stale region, a regrating, a typo -- falls back
+        to the whole detector with a warning. Recording the wrong span is recoverable;
+        recording an empty file and finding out an hour later is not.
+        """
+        if self._roi is None:
+            return slice(None)
+        lo, hi = self._roi
+        idx = np.nonzero((wl >= lo) & (wl <= hi))[0]
+        if idx.size < 2:
+            log.warning("soak: ROI %.2f-%.2f nm selects %d of %d pixels; recording the "
+                        "whole detector instead", lo, hi, idx.size, wl.size)
+            self._roi = None
+            return slice(None)
+        return slice(int(idx[0]), int(idx[-1]) + 1)
+
     # -- writer thread ----------------------------------------------------
 
     def _drain(self) -> None:
@@ -340,6 +422,9 @@ class SpectrumSoakRecorder:
                     if wl is not None:
                         self._writer.open_axis(wl)
                     self._writer.append([c for c, _ in batch], [t for _, t in batch])
+                    if self._on_data is not None and wl is not None:
+                        self._on_data(wl, np.asarray([c for c, _ in batch],
+                                                     dtype=np.float32))
                     if self._on_progress is not None:
                         self._on_progress(self.n_kept, self.n_seen, self.elapsed_s)
                 except Exception:

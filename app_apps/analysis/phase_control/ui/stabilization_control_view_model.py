@@ -77,7 +77,7 @@ class StabilizationControlViewModel(QObject):
         self._zoomed_to_roi = False   # so dropping the ROI can undo the zoom
         self._active = False
         self._plot_frequency = False
-        self._show_knife_edges = True
+        self._show_knife_edges = False   # off by default: two more lines on a busy chart
         self._unsub = bus.subscribe(PhaseTrackingStateChanged, self._on_state_changed)
         self._unsub_cfg = bus.subscribe(StabilizationConfigChanged, self._on_config_updated)
         self._unsub_batch = bus.subscribe(PhaseBatchChanged, self._on_batch_changed)

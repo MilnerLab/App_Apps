@@ -152,14 +152,21 @@ def main(argv: list[str] | None = None) -> int:
             "stabilize": bool(args.stabilize),
             "correcting": bool(args.stabilize and not args.no_correct),
             "roi_nm": ("" if cfg.roi is None else f"{cfg.roi[0]:.3f}-{cfg.roi[1]:.3f}"),
+            "recorded_roi_nm": ("" if not args.stabilize or cfg.roi is None
+                                else f"{cfg.roi[0]:.3f}-{cfg.roi[1]:.3f}"),
             "exposure_ms": exposure_ms,
             "averages": n_avg,
             "lambda_ref_nm": float(cfg.params.lambda_ref.value(Prefix.NANO)),
             "window_nm": (f"{cfg.wavelength_range.min.value(Prefix.NANO):.3f}-"
                           f"{cfg.wavelength_range.max.value(Prefix.NANO):.3f}"),
         })
+        # Same rule as the panel: the ROI is only recorded when the loop is actually
+        # holding it. With --stabilize absent it is a number nobody is enforcing, and
+        # cropping to it would throw away the detector either side for no reason.
+        rec_roi = cfg.roi if args.stabilize else None
         recorder = SpectrumSoakRecorder(ctx.event_bus, spectro, writer,
-                                        period_s=args.period, duration_s=args.seconds)
+                                        period_s=args.period, duration_s=args.seconds,
+                                        roi=rec_roi)
         recorder.start()
 
         while not recorder.wait(5.0):

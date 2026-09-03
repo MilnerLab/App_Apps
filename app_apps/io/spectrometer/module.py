@@ -7,6 +7,8 @@ from base_core.framework.app.enums import AppStatus
 from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
 from spm_002.buffer import SpectrumBuffer, SpectrumMemorySpec
+from base_core.quantities.enums import Prefix
+from base_core.quantities.models import Time
 from spm_002.config import PYTHON32_PATH, SpectrometerConfig
 
 
@@ -17,7 +19,10 @@ class SpectrometerModule(BaseModule):
         spec = SpectrumMemorySpec("spectrum_spm002")
         c.register_instance(SpectrumMemorySpec, spec)
 
-        config = SpectrometerConfig()
+        # 100 ms is the lab's working exposure, not spm_002's 50 ms default. Set here
+        # rather than in the device library: it is a property of this instrument and
+        # this experiment, and spm_002 is shared.
+        config = SpectrometerConfig(exposure_time=Time(100, Prefix.MILLI))
         c.register_instance(SpectrometerConfig, config)
 
         service = SpectrometerService(

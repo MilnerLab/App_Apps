@@ -74,6 +74,7 @@ class RoutinesModule(BaseModule):
             bus=ctx.event_bus,
             dispatcher=c.get(QtDispatcher),
             spectrometer=c.get(SpectrometerWorkerHandle),
+            phase=c.get(PhaseStabilizationHandle),
             config=c.get(StabilizationConfig),
             settings=c.get(SoakSettings),
         ))

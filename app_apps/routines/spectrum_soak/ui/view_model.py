@@ -4,6 +4,8 @@ import logging
 import threading
 from typing import Callable, TYPE_CHECKING
 
+import numpy as np
+
 from base_core.framework.events import EventBus
 from base_qt.app.dispatcher import QtDispatcher
 from base_qt.ui.app_message import MessageLevel
@@ -20,12 +22,18 @@ if TYPE_CHECKING:
     from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import (
         StabilizationConfig,
     )
+    from app_apps.analysis.phase_control.phase_stabilization_handle import (
+        PhaseStabilizationHandle,
+    )
     from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
 
 log = logging.getLogger(__name__)
 
-#: (status text, is_running) sink the view binds so it can render on the UI thread.
-UpdateSink = Callable[[str, bool], None]
+#: (status text, is_running, is_paused) sink the view binds, rendered on the UI thread.
+UpdateSink = Callable[[str, bool, bool], None]
+
+#: (wavelength_nm[px], block[n, px]) sink the heatmap binds, rendered on the UI thread.
+DataSink = Callable[[np.ndarray, np.ndarray], None]
 
 
 class SpectrumSoakViewModel(PanelViewModel):
@@ -48,16 +56,19 @@ class SpectrumSoakViewModel(PanelViewModel):
         bus: EventBus,
         dispatcher: QtDispatcher,
         spectrometer: "SpectrometerWorkerHandle",
+        phase: "PhaseStabilizationHandle",
         config: "StabilizationConfig",
         settings: SoakSettings,
     ) -> None:
         super().__init__(bus, dispatcher)
         self._spectrometer = spectrometer
+        self._phase = phase
         self._config = config
         self._settings = settings
         self._recorder: SpectrumSoakRecorder | None = None
         self._watch: threading.Thread | None = None
         self._update: UpdateSink | None = None
+        self._data: DataSink | None = None
 
     @property
     def settings(self) -> SoakSettings:
@@ -65,6 +76,23 @@ class SpectrumSoakViewModel(PanelViewModel):
 
     def bind_update(self, sink: UpdateSink) -> None:
         self._update = sink
+
+    def bind_data(self, sink: DataSink) -> None:
+        self._data = sink
+
+    def recording_roi(self) -> tuple[float, float] | None:
+        """The band this run would record, or None for the whole detector.
+
+        The ROI is followed only while the loop is RUNNING. An ROI left over in the
+        config from an earlier session, with stabilization stopped, describes a region
+        nobody is currently holding -- cropping to it would quietly throw away the
+        detector either side of a stale number.
+        """
+        from base_core.ipc.worker_handle import WorkerStatus
+
+        if self._phase.state != WorkerStatus.RUNNING:
+            return None
+        return self._config.roi
 
     @property
     def is_running(self) -> bool:
@@ -90,6 +118,7 @@ class SpectrumSoakViewModel(PanelViewModel):
         s = self._settings
         path = default_soak_path(s.out_dir, tag=s.tag)
         cfg = self._config
+        roi = self.recording_roi()
         exposure_ms = float(self._spectrometer.config.exposure_time.value(Prefix.MILLI))
         n_avg = max(1, int(self._spectrometer.config.average))
         # Everything needed to tell two recordings apart afterwards. The loop state is
@@ -101,21 +130,47 @@ class SpectrumSoakViewModel(PanelViewModel):
             "tag": s.tag,
             "exposure_ms": exposure_ms,
             "averages": n_avg,
+            # Two different facts, so two attrs: what the loop was fitting, and what
+            # this file actually contains. They agree only when the loop was running.
             "roi_nm": ("" if cfg.roi is None else f"{cfg.roi[0]:.3f}-{cfg.roi[1]:.3f}"),
+            "recorded_roi_nm": ("" if roi is None else f"{roi[0]:.3f}-{roi[1]:.3f}"),
+            "stabilizing": roi is not None or self._loop_running(),
             "lambda_ref_nm": float(cfg.params.lambda_ref.value(Prefix.NANO)),
             "window_nm": (f"{cfg.wavelength_range.min.value(Prefix.NANO):.3f}-"
                           f"{cfg.wavelength_range.max.value(Prefix.NANO):.3f}"),
         })
         self._recorder = SpectrumSoakRecorder(
             self._bus, self._spectrometer, writer,
-            period_s=s.period_s, duration_s=s.duration_s,
-            on_progress=self._on_progress,
+            period_s=s.period_s, duration_s=s.duration_s, roi=roi,
+            on_progress=self._on_progress, on_data=self._on_data,
         )
         self._recorder.start()
         self._watch = threading.Thread(target=self._await_end, name="soak-watch", daemon=True)
         self._watch.start()
-        self._render(f"recording → {path}", running=True)
-        self._msg(f"spectrum soak started: {s.duration_s:.0f} s → {path.name}")
+        span = "whole detector" if roi is None else f"ROI {roi[0]:.2f}-{roi[1]:.2f} nm"
+        self._render(f"recording {span} → {path}", running=True)
+        self._msg(f"spectrum soak started: {s.duration_s:.0f} s, {span} → {path.name}")
+
+    def _loop_running(self) -> bool:
+        from base_core.ipc.worker_handle import WorkerStatus
+        return self._phase.state == WorkerStatus.RUNNING
+
+    def pause(self) -> None:
+        """Hold. The consumer stays registered and keeps acking -- pausing the recording
+        must not pause the spectrum stream that the loop is running on."""
+        rec = self._recorder
+        if rec is None or rec.is_paused:
+            return
+        rec.pause()
+        self._render(f"paused at {rec.elapsed_s:.0f}/{self._settings.duration_s:.0f} s — "
+                     f"{rec.n_kept} spectra so far", running=True, paused=True)
+
+    def resume(self) -> None:
+        rec = self._recorder
+        if rec is None or not rec.is_paused:
+            return
+        rec.resume()
+        self._render("resuming", running=True, paused=False)
 
     def stop(self) -> None:
         """End the recording early. What was recorded is kept — the file is closed, not
@@ -142,6 +197,11 @@ class SpectrumSoakViewModel(PanelViewModel):
         self._render(f"recording {elapsed_s:.0f}/{total:.0f} s — "
                      f"{n_kept} spectra kept of {n_seen} seen", running=True)
 
+    def _on_data(self, wl, block) -> None:
+        sink = self._data
+        if sink is not None:
+            self._post(lambda: sink(wl, block))
+
     def _await_end(self) -> None:
         rec = self._recorder
         if rec is None:
@@ -159,7 +219,7 @@ class SpectrumSoakViewModel(PanelViewModel):
 
     # -- plumbing ---------------------------------------------------------
 
-    def _render(self, text: str, *, running: bool) -> None:
+    def _render(self, text: str, *, running: bool, paused: bool = False) -> None:
         sink = self._update
         if sink is not None:
-            self._post(lambda: sink(text, running))
+            self._post(lambda: sink(text, running, paused))
