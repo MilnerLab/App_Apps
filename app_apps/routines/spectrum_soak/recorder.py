@@ -414,6 +414,7 @@ class SpectrumSoakRecorder:
 
     def _drain(self) -> None:
         while True:
+            self._check_deadline()
             batch = self._take_batch()
             if batch:
                 try:
@@ -435,6 +436,24 @@ class SpectrumSoakRecorder:
                         self.n_dropped += len(batch)
             elif self._stop.is_set():
                 return
+
+    def _check_deadline(self) -> None:
+        """End the run on the clock, not only on the next spectrum.
+
+        The duration used to be tested inside the consumer, which meant a stream that
+        stopped delivering -- a spectrometer that died, a worker that hung -- left the run
+        recording forever, the panel saying "recording", and the file never closed. The
+        writer thread already wakes every 100 ms for its queue, so it is the natural place
+        to notice that the time is up regardless of what the device is doing.
+        """
+        if self._done.is_set() or not self._duration_ns:
+            return
+        with self._lock:
+            if self._first_ns is None:
+                return
+            over = self._recorded_ns(time.time_ns()) >= self._duration_ns
+        if over:
+            self._done.set()
 
     def _take_batch(self) -> list[tuple[np.ndarray, int]]:
         try:

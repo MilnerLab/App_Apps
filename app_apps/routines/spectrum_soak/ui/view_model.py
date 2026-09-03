@@ -193,6 +193,11 @@ class SpectrumSoakViewModel(PanelViewModel):
     # -- recorder threads → UI thread -------------------------------------
 
     def _on_progress(self, n_kept: int, n_seen: int, elapsed_s: float) -> None:
+        # The writer thread drains its last batch AFTER the run has ended, so without this
+        # a stale "recording..." lands on top of "FINISHED" and re-disables Start.
+        rec = self._recorder
+        if rec is None or rec.wait(0):
+            return
         total = self._settings.duration_s
         self._render(f"recording {elapsed_s:.0f}/{total:.0f} s — "
                      f"{n_kept} spectra kept of {n_seen} seen", running=True)

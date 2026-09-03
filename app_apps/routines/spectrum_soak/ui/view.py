@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from base_qt.ui.form import ConfigForm, FloatSpec
 
+from app_apps.routines.spectrum_soak.loader import SoakLoadError, load_soak
 from app_apps.routines.spectrum_soak.ui.view_model import SpectrumSoakViewModel
 
 #: Rows held in the *image*. The file keeps everything; this only bounds what is drawn,
@@ -93,9 +94,17 @@ class SpectrumSoakView(ConfigForm):
         self._stop_btn = QPushButton("Stop")
         self._stop_btn.clicked.connect(vm.stop)
         self._stop_btn.setEnabled(False)
+        # Loading draws into the same heatmap, which is the point -- an old run and a new
+        # one are read the same way. It is disabled while recording rather than allowed to
+        # overwrite the live picture with a file.
+        self._load_btn = QPushButton("Load…")
+        self._load_btn.setToolTip("Open a SOAK_*.h5 and draw it here. Recording is "
+                                 "unaffected; this only replaces what is on the chart.")
+        self._load_btn.clicked.connect(self._on_load)
         controls.addWidget(self._start_btn)
         controls.addWidget(self._pause_btn)
         controls.addWidget(self._stop_btn)
+        controls.addWidget(self._load_btn)
         controls.addStretch(1)
         self.body_layout.addLayout(controls)
 
@@ -183,6 +192,7 @@ class SpectrumSoakView(ConfigForm):
                                    float(wl[-1] - wl[0]) or 1.0, float(self._n_rows)))
         self._plot.setTitle(f"{self._n_rows} spectra · {lo:.0f}–{hi:.0f} counts")
 
+
     # -- form plumbing ----------------------------------------------------
 
     def _on_browse(self) -> None:
@@ -219,6 +229,23 @@ class SpectrumSoakView(ConfigForm):
         self._reset_heatmap()
         self._vm.start()
 
+    def _on_load(self) -> None:
+        start = self._out_dir_edit.text().strip() or str(Path.cwd())
+        chosen, _ = QFileDialog.getOpenFileName(self, "Open a soak recording", start,
+                                                "Soak recordings (SOAK_*.h5);;HDF5 (*.h5)")
+        if not chosen:
+            return
+        try:
+            run = load_soak(chosen, max_rows=_MAX_ROWS)
+        except SoakLoadError as exc:
+            # The loader's messages are written for an operator, so they go straight to
+            # the status line rather than being wrapped in something vaguer.
+            self._status.setText(str(exc))
+            return
+        self._reset_heatmap()
+        self._on_data(run.wavelength_nm, run.counts)
+        self._status.setText(run.summary())
+
     def _on_pause(self) -> None:
         if self._paused:
             self._vm.resume()
@@ -228,6 +255,7 @@ class SpectrumSoakView(ConfigForm):
     def _render(self, text: str, running: bool, paused: bool) -> None:
         self._status.setText(text)
         self._start_btn.setEnabled(not running)
+        self._load_btn.setEnabled(not running)
         self._pause_btn.setEnabled(running)
         self._stop_btn.setEnabled(running)
         self._paused = paused and running
