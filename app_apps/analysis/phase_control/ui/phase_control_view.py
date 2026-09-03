@@ -4,12 +4,15 @@ import time
 
 import numpy as np
 import pyqtgraph as pg
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPen
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QStackedWidget,
     QWidget,
@@ -115,8 +118,25 @@ class PhaseControlView(Panel):
         self._save_csv_btn.setToolTip("Save the current spectrum to a CSV file")
         row.addWidget(self._save_csv_btn)
 
+        # The controls do not compress below the width their buttons need, so on a narrow
+        # panel the row used to run off the right edge and take Apply, Config and the whole
+        # worker control with it -- off screen, unclickable, with nothing to say they were
+        # there. Behind a horizontal scroll they stay reachable at any panel width: the row
+        # fills the panel when there is room and scrolls when there is not.
+        scroller = QScrollArea()
+        scroller.setWidget(controls)
+        scroller.setWidgetResizable(True)   # stretch to the full width when it fits
+        scroller.setFrameShape(QFrame.Shape.NoFrame)
+        scroller.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroller.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # One row high, plus room for the scrollbar when it appears. Without a fixed height
+        # the scroll area claims an expanding share of the panel and eats the chart.
+        scroller.setFixedHeight(controls.sizeHint().height()
+                                + scroller.horizontalScrollBar().sizeHint().height())
+        scroller.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+
         # chart takes all remaining vertical space; controls bar stays compact
-        self.body_layout.addWidget(controls)
+        self.body_layout.addWidget(scroller)
         self.body_layout.addWidget(self._plot, stretch=1)
 
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
