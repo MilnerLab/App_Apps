@@ -1,3 +1,22 @@
+"""The Spectrum Soak panel.
+
+A panel, not a routine config form: this is something you *watch*, alongside Phase
+Control and the XCORR display, for minutes at a time. The earlier version lived behind
+Routines -> Spectrum Soak, which put a live accumulating waterfall inside a modal-ish
+settings window -- the wrong shape for a picture whose whole job is to be looked at
+while something else is being adjusted.
+
+It records the spectrometer to one HDF5 file and draws it accumulating: wavelength
+across, time down, counts as colour. Drift reads as slanted stripes, a held pattern as
+straight vertical bars, which is the entire question -- is the loop actually holding? --
+answered at a glance, long before the file is analysed.
+
+It starts no stages and does not touch the phase loop. The comparison it exists for is
+run by hand: record once with stabilization off, once with it on, from the Phase Control
+panel. Deliberately not automated into one button, because "loop on" and "loop off" have
+to be the *only* difference between the two files, and a panel that reconfigured the loop
+between arms would be changing what it is measuring.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,6 +25,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QRectF
 from PySide6.QtWidgets import (
+    QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -14,7 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from base_qt.ui.form import ConfigForm, FloatSpec
+from base_qt.ui.panel import Panel
 
 from app_apps.routines.spectrum_soak.loader import SoakLoadError, load_soak
 from app_apps.routines.spectrum_soak.ui.view_model import SpectrumSoakViewModel
@@ -26,32 +46,17 @@ from app_apps.routines.spectrum_soak.ui.view_model import SpectrumSoakViewModel
 _MAX_ROWS = 4000
 
 
-class SpectrumSoakView(ConfigForm):
-    """Routines -> Spectrum Soak.
+class SpectrumSoakView(Panel):
+    """Panels -> Spectrum Soak. See the module docstring."""
 
-    Records the spectrometer to one HDF5 file and draws it accumulating as a waterfall:
-    wavelength across, time down, counts as colour. A drifting fringe pattern reads as
-    slanted stripes and a held one as straight vertical bars, which is the entire question
-    this panel exists to answer -- and it is answerable at a glance, long before the file
-    is analysed.
+    def __init__(self, vm: SpectrumSoakViewModel, parent: QWidget | None = None) -> None:
+        super().__init__("Spectrum Soak", vm, parent)
 
-    It starts no stages and does not touch the phase loop. The comparison it is for is run
-    by hand: record once with stabilization off, once with it on, from the Phase Control
-    panel. Deliberately not automated into one button, because "loop on" and "loop off"
-    have to be the *only* difference between the two files, and a panel that reconfigured
-    the loop between arms would be changing what it is measuring.
-    """
+    # -- construction -----------------------------------------------------
 
-    _specs = {
-        "duration_s": FloatSpec("Duration", min=1.0, max=86_400.0, decimals=1,
-                                step=10.0, suffix="s"),
-        "period_s": FloatSpec("Period", min=0.0, max=3600.0, decimals=3,
-                              step=0.5, suffix="s"),
-    }
-
-    def __init__(self, vm: SpectrumSoakViewModel, parent: QWidget) -> None:
-        self._vm = vm
-        super().__init__("Spectrum Soak", vm.settings, parent, vm=vm)
+    def setup(self) -> None:
+        vm: SpectrumSoakViewModel = self.vm
+        s = vm.settings
 
         # The spectrometer free-runs; the period decimates its stream rather than asking
         # it for a frame. Said here as well as in the docstring because the difference is
@@ -64,10 +69,21 @@ class SpectrumSoakView(ConfigForm):
         note.setWordWrap(True)
         self.body_layout.addWidget(note)
 
+        knobs = QHBoxLayout()
+        knobs.addWidget(QLabel("Duration"))
+        self._duration_spin = self._spin(1.0, 86_400.0, 1, 10.0, " s", s.duration_s)
+        knobs.addWidget(self._duration_spin)
+        knobs.addSpacing(12)
+        knobs.addWidget(QLabel("Period"))
+        self._period_spin = self._spin(0.0, 3600.0, 3, 0.5, " s", s.period_s)
+        knobs.addWidget(self._period_spin)
+        knobs.addStretch(1)
+        self.body_layout.addLayout(knobs)
+
         out_row = QHBoxLayout()
         out_label = QLabel("Output folder")
-        out_label.setMinimumWidth(130)
-        self._out_dir_edit = QLineEdit(str(vm.settings.out_dir))
+        out_label.setMinimumWidth(90)
+        self._out_dir_edit = QLineEdit(str(s.out_dir))
         self._out_dir_edit.setPlaceholderText("folder for the SOAK_*.h5 files")
         browse_btn = QPushButton("Browse…")
         browse_btn.clicked.connect(self._on_browse)
@@ -78,8 +94,8 @@ class SpectrumSoakView(ConfigForm):
 
         tag_row = QHBoxLayout()
         tag_label = QLabel("Tag")
-        tag_label.setMinimumWidth(130)
-        self._tag_edit = QLineEdit(vm.settings.tag)
+        tag_label.setMinimumWidth(90)
+        self._tag_edit = QLineEdit(s.tag)
         self._tag_edit.setPlaceholderText("folded into the filename, e.g. loop_off")
         tag_row.addWidget(tag_label)
         tag_row.addWidget(self._tag_edit, stretch=1)
@@ -95,16 +111,14 @@ class SpectrumSoakView(ConfigForm):
         self._stop_btn.clicked.connect(vm.stop)
         self._stop_btn.setEnabled(False)
         # Loading draws into the same heatmap, which is the point -- an old run and a new
-        # one are read the same way. It is disabled while recording rather than allowed to
+        # one are read the same way. Disabled while recording rather than allowed to
         # overwrite the live picture with a file.
         self._load_btn = QPushButton("Load…")
         self._load_btn.setToolTip("Open a SOAK_*.h5 and draw it here. Recording is "
-                                 "unaffected; this only replaces what is on the chart.")
+                                  "unaffected; this only replaces what is on the chart.")
         self._load_btn.clicked.connect(self._on_load)
-        controls.addWidget(self._start_btn)
-        controls.addWidget(self._pause_btn)
-        controls.addWidget(self._stop_btn)
-        controls.addWidget(self._load_btn)
+        for b in (self._start_btn, self._pause_btn, self._stop_btn, self._load_btn):
+            controls.addWidget(b)
         controls.addStretch(1)
         self.body_layout.addLayout(controls)
 
@@ -120,6 +134,17 @@ class SpectrumSoakView(ConfigForm):
 
         vm.bind_update(self._render)
         vm.bind_data(self._on_data)
+
+    @staticmethod
+    def _spin(lo: float, hi: float, decimals: int, step: float,
+              suffix: str, value: float) -> QDoubleSpinBox:
+        box = QDoubleSpinBox()
+        box.setRange(lo, hi)
+        box.setDecimals(decimals)
+        box.setSingleStep(step)
+        box.setSuffix(suffix)
+        box.setValue(float(value))
+        return box
 
     # -- the waterfall ----------------------------------------------------
 
@@ -192,42 +217,28 @@ class SpectrumSoakView(ConfigForm):
                                    float(wl[-1] - wl[0]) or 1.0, float(self._n_rows)))
         self._plot.setTitle(f"{self._n_rows} spectra · {lo:.0f}–{hi:.0f} counts")
 
+    # -- commands ---------------------------------------------------------
 
-    # -- form plumbing ----------------------------------------------------
+    def _flush_settings(self) -> None:
+        """Widgets -> settings, done once at Start rather than on every keystroke.
+
+        A blank folder box means "leave it alone" rather than "write to the root", so the
+        value actually in force is echoed back and the two cannot disagree.
+        """
+        s = self.vm.settings
+        s.duration_s = float(self._duration_spin.value())
+        s.period_s = float(self._period_spin.value())
+        text = self._out_dir_edit.text().strip()
+        if text:
+            s.out_dir = Path(text)
+        self._out_dir_edit.setText(str(s.out_dir))
+        s.tag = self._tag_edit.text().strip()
 
     def _on_browse(self) -> None:
         start = self._out_dir_edit.text().strip() or str(Path.cwd())
         chosen = QFileDialog.getExistingDirectory(self, "Soak output folder", start)
         if chosen:
             self._out_dir_edit.setText(str(Path(chosen)))
-
-    def _populate(self) -> None:
-        super()._populate()
-        # getattr guards: the base class populates during __init__, before these exist.
-        if getattr(self, "_out_dir_edit", None) is not None:
-            self._out_dir_edit.setText(str(self._config.out_dir))
-        if getattr(self, "_tag_edit", None) is not None:
-            self._tag_edit.setText(self._config.tag)
-
-    def _apply(self) -> None:
-        super()._apply()
-        if getattr(self, "_out_dir_edit", None) is not None:
-            text = self._out_dir_edit.text().strip()
-            # A blank box means "leave it alone" rather than "write to the root": echo the
-            # value actually in force back into the widget so the two cannot disagree.
-            if text:
-                self._config.out_dir = Path(text)
-            self._out_dir_edit.setText(str(self._config.out_dir))
-        if getattr(self, "_tag_edit", None) is not None:
-            self._config.tag = self._tag_edit.text().strip()
-
-    def _on_start(self) -> None:
-        # Flush the widgets into the bound settings before the recorder reads them, and
-        # clear the picture: a new run's first rows next to the previous run's would be
-        # read as one continuous record.
-        self._apply()
-        self._reset_heatmap()
-        self._vm.start()
 
     def _on_load(self) -> None:
         start = self._out_dir_edit.text().strip() or str(Path.cwd())
@@ -246,11 +257,18 @@ class SpectrumSoakView(ConfigForm):
         self._on_data(run.wavelength_nm, run.counts)
         self._status.setText(run.summary())
 
+    def _on_start(self) -> None:
+        # Clear the picture first: a new run's rows drawn under the previous run's would
+        # be read as one continuous record.
+        self._flush_settings()
+        self._reset_heatmap()
+        self.vm.start()
+
     def _on_pause(self) -> None:
         if self._paused:
-            self._vm.resume()
+            self.vm.resume()
         else:
-            self._vm.pause()
+            self.vm.pause()
 
     def _render(self, text: str, running: bool, paused: bool) -> None:
         self._status.setText(text)
@@ -258,8 +276,7 @@ class SpectrumSoakView(ConfigForm):
         self._load_btn.setEnabled(not running)
         self._pause_btn.setEnabled(running)
         self._stop_btn.setEnabled(running)
+        self._duration_spin.setEnabled(not running)
+        self._period_spin.setEnabled(not running)
         self._paused = paused and running
         self._pause_btn.setText("Resume" if self._paused else "Pause")
-
-    def on_apply(self) -> None:
-        pass

@@ -75,16 +75,16 @@ class AppShell(LabMainWindow):
         from base_qt.ui.view_host import ViewHost
         from app_apps.routines.cfg_calibration.ui.view import CfgCalibrationView
         from app_apps.routines.xcorr.ui.view import XcorrView
-        from app_apps.routines.spectrum_soak.ui.view import SpectrumSoakView
 
         menu = self.menuBar().addMenu("Routines")
         self._cfg_calibration_host = ViewHost(container, CfgCalibrationView, parent=self)
         self._xcorr_host = ViewHost(container, XcorrView, parent=self)
-        self._spectrum_soak_host = ViewHost(container, SpectrumSoakView, parent=self)
 
         menu.addAction("CFG Calibration", self._cfg_calibration_host.open)
         menu.addAction("XCORR Scan", self._xcorr_host.open)
-        menu.addAction("Spectrum Soak", self._spectrum_soak_host.open)
+        # Spectrum Soak is NOT here: it is a panel in the panel window, next to Phase
+        # Control. A live accumulating waterfall is something you watch while adjusting
+        # something else, not a settings window you open, use and close.
 
     def closeEvent(self, event: QCloseEvent) -> None:
         # Bypass PanelWindow.closeEvent (which ignores) and destroy it directly.
