@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app_apps.app.config_store import ConfigStore
 from app_apps.analysis.phase_control.envelope_handle import EnvelopeHandle
 from app_apps.analysis.phase_control.phase_stabilization_handle import PhaseStabilizationHandle
 from app_apps.analysis.phase_control.service import PhaseControlService
@@ -21,8 +22,12 @@ class PhaseControlModule(BaseModule):
     def register(self, c: Container, ctx: AppContext) -> None:
         spec = c.get(SpectrumMemorySpec)
         writer = c.get(SpectrometerWorkerHandle)
-        config = StabilizationConfig(params=FringeFitParams())
-        envelope_config = EnvelopeConfig()
+        # Bound, not replaced: the same instance goes to the handle, the service and the
+        # view model below, and the loop reads it live while running.
+        store = ConfigStore.of(c)
+        config = store.bind("phase_control.stabilization",
+                            StabilizationConfig(params=FringeFitParams()))
+        envelope_config = store.bind("phase_control.envelope", EnvelopeConfig())
 
         phase_tracking_handle = PhaseStabilizationHandle(bus=ctx.event_bus, spectrum_writer=writer, config=config)
         envelope_handle = EnvelopeHandle(bus=ctx.event_bus, spectrum_writer=writer)

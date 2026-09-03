@@ -173,6 +173,15 @@ class SpectrumSoakView(Panel):
         #: view model resets it through _render whenever a run ends.
         self._paused = False
 
+        # The three knobs are also flushed as they are edited, not only at Start: the
+        # settings object is persisted across sessions (see ConfigStore), and a folder
+        # typed into the box and never used because the run was cancelled is still the
+        # folder that was meant. Committed on Enter/focus-out for the text boxes, so the
+        # settings never see a half-typed path.
+        self._duration_spin.valueChanged.connect(self._flush_settings)
+        self._out_dir_edit.editingFinished.connect(self._flush_settings)
+        self._tag_edit.editingFinished.connect(self._flush_settings)
+
         vm.bind_update(self._render)
         vm.bind_data(self._on_data)
 
@@ -204,9 +213,9 @@ class SpectrumSoakView(Panel):
         # [A] button in the corner to turn it back on -- which is exactly the behaviour
         # wanted: follow the run until someone goes looking, then hold still.
         vb.enableAutoRange(axis=vb.XAxis, enable=True)
-        # The array is [time, pixel] in memory; the picture wants [pixel, time], so the
-        # view is transposed on the way in (a view, not a copy -- see _redraw). col-major
-        # here is that transpose expressed in the item rather than as a second array.
+        # col-major: the item reads its array as [x, y]. The buffer is [time, pixel] and
+        # time is the horizontal axis, so it is handed over exactly as it is stored --
+        # no transpose, no copy, no second array to keep in step with the first.
         self._image = pg.ImageItem(axisOrder="col-major")
         self._image.setColorMap(pg.colormap.get("viridis"))
         self._plot.addItem(self._image)
@@ -420,9 +429,11 @@ class SpectrumSoakView(Panel):
             # A flat frame -- a dark detector, or a saturated one. Widen so the colour
             # map has a range to work with instead of dividing by zero.
             hi = lo + 1.0
-        # .T is a view, not a copy: the ImageItem is col-major, so this costs nothing
-        # and the buffer stays in the [time, pixel] order everything else uses.
-        self._image.setImage(view.T, autoLevels=False, levels=(lo, hi))
+        # col-major means the ImageItem reads the array as [x, y], and the buffer is
+        # already [time, pixel] -- which IS [x, y] once time is the horizontal axis. No
+        # transpose: transposing here would put the pixel index on x and run the fringes
+        # down the screen again, which is the orientation this panel moved away from.
+        self._image.setImage(view, autoLevels=False, levels=(lo, hi))
         # Map the image onto the real axes: x is the spectrum index, y is wavelength.
         self._image.setRect(QRectF(0.0, float(wl[0]), float(self._n_rows),
                                    float(wl[-1] - wl[0]) or 1.0))
@@ -436,7 +447,7 @@ class SpectrumSoakView(Panel):
 
     # -- commands ---------------------------------------------------------
 
-    def _flush_settings(self) -> None:
+    def _flush_settings(self, *_ignored) -> None:
         """Widgets -> settings, done once at Start rather than on every keystroke.
 
         A blank folder box means "leave it alone" rather than "write to the root", so the

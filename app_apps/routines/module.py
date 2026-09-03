@@ -7,6 +7,7 @@ from base_core.framework.di import Container
 from base_core.framework.modules import BaseModule
 from base_core.quantities.models import Frequency, Time
 
+from app_apps.app.config_store import ConfigStore
 from app_apps.analysis.phase_control.module import PhaseControlModule
 from app_apps.analysis.phase_control.phase_stabilization_handle import PhaseStabilizationHandle
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
@@ -29,11 +30,11 @@ class RoutinesModule(BaseModule):
     requires = (PhaseControlModule, ControlReadoutModule, OscilloscopeModule)
 
     def register(self, c: Container, ctx: AppContext) -> None:
-        c.register_singleton(CfgRange, lambda _: CfgRange(
+        c.register_singleton(CfgRange, lambda c: ConfigStore.of(c).bind("cfg_range", CfgRange(
             min=Frequency(0.0),
             max=Frequency(0.0),
             fwhm=Time(100e-15),
-        ))
+        )))
 
         self._register_xcorr(c, ctx)
 
@@ -69,7 +70,8 @@ class RoutinesModule(BaseModule):
         # Singleton settings so the panel keeps its duration/period across open/close,
         # the way XcorrSettings does. The StabilizationConfig is injected READ-ONLY --
         # the soak records what the loop is doing, it never configures it.
-        c.register_singleton(SoakSettings, lambda _: SoakSettings())
+        c.register_singleton(SoakSettings,
+                             lambda c: ConfigStore.of(c).bind("soak", SoakSettings()))
         c.register_factory(SpectrumSoakViewModel, lambda c: SpectrumSoakViewModel(
             bus=ctx.event_bus,
             dispatcher=c.get(QtDispatcher),
@@ -98,8 +100,13 @@ class RoutinesModule(BaseModule):
         # The UI edits this mutable twin and freezes it into an XcorrConfig on Start
         # (the config is frozen and cannot be bound to the form). Singleton so the
         # panel keeps its values across open/close within a session.
-        c.register_singleton(XcorrSettings, lambda _: XcorrSettings())
+        c.register_singleton(XcorrSettings,
+                             lambda c: ConfigStore.of(c).bind("xcorr", XcorrSettings()))
 
+        # Deliberately NOT persisted. It is frozen, nothing edits it, and the panel
+        # freezes a FRESH XcorrConfig out of XcorrSettings at Start -- so what an operator
+        # actually set is saved above, and saving these placeholders would only record
+        # values no run ever used.
         c.register_singleton(XcorrConfig, lambda _: XcorrConfig(
             # Placeholders. The headless runner and the eventual UI both override
             # these; a scan is never launched on defaults.

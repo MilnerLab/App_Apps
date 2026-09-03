@@ -5,6 +5,7 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
+from app_apps.app.config_store import ConfigStore
 from app_apps.app.module import AppModule
 from app_apps.app.service_config import ServiceConfig
 from app_apps.app.shell import AppShell
@@ -44,12 +45,15 @@ def build_context() -> AppContext:
 def build_container(ctx: AppContext) -> Container:
     c = Container()
     c.register_instance(AppContext, ctx)
-    c.register_instance(ServiceConfig, ServiceConfig(
+    # Registered before the modules bootstrap: every module that owns a configuration
+    # object binds it here, so the store has to exist before the first one runs.
+    store = ConfigStore.of(c)
+    c.register_instance(ServiceConfig, store.build("services", ServiceConfig(
         spectrometer=True,
         rotator=False,
         phase_control=True,
         assistant=False,  # LLM control layer off by default; flip to enable (also toggleable at runtime)
-    ))
+    )))
     return c
 
 
@@ -79,6 +83,11 @@ def main(argv: list[str] | None = None) -> int:
     shell.show()
 
     rc = app.exec()
+    # Before the lifecycle tears the modules down: shutdown may close handles that the
+    # configuration objects are read through, and this is the last moment they are all
+    # certainly intact. The shell also autosaves while running, so a crash costs at most
+    # the last few seconds of edits.
+    c.get(ConfigStore).save()
     ctx.lifecycle.clear()
     return rc
 

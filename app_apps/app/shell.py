@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QApplication, QLabel
 
+from app_apps.app.config_store import ConfigStore
 from base_core.framework.di import Container
 from base_core.framework.events import EventBus
 from base_qt.app.dispatcher import QtDispatcher
@@ -43,6 +44,18 @@ class AppShell(LabMainWindow):
         from app_apps.app.panel_window import AppPanelWindow
         self._panel_window = AppPanelWindow(container)
         self._panel_window.show()
+
+        # Configuration is saved on a timer as well as at exit. The panels edit their
+        # config objects directly and nothing announces a change, so there is no edit to
+        # hook; and an application that is killed rather than closed -- which is how a
+        # long run usually ends -- would otherwise lose the session's tuning entirely.
+        # ConfigStore.save() compares against the text it last wrote, so an idle
+        # application does no disk I/O for this at all.
+        self._config_store = ConfigStore.of(container)
+        self._config_timer = QTimer(self)
+        self._config_timer.setInterval(5000)
+        self._config_timer.timeout.connect(self._config_store.save)
+        self._config_timer.start()
 
     def _build_devices_menu(self, container: Container) -> None:
         from base_qt.ui.view_host import ViewHost
@@ -87,6 +100,8 @@ class AppShell(LabMainWindow):
         # something else, not a settings window you open, use and close.
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._config_timer.stop()
+        self._config_store.save()
         # Bypass PanelWindow.closeEvent (which ignores) and destroy it directly.
         self._panel_window.destroy()
         super().closeEvent(event)
