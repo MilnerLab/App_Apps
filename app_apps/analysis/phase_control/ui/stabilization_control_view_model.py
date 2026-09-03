@@ -412,6 +412,16 @@ class StabilizationControlViewModel(QObject):
         """The analysis region in nm, or None for auto."""
         return self._config.roi
 
+    @property
+    def window_nm(self) -> tuple[float, float]:
+        """The analysis window in nm -- the widest an ROI is allowed to be.
+
+        Exposed so the panel can bound a typed ROI to it. An ROI outside the window is not
+        a wider region, it is samples the fit never sees.
+        """
+        return (float(self._config.wavelength_range.min.value(Prefix.NANO)),
+                float(self._config.wavelength_range.max.value(Prefix.NANO)))
+
     def set_roi(self, lo_nm: float, hi_nm: float) -> None:
         """Assert the analysis region. This CHANGES THE FIT -- see StabilizationConfig.roi.
 

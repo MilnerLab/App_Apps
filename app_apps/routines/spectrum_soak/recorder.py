@@ -2,7 +2,7 @@
 
 This is ``XcorrSpectrumRecorder`` with the scan taken out. There are no stages to move,
 so there is no motion gate and no per-spectrum context: every spectrum that survives the
-period filter is filed with its timestamp and that is the whole schema. What it is *for*
+spectrum is filed with its timestamp and that is the whole schema. What it is *for*
 is answering "is the stabilization loop actually holding?" — you record a few minutes with
 the loop off, a few minutes with it on, and compare the fringe drift between the two files.
 That question needs the raw frames, not the loop's own opinion of itself, which is why
@@ -20,13 +20,16 @@ that cannot keep up must degrade its own data, never the phase loop's. This matt
 here than in XCORR: the point of the exercise is to watch the loop, so the measurement
 must not perturb it.
 
-**Free-running means the period is a filter, not a trigger.** The spectrometer integrates
-at its own rate (~1 / (exposure * average), ~4 Hz stock) and nothing here can ask it for a
-frame. ``period_s`` therefore *decimates*: the first spectrum whose timestamp is at least
-``period_s`` past the last kept one is kept. Actual spacing lands between ``period_s`` and
-``period_s + 1/rate``, and the recorded ``timestamp_ns`` is the truth about when each frame
-happened — never reconstruct the time axis from the index and the requested period.
-``period_s=0`` keeps everything the device delivers.
+**Every spectrum is kept.** There was a ``period_s`` that decimated the stream; it is
+gone. The spectrometer free-runs at ~1 / (exposure * average), so a period could only ever
+throw frames away, and the one question this exists to answer -- did the fringes move
+because of a correction or between them? -- is exactly the question a decimated record
+cannot answer: at ~5 s between corrections, a 2.5 s period leaves two frames per move.
+Record everything and decimate at read time, where that can be undone.
+
+``timestamp_ns`` is still the truth about when each frame happened. The device free-runs,
+so the spacing is its own and is not uniform; never reconstruct the time axis from the
+row index.
 """
 from __future__ import annotations
 
@@ -79,7 +82,7 @@ class SoakH5Writer:
 
         SOAK_20260902_143022.h5
         ├─ (root attrs) format_name, format_version, created_utc, completed_utc,
-        │               n_pixels, n_dropped, requested_period_s, requested_duration_s,
+        │               n_pixels, n_dropped, n_corrections, requested_duration_s,
         │               plus whatever provenance the caller passed
         ├─ wavelength_nm  float64[n_pixels]   written once, from the first spectrum
         ├─ counts         float32[N, n_pixels]
@@ -136,7 +139,7 @@ class SoakH5Writer:
                              chunks=(_CHUNK_ROWS,), compression="lzf", shuffle=True)
             # The correction log. A separate table rather than a per-row flag because a
             # correction does not happen *on* a spectrum: it is issued between two of
-            # them, and at period 0 there may be several frames between moves or none.
+            # them, and there may be several frames between moves or none at all.
             # ``correction_after_row`` is the row index the file had reached when the
             # move was commanded, so a marker can be drawn on the waterfall without
             # pretending the move belongs to a frame.
@@ -217,7 +220,7 @@ class SoakH5Writer:
 
 
 class SpectrumSoakRecorder:
-    """Record every ``period_s`` for ``duration_s``, then stop on its own.
+    """Record every spectrum for ``duration_s``, then stop on its own.
 
     Qt-free and container-free by design: it takes the bus and the spectrometer handle,
     so it runs identically under the app, under a panel, and under ``tools/record_spectra.py``.
@@ -236,7 +239,6 @@ class SpectrumSoakRecorder:
         handle: Any,                     # SpectrometerWorkerHandle
         writer: SoakH5Writer,
         *,
-        period_s: float = 0.0,
         duration_s: float = 60.0,
         roi: tuple[float, float] | None = None,
         on_progress: Callable[[int, int, float], None] | None = None,
@@ -245,7 +247,6 @@ class SpectrumSoakRecorder:
         self._bus = bus
         self._handle = handle
         self._writer = writer
-        self._period_ns = max(0, int(float(period_s) * 1e9))
         self._duration_ns = max(0, int(float(duration_s) * 1e9))
         #: Wavelength band to keep, or None for the whole detector. Applied as a column
         #: slice on the way in, so the file holds exactly what was recorded and needs no
@@ -287,7 +288,6 @@ class SpectrumSoakRecorder:
         # on the caller's, so they are guarded together with the counters.
         self._lock = threading.Lock()
         self._first_ns: int | None = None
-        self._last_kept_ns: int | None = None
         self._wavelengths: np.ndarray | None = None
         self.n_seen = 0
         self.n_kept = 0
@@ -307,8 +307,8 @@ class SpectrumSoakRecorder:
         # issued" is a result, and it is only a trustworthy one if we were listening.
         self._unsub_corr = self._bus.subscribe(RequestRotateRGV, self._on_correction)
         self._handle.register_consumer(self.CONSUMER_ID)
-        log.info("soak recording started: %.1f s at %.3f s period%s -> %s",
-                 self._duration_ns / 1e9, self._period_ns / 1e9,
+        log.info("soak recording started: %.1f s, every spectrum%s -> %s",
+                 self._duration_ns / 1e9,
                  "" if self._roi is None else " over %.2f-%.2f nm" % self._roi,
                  self._writer.path)
 
@@ -367,9 +367,16 @@ class SpectrumSoakRecorder:
 
     @property
     def correction_rows(self) -> np.ndarray:
-        """Row index of each correction so far -- what the panel draws markers at."""
+        """Row index of each correction so far -- where the panel draws its markers."""
         with self._lock:
             return np.asarray([r[2] for r in self._corr_log], dtype=np.int64)
+
+    @property
+    def correction_angles(self) -> np.ndarray:
+        """Commanded plate rotation of each correction so far, in degrees, in the same
+        order as :attr:`correction_rows`."""
+        with self._lock:
+            return np.asarray([r[1] for r in self._corr_log], dtype=np.float64)
 
     @property
     def wavelengths(self) -> np.ndarray | None:
@@ -412,13 +419,7 @@ class SpectrumSoakRecorder:
                 if self._first_ns is None and not paused:
                     self._first_ns = ts
                 over = self._duration_ns and self._recorded_ns(ts) >= self._duration_ns
-                due = (not paused
-                       and (self._last_kept_ns is None
-                            or ts - self._last_kept_ns >= self._period_ns))
-                if due and not self._done.is_set():
-                    self._last_kept_ns = ts
-                else:
-                    due = False
+                due = not paused and not self._done.is_set()
             if due:
                 buf = self._handle.buffer
                 # Copy out of shared memory: the slot is reused the moment we ack.
@@ -440,7 +441,7 @@ class SpectrumSoakRecorder:
                         self.n_dropped += 1
             if over:
                 # The last spectrum of the run is kept before the flag is raised, so a
-                # duration that is an exact multiple of the period is inclusive.
+                # duration is inclusive of the frame that reaches it.
                 self._done.set()
         except Exception:
             # Never let a read error escape: this runs on the IPC reader thread, and an

@@ -13,15 +13,13 @@ from pathlib import Path
 
 @dataclass
 class SoakSettings:
-    """The knobs behind Routines -> Spectrum Soak.
+    """The knobs behind the Spectrum Soak panel.
 
-    ``period_s`` is a *decimation* of the free-running stream, not a trigger: the
-    spectrometer integrates at its own rate and nothing here can ask it for a frame.
-    0 records everything it delivers.
+    There is no period: every spectrum the device delivers is recorded. Decimation
+    belongs at read time, where it can be undone -- see ``loader.load_soak``.
     """
 
     duration_s: float = 300.0
-    period_s: float = 0.0
     #: Recorded for the comparison this panel exists to support: one file with the loop
     #: off, one with it on. The panel does NOT start or stop the loop -- that is the
     #: Phase Control panel's job, and a recorder that silently reconfigured the loop

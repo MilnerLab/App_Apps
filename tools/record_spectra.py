@@ -4,11 +4,11 @@ This exists to answer one question with data instead of with the loop's own opin
 itself: IS the stabilization holding? Record once with the loop off and once with it on,
 under otherwise identical conditions, and compare the fringe drift between the two files.
 
-    # baseline: no loop, 5 minutes, one spectrum every 2 s
-    App_Apps\\.venv\\Scripts\\python.exe tools/record_spectra.py --seconds 300 --period 2
+    # baseline: no loop, 5 minutes
+    App_Apps\\.venv\\Scripts\\python.exe tools/record_spectra.py --seconds 300
 
     # the same again with the loop running and correcting
-    App_Apps\\.venv\\Scripts\\python.exe tools/record_spectra.py --seconds 300 --period 2 --stabilize
+    App_Apps\\.venv\\Scripts\\python.exe tools/record_spectra.py --seconds 300 --stabilize
 
 Nothing is moved unless --stabilize is passed, and --stabilize --no-correct runs the loop
 with the plate held still, which isolates "the loop measures a drift" from "the loop
@@ -16,8 +16,9 @@ removes it". The recorder is a read-only consumer of the same spectrum stream th
 and the loop use, so recording does not change what the loop sees.
 
 Output is one HDF5 file per run (see SoakH5Writer for the layout): wavelength_nm once,
-then counts[N, n_pixels] and timestamp_ns[N]. Read the time axis from timestamp_ns --
-the spectrometer free-runs, so --period decimates its stream rather than triggering it.
+then counts[N, n_pixels] and timestamp_ns[N], plus a corrections/ table of every move the
+loop commanded. Every spectrum is recorded; read the time axis from timestamp_ns, since
+the spectrometer free-runs and its spacing is its own.
 """
 from __future__ import annotations
 
@@ -41,11 +42,6 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seconds", type=float, default=60.0,
                     help="how long to record, timed from the FIRST spectrum")
-    ap.add_argument("--period", type=float, default=0.0,
-                    help="minimum spacing between recorded spectra, in seconds. 0 (the "
-                         "default) records everything the spectrometer delivers. The "
-                         "device free-runs, so this decimates its stream: actual spacing "
-                         "lands between --period and --period + one frame time.")
     ap.add_argument("--out", type=Path, default=Path("runs"),
                     help="output directory, or a full .h5 path to write exactly")
     ap.add_argument("--tag", default="", help="label folded into the filename")
@@ -148,7 +144,6 @@ def main(argv: list[str] | None = None) -> int:
         path = out if out.suffix == ".h5" else default_soak_path(out, tag=args.tag)
         writer = SoakH5Writer(path, attrs={
             "requested_duration_s": float(args.seconds),
-            "requested_period_s": float(args.period),
             "stabilize": bool(args.stabilize),
             "correcting": bool(args.stabilize and not args.no_correct),
             "roi_nm": ("" if cfg.roi is None else f"{cfg.roi[0]:.3f}-{cfg.roi[1]:.3f}"),
@@ -165,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
         # cropping to it would throw away the detector either side for no reason.
         rec_roi = cfg.roi if args.stabilize else None
         recorder = SpectrumSoakRecorder(ctx.event_bus, spectro, writer,
-                                        period_s=args.period, duration_s=args.seconds,
+                                        duration_s=args.seconds,
                                         roi=rec_roi)
         recorder.start()
 

@@ -6,10 +6,17 @@ Routines -> Spectrum Soak, which put a live accumulating waterfall inside a moda
 settings window -- the wrong shape for a picture whose whole job is to be looked at
 while something else is being adjusted.
 
-It records the spectrometer to one HDF5 file and draws it accumulating: wavelength
-across, time down, counts as colour. Drift reads as slanted stripes, a held pattern as
-straight vertical bars, which is the entire question -- is the loop actually holding? --
-answered at a glance, long before the file is analysed.
+It records the spectrometer to one HDF5 file and draws it accumulating LEFT TO RIGHT:
+time across, wavelength up, counts as colour. That way a fringe is a horizontal band and
+its drift is a visible slope, read the same way as every other trace against time in the
+app -- which is the entire question, is the loop actually holding, answered at a glance
+long before the file is analysed. Each correction the loop commanded is a vertical amber
+line, so a step in the fringes can be attributed to a move or ruled out.
+
+Zoom is horizontal only. The vertical axis is the wavelength band under study and always
+shows all of it: a soak that has silently scrolled half the band out of view is a picture
+that answers the wrong question. Time is the axis with more in it than fits, so it is the
+one that zooms, and when fully zoomed out the whole run is fitted to the width.
 
 It starts no stages and does not touch the phase loop. The comparison it exists for is
 run by hand: record once with stabilization off, once with it on, from the Phase Control
@@ -41,10 +48,10 @@ from app_apps.routines.spectrum_soak.loader import SoakLoadError, load_soak
 from app_apps.routines.spectrum_soak.normalize import envelope_normalize
 from app_apps.routines.spectrum_soak.ui.view_model import SpectrumSoakViewModel
 
-#: Rows held in the *image*. The file keeps everything; this only bounds what is drawn,
-#: so a long soak at period 0 cannot grow the panel's memory without limit. At the far
-#: end the oldest rows scroll off the top -- which is the right trade for a display whose
-#: whole job is "has it moved recently?", and it is why the file is the record, not this.
+#: Spectra held in the *image*. The file keeps everything; this only bounds what is
+#: drawn, so a long soak cannot grow the panel's memory without limit. At the far end the
+#: oldest spectra scroll off the left -- the right trade for a display whose whole job is
+#: "has it moved recently?", and why the file is the record and this is not.
 _MAX_ROWS = 4000
 
 
@@ -60,14 +67,13 @@ class SpectrumSoakView(Panel):
         vm: SpectrumSoakViewModel = self.vm
         s = vm.settings
 
-        # The spectrometer free-runs; the period decimates its stream rather than asking
-        # it for a frame. Said here as well as in the docstring because the difference is
-        # invisible in the file and shows up as spacing that never quite matches.
-        note = QLabel("Period 0 records every spectrum. Otherwise it is a floor on the "
-                      "spacing — the spectrometer free-runs, so recorded spacing lands "
-                      "between the period and the period plus one frame time. Read the "
-                      "time axis from timestamp_ns. The whole detector is always "
-                      "recorded; the view options below change only the picture.")
+        # No period: every spectrum is recorded. Said here as well as in the docstring
+        # because the spacing is the device's own and is not uniform, which is invisible
+        # in the picture and matters the moment the file is analysed.
+        note = QLabel("Every spectrum is recorded — the spectrometer free-runs, so the "
+                      "spacing is its own; read the time axis from timestamp_ns, not from "
+                      "the row index. The whole detector is always recorded; the view "
+                      "options below change only the picture.")
         note.setWordWrap(True)
         self.body_layout.addWidget(note)
 
@@ -75,12 +81,6 @@ class SpectrumSoakView(Panel):
         knobs.addWidget(QLabel("Duration"))
         self._duration_spin = self._spin(1.0, 86_400.0, 1, 10.0, " s", s.duration_s)
         knobs.addWidget(self._duration_spin)
-        knobs.addSpacing(12)
-        knobs.addWidget(QLabel("Period"))
-        self._period_spin = self._spin(0.0, 3600.0, 3, 0.5, " s", s.period_s)
-        # 0 is the default and means "everything", which is not what " 0.000 s" reads as.
-        self._period_spin.setSpecialValueText("every frame")
-        knobs.addWidget(self._period_spin)
         knobs.addStretch(1)
         self.body_layout.addLayout(knobs)
 
@@ -146,6 +146,20 @@ class SpectrumSoakView(Panel):
             "the fact, including on a loaded file.")
         self._crop_cb.toggled.connect(self._on_crop_toggled)
         options.addWidget(self._crop_cb)
+        # Typed as well as dragged. A drag is how a region is FOUND; a number is how it is
+        # reproduced tomorrow, or matched to the stabilization panel's ROI, and neither
+        # can be done by eye. The two are one value in two skins -- editing either moves
+        # the other -- so there is never a box disagreeing with the line it describes.
+        self._roi_spins: list[QDoubleSpinBox] = []
+        for label in ("from", "to"):
+            options.addSpacing(6)
+            options.addWidget(QLabel(label))
+            box = self._spin(0.0, 100_000.0, 2, 0.5, " nm", 0.0)
+            box.setKeyboardTracking(False)   # commit on Enter/focus-out, not per keystroke
+            box.setEnabled(False)
+            box.valueChanged.connect(self._on_roi_typed)
+            options.addWidget(box)
+            self._roi_spins.append(box)
         options.addStretch(1)
         self.body_layout.addLayout(options)
 
@@ -178,13 +192,22 @@ class SpectrumSoakView(Panel):
     def _build_heatmap(self) -> None:
         self._plot = pg.PlotWidget()
         self._plot.setMinimumHeight(260)
-        self._plot.setLabel("bottom", "Wavelength", units="nm")
-        self._plot.setLabel("left", "Spectrum #")
-        # Newest at the bottom, so the picture grows downward the way the run does.
-        self._plot.getViewBox().invertY(True)
-        # row-major: the array is indexed [time, pixel], which is also how it is stored
-        # and how it reads. The default (col-major) would need every block transposed.
-        self._image = pg.ImageItem(axisOrder="row-major")
+        self._plot.setLabel("bottom", "Spectrum #")
+        self._plot.setLabel("left", "Wavelength", units="nm")
+        vb = self._plot.getViewBox()
+        # Horizontal zoom only. The wavelength axis is pinned to the band being drawn on
+        # every redraw (see _redraw), so a wheel or a drag on it could only ever hide part
+        # of the band or fight the next frame for control of the view.
+        vb.setMouseEnabled(x=True, y=False)
+        # Fitted to the width by default, and it STAYS fitted as rows arrive. pyqtgraph
+        # turns this off by itself the moment the operator zooms or pans, and offers the
+        # [A] button in the corner to turn it back on -- which is exactly the behaviour
+        # wanted: follow the run until someone goes looking, then hold still.
+        vb.enableAutoRange(axis=vb.XAxis, enable=True)
+        # The array is [time, pixel] in memory; the picture wants [pixel, time], so the
+        # view is transposed on the way in (a view, not a copy -- see _redraw). col-major
+        # here is that transpose expressed in the item rather than as a second array.
+        self._image = pg.ImageItem(axisOrder="col-major")
         self._image.setColorMap(pg.colormap.get("viridis"))
         self._plot.addItem(self._image)
         self.body_layout.addWidget(self._plot, stretch=1)
@@ -205,7 +228,9 @@ class SpectrumSoakView(Panel):
         pen = pg.mkPen("#39d353", width=1)
         self._roi_lines: list[pg.InfiniteLine] = []
         for _ in range(2):
-            line = pg.InfiniteLine(angle=90, movable=True, pen=pen, label="ROI",
+            # Horizontal: wavelength is the vertical axis now, so the band is bounded
+            # above and below.
+            line = pg.InfiniteLine(angle=0, movable=True, pen=pen, label="ROI",
                                    labelOpts={"position": 0.9, "color": "#39d353"})
             line.setZValue(60)
             line.setVisible(False)
@@ -213,7 +238,7 @@ class SpectrumSoakView(Panel):
             self._plot.addItem(line)
             self._roi_lines.append(line)
 
-        #: One horizontal marker per correction the phase loop commanded. Drawn on the
+        #: One vertical marker per correction the phase loop commanded. Drawn on the
         #: waterfall rather than listed, because the question they answer is positional:
         #: did the fringes move BECAUSE of a correction, or between them? Amber, and
         #: deliberately not the ROI green -- these are events, not a selection.
@@ -264,7 +289,7 @@ class SpectrumSoakView(Panel):
 
         if fresh_axis:
             self._park_roi_lines()
-        self._set_corrections(self.vm.correction_rows())
+        self._set_corrections(*self.vm.corrections())
         self._redraw()
 
     # -- the ROI (this panel's own, on the display only) -------------------
@@ -276,8 +301,10 @@ class SpectrumSoakView(Panel):
         if wl is None or wl.size < 2 or not self._roi_lines:
             return
         span = float(wl[-1] - wl[0])
+        lo, hi = float(wl[0]), float(wl[-1])
         for line, frac in zip(self._roi_lines, (0.25, 0.75)):
-            line.setPos(float(wl[0]) + span * frac)
+            line.setPos(lo + span * frac)
+        self._sync_roi_spins(bounds=(lo, hi))
 
     def _roi_slice(self) -> slice:
         """Columns to draw. The whole span unless the crop is on and the markers select
@@ -295,12 +322,46 @@ class SpectrumSoakView(Panel):
     def _on_crop_toggled(self, on: bool) -> None:
         for line in self._roi_lines:
             line.setVisible(on)
+        for box in self._roi_spins:
+            box.setEnabled(on)
         self._redraw()
 
     def _on_roi_dragged(self, _line) -> None:
+        self._sync_roi_spins()
         self._redraw()
 
-    def _set_corrections(self, rows) -> None:
+    def _sync_roi_spins(self, bounds: tuple[float, float] | None = None) -> None:
+        """Lines -> boxes, and optionally re-bound them to the data.
+
+        Signals blocked throughout, and that covers ``setRange`` as much as ``setValue``:
+        widening the range moves a box that was clamped outside it, which emits
+        valueChanged, which drives the line -- so an unguarded setRange silently drags
+        both markers to the edge of the band the moment the axis arrives.
+
+        Bounded by the data because a typed wavelength the detector never saw is not a
+        narrower region, it is an empty one.
+        """
+        for box, line in zip(self._roi_spins, self._roi_lines):
+            blocked = box.blockSignals(True)
+            if bounds is not None:
+                box.setRange(*bounds)
+            box.setValue(float(line.value()))
+            box.blockSignals(blocked)
+
+    def _on_roi_typed(self, _value: float) -> None:
+        """Boxes -> lines. The other half of the same value.
+
+        The two are NOT sorted into order here: whichever box says "from" keeps saying it
+        even when it is dragged past the other, and _roi_slice sorts them where it needs
+        them. Reordering under the operator's hands would swap the box they were typing
+        into mid-edit.
+        """
+        for box, line in zip(self._roi_spins, self._roi_lines):
+            if float(line.value()) != float(box.value()):
+                line.setPos(float(box.value()))
+        self._redraw()
+
+    def _set_corrections(self, rows, angles=None) -> None:
         """Draw a marker per correction, reusing the lines already on the plot.
 
         Rebuilding the list every block would churn plot items several times a second at
@@ -308,16 +369,29 @@ class SpectrumSoakView(Panel):
         and only the shortfall is created.
         """
         rows = np.asarray(rows, dtype=np.float64).ravel() - float(self._rows_dropped)
-        rows = rows[rows >= 0.0]
+        angles = (np.asarray(angles, dtype=np.float64).ravel() if angles is not None
+                  else np.full(rows.size, np.nan))
+        if angles.size != rows.size:
+            angles = np.full(rows.size, np.nan)
+        keep = rows >= 0.0
+        rows, angles = rows[keep], angles[keep]
         pen = pg.mkPen("#ffa657", width=1, style=Qt.PenStyle.DashLine)
         while len(self._corr_lines) < rows.size:
-            line = pg.InfiniteLine(angle=0, movable=False, pen=pen)
+            # Vertical, at the row the file had reached when the move was commanded.
+            # Labelled with the rotation in degrees, since "a correction happened" and
+            # "the plate was told to turn 3.6 deg" are different pieces of evidence and
+            # only the second one can be checked against the phase step that followed.
+            line = pg.InfiniteLine(angle=90, movable=False, pen=pen, label="",
+                                   labelOpts={"position": 0.06, "color": "#ffa657",
+                                              "rotateAxis": (1, 0)})
             line.setZValue(50)
             self._plot.addItem(line)
             self._corr_lines.append(line)
         for i, line in enumerate(self._corr_lines):
             if i < rows.size:
                 line.setPos(float(rows[i]))
+                a = float(angles[i])
+                line.label.setText("" if not np.isfinite(a) else f"{a:+.2f}°")
             line.setVisible(i < rows.size)
 
     # -- drawing ----------------------------------------------------------
@@ -346,10 +420,16 @@ class SpectrumSoakView(Panel):
             # A flat frame -- a dark detector, or a saturated one. Widen so the colour
             # map has a range to work with instead of dividing by zero.
             hi = lo + 1.0
-        self._image.setImage(view, autoLevels=False, levels=(lo, hi))
-        # Map the image onto the real axes: x is wavelength, y is the spectrum index.
-        self._image.setRect(QRectF(float(wl[0]), 0.0,
-                                   float(wl[-1] - wl[0]) or 1.0, float(self._n_rows)))
+        # .T is a view, not a copy: the ImageItem is col-major, so this costs nothing
+        # and the buffer stays in the [time, pixel] order everything else uses.
+        self._image.setImage(view.T, autoLevels=False, levels=(lo, hi))
+        # Map the image onto the real axes: x is the spectrum index, y is wavelength.
+        self._image.setRect(QRectF(0.0, float(wl[0]), float(self._n_rows),
+                                   float(wl[-1] - wl[0]) or 1.0))
+        # Pin the wavelength axis to exactly what is drawn, every frame. It is not the
+        # zooming axis, so nothing else will set it, and a cropped view that kept the old
+        # range would draw the region as a stripe in the middle of the band it just left.
+        self._plot.getViewBox().setYRange(float(wl[0]), float(wl[-1]), padding=0.0)
         units = "fringe" if normalized else "counts"
         span = f" · {wl[0]:.2f}–{wl[-1]:.2f} nm" if cut != slice(None) else ""
         self._plot.setTitle(f"{self._n_rows} spectra · {lo:.2f}–{hi:.2f} {units}{span}")
@@ -364,7 +444,6 @@ class SpectrumSoakView(Panel):
         """
         s = self.vm.settings
         s.duration_s = float(self._duration_spin.value())
-        s.period_s = float(self._period_spin.value())
         text = self._out_dir_edit.text().strip()
         if text:
             s.out_dir = Path(text)
@@ -396,7 +475,8 @@ class SpectrumSoakView(Panel):
         # (empty) list. Divided by the stride because the markers index the FILE's rows
         # and a decimated load draws only every stride-th of them.
         if run.corrections.size:
-            self._set_corrections(run.corrections[:, 2] / max(1, run.stride))
+            self._set_corrections(run.corrections[:, 2] / max(1, run.stride),
+                                  run.corrections[:, 1])
         self._status.setText(run.summary())
 
     def _on_start(self) -> None:
@@ -419,6 +499,5 @@ class SpectrumSoakView(Panel):
         self._pause_btn.setEnabled(running)
         self._stop_btn.setEnabled(running)
         self._duration_spin.setEnabled(not running)
-        self._period_spin.setEnabled(not running)
         self._paused = paused and running
         self._pause_btn.setText("Resume" if self._paused else "Pause")

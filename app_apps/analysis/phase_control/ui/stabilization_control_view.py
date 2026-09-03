@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
+    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -118,6 +119,24 @@ class StabilizationControlView(QWidget):
             "View only: frame the ROI on the chart. Touches nothing the fit reads. "
             "With no ROI set, frames the whole analysis window.")
         roi_row.addWidget(self._zoom_roi_btn)
+        # Typed as well as dragged. Dragging is how the region is found; a number is how it
+        # is set to the band someone else measured, reproduced tomorrow, or matched to the
+        # soak panel's crop -- none of which the mouse can do. Same value, two skins: the
+        # markers drive these through roi_changed and these drive the markers through
+        # set_roi, so a box and the line it describes can never disagree.
+        self._roi_spins: list[QDoubleSpinBox] = []
+        for label in ("from", "to"):
+            roi_row.addWidget(QLabel(label))
+            box = QDoubleSpinBox()
+            box.setDecimals(2)
+            box.setSingleStep(0.5)
+            box.setSuffix(" nm")
+            box.setRange(*vm.window_nm)
+            box.setKeyboardTracking(False)   # commit on Enter/focus-out, not per keystroke
+            box.setEnabled(vm.roi is not None)
+            box.valueChanged.connect(self._on_roi_typed)
+            roi_row.addWidget(box)
+            self._roi_spins.append(box)
         self._quality_label = QLabel(vm.quality_text)
         self._quality_label.setToolTip(
             "The three quality measures the ROI stops enforcing: whether the fit's own "
@@ -273,7 +292,31 @@ class StabilizationControlView(QWidget):
             was = self._roi_cb.blockSignals(True)
             self._roi_cb.setChecked(active)
             self._roi_cb.blockSignals(was)
+        self._sync_roi_spins(active)
         self._refresh_quality()
+
+    def _sync_roi_spins(self, active: bool) -> None:
+        """Config -> boxes. Signals blocked, and that covers ``setRange`` as much as
+        ``setValue``: a range that no longer contains the current value moves it, which
+        emits valueChanged, which would re-enter set_roi and push a config the operator
+        never edited -- the window changing under a live ROI would silently redefine it."""
+        roi = self._vm.roi
+        for i, box in enumerate(self._roi_spins):
+            box.setEnabled(active)
+            was = box.blockSignals(True)
+            box.setRange(*self._vm.window_nm)
+            if roi is not None:
+                box.setValue(float(roi[i]))
+            box.blockSignals(was)
+
+    def _on_roi_typed(self, _value: float) -> None:
+        """Boxes -> config. Only while an ROI is in force: with the switch off there is
+        nothing to edit, and typing a number is not a way to turn the ROI on -- that is
+        what the switch is for, and it decides where the bounds come from."""
+        if len(self._roi_spins) < 2 or self._vm.roi is None:
+            return
+        self._vm.set_roi(float(self._roi_spins[0].value()),
+                         float(self._roi_spins[1].value()))
 
     def _refresh_quality(self) -> None:
         self._quality_label.setText(self._vm.quality_text)

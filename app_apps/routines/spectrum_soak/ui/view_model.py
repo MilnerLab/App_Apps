@@ -77,8 +77,8 @@ class SpectrumSoakViewModel(PanelViewModel):
     def bind_update(self, sink: UpdateSink) -> None:
         self._update = sink
 
-    def correction_rows(self):
-        """Row indices at which the phase loop commanded a move, so far this run.
+    def corrections(self):
+        """(row indices, degrees) of every move the phase loop commanded this run.
 
         Empty when nothing is recording, or when the loop issued nothing -- which is a
         result rather than a gap: the recorder listens for corrections whether or not the
@@ -86,7 +86,9 @@ class SpectrumSoakViewModel(PanelViewModel):
         """
         import numpy as np
         rec = self._recorder
-        return rec.correction_rows if rec is not None else np.zeros(0, dtype=int)
+        if rec is None:
+            return np.zeros(0, dtype=int), np.zeros(0)
+        return rec.correction_rows, rec.correction_angles
 
     def bind_data(self, sink: DataSink) -> None:
         self._data = sink
@@ -123,7 +125,6 @@ class SpectrumSoakViewModel(PanelViewModel):
         # the file is what was actually true while the frames were being taken.
         writer = SoakH5Writer(path, attrs={
             "requested_duration_s": float(s.duration_s),
-            "requested_period_s": float(s.period_s),
             "tag": s.tag,
             "exposure_ms": exposure_ms,
             "averages": n_avg,
@@ -139,7 +140,7 @@ class SpectrumSoakViewModel(PanelViewModel):
         })
         self._recorder = SpectrumSoakRecorder(
             self._bus, self._spectrometer, writer,
-            period_s=s.period_s, duration_s=s.duration_s,
+            duration_s=s.duration_s,
             on_progress=self._on_progress, on_data=self._on_data,
         )
         self._recorder.start()
