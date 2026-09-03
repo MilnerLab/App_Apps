@@ -80,19 +80,6 @@ class SpectrumSoakViewModel(PanelViewModel):
     def bind_data(self, sink: DataSink) -> None:
         self._data = sink
 
-    def recording_roi(self) -> tuple[float, float] | None:
-        """The band this run would record, or None for the whole detector.
-
-        The ROI is followed only while the loop is RUNNING. An ROI left over in the
-        config from an earlier session, with stabilization stopped, describes a region
-        nobody is currently holding -- cropping to it would quietly throw away the
-        detector either side of a stale number.
-        """
-        from base_core.ipc.worker_handle import WorkerStatus
-
-        if self._phase.state != WorkerStatus.RUNNING:
-            return None
-        return self._config.roi
 
     @property
     def is_running(self) -> bool:
@@ -118,7 +105,6 @@ class SpectrumSoakViewModel(PanelViewModel):
         s = self._settings
         path = default_soak_path(s.out_dir, tag=s.tag)
         cfg = self._config
-        roi = self.recording_roi()
         exposure_ms = float(self._spectrometer.config.exposure_time.value(Prefix.MILLI))
         n_avg = max(1, int(self._spectrometer.config.average))
         # Everything needed to tell two recordings apart afterwards. The loop state is
@@ -130,26 +116,26 @@ class SpectrumSoakViewModel(PanelViewModel):
             "tag": s.tag,
             "exposure_ms": exposure_ms,
             "averages": n_avg,
-            # Two different facts, so two attrs: what the loop was fitting, and what
-            # this file actually contains. They agree only when the loop was running.
+            # The loop's ROI is stamped as PROVENANCE, not as a crop: the file always
+            # holds the whole detector. Cropping the recording to the loop's region would
+            # decide, at Start, a question the operator can only answer by looking -- and
+            # would throw away the fringes either side, which cannot be recovered.
             "roi_nm": ("" if cfg.roi is None else f"{cfg.roi[0]:.3f}-{cfg.roi[1]:.3f}"),
-            "recorded_roi_nm": ("" if roi is None else f"{roi[0]:.3f}-{roi[1]:.3f}"),
-            "stabilizing": roi is not None or self._loop_running(),
+            "stabilizing": self._loop_running(),
             "lambda_ref_nm": float(cfg.params.lambda_ref.value(Prefix.NANO)),
             "window_nm": (f"{cfg.wavelength_range.min.value(Prefix.NANO):.3f}-"
                           f"{cfg.wavelength_range.max.value(Prefix.NANO):.3f}"),
         })
         self._recorder = SpectrumSoakRecorder(
             self._bus, self._spectrometer, writer,
-            period_s=s.period_s, duration_s=s.duration_s, roi=roi,
+            period_s=s.period_s, duration_s=s.duration_s,
             on_progress=self._on_progress, on_data=self._on_data,
         )
         self._recorder.start()
         self._watch = threading.Thread(target=self._await_end, name="soak-watch", daemon=True)
         self._watch.start()
-        span = "whole detector" if roi is None else f"ROI {roi[0]:.2f}-{roi[1]:.2f} nm"
-        self._render(f"recording {span} → {path}", running=True)
-        self._msg(f"spectrum soak started: {s.duration_s:.0f} s, {span} → {path.name}")
+        self._render(f"recording → {path}", running=True)
+        self._msg(f"spectrum soak started: {s.duration_s:.0f} s → {path.name}")
 
     def _loop_running(self) -> bool:
         from base_core.ipc.worker_handle import WorkerStatus

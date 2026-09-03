@@ -25,6 +25,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QRectF
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
@@ -37,6 +38,7 @@ from PySide6.QtWidgets import (
 from base_qt.ui.panel import Panel
 
 from app_apps.routines.spectrum_soak.loader import SoakLoadError, load_soak
+from app_apps.routines.spectrum_soak.normalize import envelope_normalize
 from app_apps.routines.spectrum_soak.ui.view_model import SpectrumSoakViewModel
 
 #: Rows held in the *image*. The file keeps everything; this only bounds what is drawn,
@@ -64,8 +66,8 @@ class SpectrumSoakView(Panel):
         note = QLabel("Period 0 records every spectrum. Otherwise it is a floor on the "
                       "spacing — the spectrometer free-runs, so recorded spacing lands "
                       "between the period and the period plus one frame time. Read the "
-                      "time axis from timestamp_ns. With stabilization RUNNING and an ROI "
-                      "set in the Phase Control panel, only that ROI is recorded.")
+                      "time axis from timestamp_ns. The whole detector is always "
+                      "recorded; the view options below change only the picture.")
         note.setWordWrap(True)
         self.body_layout.addWidget(note)
 
@@ -122,6 +124,29 @@ class SpectrumSoakView(Panel):
         controls.addStretch(1)
         self.body_layout.addLayout(controls)
 
+        # View options. None of these touch the recorder or the file -- they are how the
+        # picture is drawn, and they stay live while a run is in progress precisely so the
+        # operator can go looking without interrupting it.
+        options = QHBoxLayout()
+        self._norm_cb = QCheckBox("Envelope-normalized")
+        self._norm_cb.setToolTip(
+            "Map each spectrum's lower envelope to 0 and its upper to 1, so every fringe "
+            "is drawn at the same contrast no matter how much light was under it. The "
+            "fringes at the edges of the band are invisible in the raw view for want of "
+            "counts, not for want of fringes. Display only — the file keeps raw counts.")
+        self._norm_cb.toggled.connect(self._redraw)
+        options.addWidget(self._norm_cb)
+        self._crop_cb = QCheckBox("Crop to ROI")
+        self._crop_cb.setToolTip(
+            "Draw only the wavelengths between the two green markers, and rescale the "
+            "colours to what is left. Drag the markers to adjust. Display only — the "
+            "whole detector is still recorded, so this can be changed or undone after "
+            "the fact, including on a loaded file.")
+        self._crop_cb.toggled.connect(self._on_crop_toggled)
+        options.addWidget(self._crop_cb)
+        options.addStretch(1)
+        self.body_layout.addLayout(options)
+
         self._status = QLabel("idle")
         self._status.setWordWrap(True)
         self.body_layout.addWidget(self._status)
@@ -169,6 +194,23 @@ class SpectrumSoakView(Panel):
         self._n_rows = 0
         self._wl: np.ndarray | None = None
 
+        # The panel's OWN region, in nm. Green and solid, matching the ROI markers in the
+        # Phase Control panel because they mean the same kind of thing -- but this one is
+        # the operator's view onto the data and nothing else reads it. Hidden until the
+        # crop is on: a pair of markers parked at the edges reads as a crop that is not
+        # there. Committed on release rather than per pixel, since each move rescales the
+        # colour map over the whole picture.
+        pen = pg.mkPen("#39d353", width=1)
+        self._roi_lines: list[pg.InfiniteLine] = []
+        for _ in range(2):
+            line = pg.InfiniteLine(angle=90, movable=True, pen=pen, label="ROI",
+                                   labelOpts={"position": 0.9, "color": "#39d353"})
+            line.setZValue(60)
+            line.setVisible(False)
+            line.sigPositionChangeFinished.connect(self._on_roi_dragged)
+            self._plot.addItem(line)
+            self._roi_lines.append(line)
+
     def _reset_heatmap(self) -> None:
         self._buf = None
         self._n_rows = 0
@@ -176,6 +218,7 @@ class SpectrumSoakView(Panel):
         self._image.clear()
 
     def _on_data(self, wl: np.ndarray, block: np.ndarray) -> None:
+        """Accumulate raw rows. Everything about how they LOOK happens in _redraw."""
         if block.ndim != 2 or block.size == 0:
             return
         n_px = block.shape[1]
@@ -184,6 +227,8 @@ class SpectrumSoakView(Panel):
             # over rather than draw two different axes on one picture.
             self._buf = np.empty((max(64, block.shape[0]), n_px), dtype=np.float32)
             self._n_rows = 0
+            self._wl = None
+        fresh_axis = self._wl is None
         self._wl = wl
 
         for row in block:
@@ -202,20 +247,76 @@ class SpectrumSoakView(Panel):
             self._buf[self._n_rows] = row
             self._n_rows += 1
 
-        view = self._buf[:self._n_rows]
+        if fresh_axis:
+            self._park_roi_lines()
+        self._redraw()
+
+    # -- the ROI (this panel's own, on the display only) -------------------
+
+    def _park_roi_lines(self) -> None:
+        """Put the markers at the edges of the data. Called when the axis first arrives,
+        so they always open somewhere the operator can see and grab."""
+        wl = self._wl
+        if wl is None or wl.size < 2 or not self._roi_lines:
+            return
+        span = float(wl[-1] - wl[0])
+        for line, frac in zip(self._roi_lines, (0.25, 0.75)):
+            line.setPos(float(wl[0]) + span * frac)
+
+    def _roi_slice(self) -> slice:
+        """Columns to draw. The whole span unless the crop is on and the markers select
+        at least a few pixels -- a crop down to nothing is a slip of the mouse, not an
+        instruction, and blanking the panel is a poor way to report it."""
+        wl = self._wl
+        if wl is None or not self._crop_cb.isChecked() or not self._roi_lines:
+            return slice(None)
+        lo, hi = sorted(float(ln.value()) for ln in self._roi_lines)
+        idx = np.nonzero((wl >= lo) & (wl <= hi))[0]
+        if idx.size < 4:
+            return slice(None)
+        return slice(int(idx[0]), int(idx[-1]) + 1)
+
+    def _on_crop_toggled(self, on: bool) -> None:
+        for line in self._roi_lines:
+            line.setVisible(on)
+        self._redraw()
+
+    def _on_roi_dragged(self, _line) -> None:
+        self._redraw()
+
+    # -- drawing ----------------------------------------------------------
+
+    def _redraw(self, *_ignored) -> None:
+        """Buffer -> picture. Crop, then normalise, then scale the colours to what is
+        left, in that order: normalising before the crop would set every fringe's
+        contrast from envelopes measured partly outside the region being looked at."""
+        if self._buf is None or self._n_rows == 0 or self._wl is None:
+            return
+        cut = self._roi_slice()
+        wl = self._wl[cut]
+        view = self._buf[:self._n_rows, cut]
+        if wl.size < 2 or view.size == 0:
+            return
+
+        normalized = self._norm_cb.isChecked()
+        if normalized:
+            view = envelope_normalize(view)
+
         finite = view[np.isfinite(view)]
         if finite.size == 0:
             return
         lo, hi = float(finite.min()), float(finite.max())
         if hi <= lo:
-            # A flat frame -- a dark detector, or a saturated one. Widen by a count so
-            # the colour map has a range to work with instead of dividing by zero.
+            # A flat frame -- a dark detector, or a saturated one. Widen so the colour
+            # map has a range to work with instead of dividing by zero.
             hi = lo + 1.0
         self._image.setImage(view, autoLevels=False, levels=(lo, hi))
         # Map the image onto the real axes: x is wavelength, y is the spectrum index.
         self._image.setRect(QRectF(float(wl[0]), 0.0,
                                    float(wl[-1] - wl[0]) or 1.0, float(self._n_rows)))
-        self._plot.setTitle(f"{self._n_rows} spectra · {lo:.0f}–{hi:.0f} counts")
+        units = "fringe" if normalized else "counts"
+        span = f" · {wl[0]:.2f}–{wl[-1]:.2f} nm" if cut != slice(None) else ""
+        self._plot.setTitle(f"{self._n_rows} spectra · {lo:.2f}–{hi:.2f} {units}{span}")
 
     # -- commands ---------------------------------------------------------
 
