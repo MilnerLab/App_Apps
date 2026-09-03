@@ -21,7 +21,7 @@ class SoakSettings:
     """
 
     duration_s: float = 300.0
-    period_s: float = 2.0
+    period_s: float = 0.0
     #: Recorded for the comparison this panel exists to support: one file with the loop
     #: off, one with it on. The panel does NOT start or stop the loop -- that is the
     #: Phase Control panel's job, and a recorder that silently reconfigured the loop

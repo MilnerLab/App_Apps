@@ -77,6 +77,17 @@ class SpectrumSoakViewModel(PanelViewModel):
     def bind_update(self, sink: UpdateSink) -> None:
         self._update = sink
 
+    def correction_rows(self):
+        """Row indices at which the phase loop commanded a move, so far this run.
+
+        Empty when nothing is recording, or when the loop issued nothing -- which is a
+        result rather than a gap: the recorder listens for corrections whether or not the
+        loop is running, so an empty list means none were sent.
+        """
+        import numpy as np
+        rec = self._recorder
+        return rec.correction_rows if rec is not None else np.zeros(0, dtype=int)
+
     def bind_data(self, sink: DataSink) -> None:
         self._data = sink
 

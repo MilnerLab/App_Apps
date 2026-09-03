@@ -23,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QRectF
+from PySide6.QtCore import Qt, QRectF
 from PySide6.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
@@ -78,6 +78,8 @@ class SpectrumSoakView(Panel):
         knobs.addSpacing(12)
         knobs.addWidget(QLabel("Period"))
         self._period_spin = self._spin(0.0, 3600.0, 3, 0.5, " s", s.period_s)
+        # 0 is the default and means "everything", which is not what " 0.000 s" reads as.
+        self._period_spin.setSpecialValueText("every frame")
         knobs.addWidget(self._period_spin)
         knobs.addStretch(1)
         self.body_layout.addLayout(knobs)
@@ -211,11 +213,23 @@ class SpectrumSoakView(Panel):
             self._plot.addItem(line)
             self._roi_lines.append(line)
 
+        #: One horizontal marker per correction the phase loop commanded. Drawn on the
+        #: waterfall rather than listed, because the question they answer is positional:
+        #: did the fringes move BECAUSE of a correction, or between them? Amber, and
+        #: deliberately not the ROI green -- these are events, not a selection.
+        self._corr_lines: list[pg.InfiniteLine] = []
+        #: Rows dropped off the top of the buffer when it scrolled. Correction indices
+        #: count rows recorded since the start of the run, so they need this subtracted
+        #: before they mean anything in buffer coordinates.
+        self._rows_dropped = 0
+
     def _reset_heatmap(self) -> None:
         self._buf = None
         self._n_rows = 0
         self._wl = None
+        self._rows_dropped = 0
         self._image.clear()
+        self._set_corrections(np.zeros(0))
 
     def _on_data(self, wl: np.ndarray, block: np.ndarray) -> None:
         """Accumulate raw rows. Everything about how they LOOK happens in _redraw."""
@@ -238,6 +252,7 @@ class SpectrumSoakView(Panel):
                     # rather than one per row.
                     keep = _MAX_ROWS // 2
                     self._buf[:keep] = self._buf[-keep:]
+                    self._rows_dropped += self._n_rows - keep
                     self._n_rows = keep
                 else:
                     grown = np.empty((min(_MAX_ROWS, self._buf.shape[0] * 2), n_px),
@@ -249,6 +264,7 @@ class SpectrumSoakView(Panel):
 
         if fresh_axis:
             self._park_roi_lines()
+        self._set_corrections(self.vm.correction_rows())
         self._redraw()
 
     # -- the ROI (this panel's own, on the display only) -------------------
@@ -283,6 +299,26 @@ class SpectrumSoakView(Panel):
 
     def _on_roi_dragged(self, _line) -> None:
         self._redraw()
+
+    def _set_corrections(self, rows) -> None:
+        """Draw a marker per correction, reusing the lines already on the plot.
+
+        Rebuilding the list every block would churn plot items several times a second at
+        period 0; the count only ever grows within a run, so the existing lines are moved
+        and only the shortfall is created.
+        """
+        rows = np.asarray(rows, dtype=np.float64).ravel() - float(self._rows_dropped)
+        rows = rows[rows >= 0.0]
+        pen = pg.mkPen("#ffa657", width=1, style=Qt.PenStyle.DashLine)
+        while len(self._corr_lines) < rows.size:
+            line = pg.InfiniteLine(angle=0, movable=False, pen=pen)
+            line.setZValue(50)
+            self._plot.addItem(line)
+            self._corr_lines.append(line)
+        for i, line in enumerate(self._corr_lines):
+            if i < rows.size:
+                line.setPos(float(rows[i]))
+            line.setVisible(i < rows.size)
 
     # -- drawing ----------------------------------------------------------
 
@@ -356,6 +392,11 @@ class SpectrumSoakView(Panel):
             return
         self._reset_heatmap()
         self._on_data(run.wavelength_nm, run.counts)
+        # After _on_data, which would otherwise overwrite these with the live recorder's
+        # (empty) list. Divided by the stride because the markers index the FILE's rows
+        # and a decimated load draws only every stride-th of them.
+        if run.corrections.size:
+            self._set_corrections(run.corrections[:, 2] / max(1, run.stride))
         self._status.setText(run.summary())
 
     def _on_start(self) -> None:

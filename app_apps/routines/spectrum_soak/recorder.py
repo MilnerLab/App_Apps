@@ -44,6 +44,7 @@ import numpy as np
 from base_core.framework.events.event_bus import EventBus
 from base_core.framework.serialization.h5_utils import ensure_group, now_utc_iso
 
+from app_apps.io.control_readout.rgv.events import RequestRotateRGV
 from app_apps.io.spectrometer.events import SpectrumAck, SpectrumAvailable
 
 log = logging.getLogger(__name__)
@@ -102,6 +103,7 @@ class SoakH5Writer:
         self._opened = False
         self._since_flush = 0
         self.n_written = 0
+        self.n_corrections = 0
 
     @property
     def file(self) -> h5py.File:
@@ -132,6 +134,19 @@ class SoakH5Writer:
                              chunks=(1, self._n_pixels), compression="lzf", shuffle=True)
             f.create_dataset("timestamp_ns", shape=(0,), maxshape=(None,), dtype=np.int64,
                              chunks=(_CHUNK_ROWS,), compression="lzf", shuffle=True)
+            # The correction log. A separate table rather than a per-row flag because a
+            # correction does not happen *on* a spectrum: it is issued between two of
+            # them, and at period 0 there may be several frames between moves or none.
+            # ``correction_after_row`` is the row index the file had reached when the
+            # move was commanded, so a marker can be drawn on the waterfall without
+            # pretending the move belongs to a frame.
+            g = f.create_group("corrections")
+            g.create_dataset("timestamp_ns", shape=(0,), maxshape=(None,), dtype=np.int64,
+                             chunks=(_CHUNK_ROWS,))
+            g.create_dataset("angle_deg", shape=(0,), maxshape=(None,), dtype=np.float64,
+                             chunks=(_CHUNK_ROWS,))
+            g.create_dataset("after_row", shape=(0,), maxshape=(None,), dtype=np.int64,
+                             chunks=(_CHUNK_ROWS,))
             self._opened = True
             f.flush()
             log.info("soak file opened: %s (%d pixels)", self.path, self._n_pixels)
@@ -167,11 +182,32 @@ class SoakH5Writer:
                 f.flush()
             return len(keep)
 
+    def add_corrections(self, rows: Sequence[tuple[int, float, int]]) -> int:
+        """Append (timestamp_ns, angle_deg, after_row) triples to the correction log.
+
+        Silently does nothing before ``open_axis``: the caller buffers, so a correction
+        issued before the first spectrum is not lost, it just waits for a file to go in.
+        """
+        with self._lock:
+            if not self._opened or self._f is None or not rows:
+                return 0
+            g = self._f["corrections"]
+            start = g["timestamp_ns"].shape[0]
+            end = start + len(rows)
+            for name, dtype, col in (("timestamp_ns", np.int64, 0),
+                                     ("angle_deg", np.float64, 1),
+                                     ("after_row", np.int64, 2)):
+                g[name].resize(end, axis=0)
+                g[name][start:end] = np.asarray([r[col] for r in rows], dtype=dtype)
+            self.n_corrections = end
+            return len(rows)
+
     def close(self, *, n_dropped: int = 0) -> None:
         with self._lock:
             if self._f is None:
                 return
             self._f.attrs["n_dropped"] = int(n_dropped)
+            self._f.attrs["n_corrections"] = int(self.n_corrections)
             self._f.attrs["completed_utc"] = now_utc_iso()
             self._f.flush()
             self._f.close()
@@ -231,6 +267,15 @@ class SpectrumSoakRecorder:
         self._stop = threading.Event()
         self._done = threading.Event()
         self._unsub = None
+        self._unsub_corr = None
+        #: Corrections seen but not yet filed. Appended on whatever thread publishes
+        #: RequestRotateRGV (the phase handle's), drained on the writer thread -- the same
+        #: hand-off the spectra use, and for the same reason: no h5py from a foreign thread.
+        self._pending_corr: list[tuple[int, float, int]] = []
+        #: Every correction of the run, kept for the live display. Separate from
+        #: _pending_corr, which is emptied as it reaches the file -- the panel needs the
+        #: whole list to draw markers, the file needs each row exactly once.
+        self._corr_log: list[tuple[int, float, int]] = []
         # Paused time does not count against the duration: "record for 5 minutes" means
         # five minutes of data. A pause that ate into the clock would silently shorten
         # the run, and the two arms of a comparison would no longer be the same length.
@@ -247,6 +292,7 @@ class SpectrumSoakRecorder:
         self.n_seen = 0
         self.n_kept = 0
         self.n_dropped = 0
+        self.n_corrections = 0
 
     # -- lifecycle --------------------------------------------------------
 
@@ -257,6 +303,9 @@ class SpectrumSoakRecorder:
         # Subscribe before registering: registering is what makes the coordinator wait on
         # our ack, so there must be no window where we are pending but not listening.
         self._unsub = self._bus.subscribe(SpectrumAvailable, self._on_spectrum)
+        # Listen unconditionally, whether or not the loop is running: "no corrections were
+        # issued" is a result, and it is only a trustworthy one if we were listening.
+        self._unsub_corr = self._bus.subscribe(RequestRotateRGV, self._on_correction)
         self._handle.register_consumer(self.CONSUMER_ID)
         log.info("soak recording started: %.1f s at %.3f s period%s -> %s",
                  self._duration_ns / 1e9, self._period_ns / 1e9,
@@ -301,6 +350,9 @@ class SpectrumSoakRecorder:
         if self._unsub is not None:
             self._unsub()
             self._unsub = None
+        if self._unsub_corr is not None:
+            self._unsub_corr()
+            self._unsub_corr = None
         self._done.set()
         self._stop.set()
         thread, self._thread = self._thread, None
@@ -309,8 +361,15 @@ class SpectrumSoakRecorder:
             if thread.is_alive():
                 log.warning("soak: writer thread did not drain in %.0f s", _DRAIN_TIMEOUT_S)
         self._writer.close(n_dropped=self.n_dropped)
-        log.info("soak recording stopped: %d seen, %d recorded, %d dropped",
-                 self.n_seen, self.n_kept, self.n_dropped)
+        log.info("soak recording stopped: %d seen, %d recorded, %d dropped, "
+                 "%d corrections", self.n_seen, self.n_kept, self.n_dropped,
+                 self.n_corrections)
+
+    @property
+    def correction_rows(self) -> np.ndarray:
+        """Row index of each correction so far -- what the panel draws markers at."""
+        with self._lock:
+            return np.asarray([r[2] for r in self._corr_log], dtype=np.int64)
 
     @property
     def wavelengths(self) -> np.ndarray | None:
@@ -391,6 +450,42 @@ class SpectrumSoakRecorder:
             self._bus.publish(SpectrumAck(slot=event.slot, item_id=event.item_id,
                                           consumer_id=self.CONSUMER_ID))
 
+    def _on_correction(self, event: RequestRotateRGV) -> None:
+        """Note that the loop commanded a move, and when.
+
+        Stamped with wall time here rather than at the file: this fires the moment the
+        correction leaves the phase handle, which is what has to line up against the
+        spectrum timestamps, and the writer thread may be a batch behind.
+
+        While PAUSED the correction is still logged. The loop is still running and still
+        moving the plate, and a gap in the record with no note of what happened inside it
+        is worse than a marker with no frames beside it.
+        """
+        try:
+            with self._lock:
+                if self._done.is_set():
+                    return
+                row = (time.time_ns(), float(event.angle.Deg), int(self.n_kept))
+                self._pending_corr.append(row)
+                self._corr_log.append(row)
+                self.n_corrections += 1
+        except Exception:
+            log.exception("soak: could not log a correction")
+
+    def _flush_corrections(self) -> None:
+        """Writer thread. Nothing is dropped if the axis is not open yet -- it waits."""
+        with self._lock:
+            if not self._pending_corr:
+                return
+            rows = self._pending_corr
+            self._pending_corr = []
+        try:
+            if self._writer.add_corrections(rows) == 0:
+                with self._lock:  # axis not open yet; put them back, in order
+                    self._pending_corr = rows + self._pending_corr
+        except Exception:
+            log.exception("soak: could not file %d correction(s)", len(rows))
+
     def _slice_for(self, wl: np.ndarray) -> slice:
         """Columns to keep. A contiguous slice rather than a boolean mask because the
         axis is monotonic and a slice keeps the HDF5 rows contiguous too.
@@ -416,6 +511,7 @@ class SpectrumSoakRecorder:
         while True:
             self._check_deadline()
             batch = self._take_batch()
+            self._flush_corrections()
             if batch:
                 try:
                     with self._lock:

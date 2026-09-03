@@ -49,6 +49,12 @@ class LoadedSoak:
     timestamp_ns: np.ndarray             # [rows], int64, matching counts row for row
     n_rows_total: int                    # rows in the FILE, before any decimation
     stride: int                          # 1 when nothing was skipped
+    #: One row per correction the phase loop commanded during the run, in order:
+    #: (timestamp_ns, angle_deg, after_row). ``after_row`` counts rows in the FILE, so it
+    #: must be divided by ``stride`` before it indexes ``counts``. Empty for a file written
+    #: before the correction log existed, which is indistinguishable from a run where the
+    #: loop was off -- ``stabilizing`` is what tells those apart.
+    corrections: np.ndarray = field(default_factory=lambda: np.zeros((0, 3)))
     attrs: dict = field(default_factory=dict)
 
     @property
@@ -72,6 +78,8 @@ class LoadedSoak:
             bits.append(f"ROI {roi}")
         if self.stride > 1:
             bits.append(f"showing every {self.stride}th")
+        if self.corrections.size:
+            bits.append(f"{self.corrections.shape[0]} corrections")
         if self.attrs.get("n_dropped"):
             bits.append(f"{int(self.attrs['n_dropped'])} dropped")
         return f"{self.path.name}: " + " · ".join(bits)
@@ -131,8 +139,14 @@ def load_soak(path: str | Path, *, max_rows: int = 4000) -> LoadedSoak:
         ts = (np.asarray(f["timestamp_ns"][::stride], dtype=np.int64)
               if "timestamp_ns" in f else np.zeros(counts.shape[0], dtype=np.int64))
         attrs = {k: _scalar(v) for k, v in f.attrs.items()}
+        g = f.get("corrections")
+        corr = (np.column_stack([np.asarray(g["timestamp_ns"][:], dtype=np.float64),
+                                 np.asarray(g["angle_deg"][:], dtype=np.float64),
+                                 np.asarray(g["after_row"][:], dtype=np.float64)])
+                if g is not None and g["timestamp_ns"].shape[0] else np.zeros((0, 3)))
 
     log.info("loaded soak %s: %d of %d rows, %d px", p.name, counts.shape[0], n_total,
              wl.size)
     return LoadedSoak(path=p, wavelength_nm=wl, counts=counts, timestamp_ns=ts,
-                      n_rows_total=n_total, stride=stride, attrs=attrs)
+                      n_rows_total=n_total, stride=stride, attrs=attrs,
+                      corrections=corr)
