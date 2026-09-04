@@ -62,9 +62,9 @@ from app_apps.routines.xcorr.events import (
 
 log = logging.getLogger(__name__)
 
-#: Default grating reading at zero separation (C22). Matches ``XcorrConfig.grating_zero_mm``
-#: and the operator's 30.1 mm default; only shifts the summary L-axis, moves no stage.
-DEFAULT_GRATING_ZERO_MM = 30.1
+#: Default grating reading at zero separation (C22). Matches
+#: ``XcorrConfig.grating_zero_mm``; only shifts the summary L-axis, moves no stage.
+DEFAULT_GRATING_ZERO_MM = 28.15
 
 #: How long ``summary_changed`` is held back so a burst of landing fits redraws the
 #: two grid panels once instead of once each. A 66-scan import lands 66 fits; each

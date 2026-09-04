@@ -55,6 +55,8 @@ class XcorrView(ConfigForm):
         "timeout_s":           FloatSpec("Move/acq timeout", min=1.0, max=3600.0, decimals=1, step=1.0, suffix="s"),
         "channel":             IntSpec("Scope channel", min=1, max=2),
         "mock_scope":          BoolSpec("Mock scope (no laser / no TDS)"),
+        "probe_only":          BoolSpec("Probe only (never command delay or grating)"),
+        "record_spectra":      BoolSpec("Record spectra (joins a running spectrometer; never opens one)"),
     }
 
     _groups = [
@@ -63,7 +65,7 @@ class XcorrView(ConfigForm):
         ("Delay (axis 2 — central frequency)",
          ["delay_base_start_mm", "delay_base_stop_mm", "delay_base_step_mm", "delay_slope", "delay_intercept_mm"]),
         ("Adaptive step", ["adaptive_probe_step", "probe_oversample", "probe_step_max_mm"]),
-        ("Acquisition", ["n_traces", "settle_s", "timeout_s", "channel", "mock_scope"]),
+        ("Acquisition", ["n_traces", "settle_s", "timeout_s", "channel", "mock_scope", "probe_only", "record_spectra"]),
     ]
 
     # Operator scan designs (grating start:step:stop, delay base start:step:stop) in the
@@ -81,6 +83,10 @@ class XcorrView(ConfigForm):
         "delay_slope": -0.004857142857142858,
         "delay_intercept_mm": 18.585714285714285,
         "n_traces": 5,
+        "record_spectra": True,
+        # Explicitly off: a preset is a full scan design over both axes, so loading one
+        # must disarm a probe-only pin rather than silently inherit it.
+        "probe_only": False,
     }
 
     #: The two operator scan designs. ``step_mode`` is part of the design, not a separate
@@ -139,6 +145,20 @@ class XcorrView(ConfigForm):
         name_row.addWidget(self._run_name_edit, stretch=1)
         self.body_layout.addLayout(name_row)
 
+        # Probe-only arming. Pins the grating and delay ranges to the live stage
+        # positions and stops the routine commanding either axis -- for runs where those
+        # two are aligned by hand and moving them would destroy the alignment.
+        pin_row = QHBoxLayout()
+        self._pin_btn = QPushButton("Pin stages here (probe only)")
+        self._pin_btn.setToolTip(
+            "Read the delay and grating positions, pin the scan to them, and sweep the "
+            "probe alone. Neither stage is commanded, not even to where it already is."
+        )
+        self._pin_btn.clicked.connect(self._on_pin)
+        pin_row.addWidget(self._pin_btn)
+        pin_row.addStretch(1)
+        self.body_layout.addLayout(pin_row)
+
         # One button per operator scan design — loads its grating/delay values into the
         # form (existing widget edits are flushed first, so nothing you typed is lost).
         presets = QHBoxLayout()
@@ -184,6 +204,7 @@ class XcorrView(ConfigForm):
         self._paused = False
 
         vm.bind_update(self._render)
+        vm.bind_reload(self._populate)
 
     def _apply_preset(self, preset_name: str, values: dict[str, object]) -> None:
         # Flush the current widget edits into the settings first so a preset only
@@ -208,6 +229,12 @@ class XcorrView(ConfigForm):
         # so also say so on the status line.
         self._status.setText(
             f"Loaded {preset_name} — review the ranges, then Start scan{mode}")
+
+    def _on_pin(self) -> None:
+        # Flush first, for the same reason the presets do: pinning overwrites only the
+        # grating and delay ranges, and everything else the operator typed must survive.
+        self._apply()
+        self._vm.pin_stages_here()
 
     def _on_browse(self) -> None:
         start = self._out_dir_edit.text().strip() or str(Path.cwd())
@@ -256,6 +283,7 @@ class XcorrView(ConfigForm):
     def _render(self, text: str, running: bool) -> None:
         self._status.setText(text)
         self._start_btn.setEnabled(not running)
+        self._pin_btn.setEnabled(not running)
         self._abort_btn.setEnabled(running)
         self._pause_btn.setEnabled(running)
         self._step_btn.setEnabled(running and self._step_mode_box.isChecked())

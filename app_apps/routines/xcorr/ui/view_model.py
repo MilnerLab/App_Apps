@@ -8,6 +8,8 @@ from base_qt.app.dispatcher import QtDispatcher
 from base_qt.ui.app_message import MessageLevel
 from base_qt.ui.panel_view_model import PanelViewModel
 
+from app_apps.io.control_readout.mfa_cc.events import NewMfaccPosition
+from app_apps.io.control_readout.uts150cc.events import NewUts150ccPosition
 from app_apps.routines.xcorr.events import (
     XcorrFailed,
     XcorrFinished,
@@ -28,6 +30,10 @@ log = logging.getLogger(__name__)
 
 #: (status text, is_running) sink the view binds so it can render on the UI thread.
 UpdateSink = Callable[[str, bool], None]
+
+#: Called on the UI thread after the settings were changed behind the form's back, so
+#: the widgets can be repopulated from them.
+ReloadSink = Callable[[], None]
 
 
 class XcorrViewModel(PanelViewModel):
@@ -68,7 +74,15 @@ class XcorrViewModel(PanelViewModel):
         # the operator's choice has to survive here and be re-applied there.
         self._step_mode = True
         self._update: UpdateSink | None = None
+        self._reload: ReloadSink | None = None
+        # Latest position seen for the two axes a probe-only run must not command.
+        # Fed by the stages' own spontaneous position pushes and by the explicit reads
+        # `pin_stages_here` issues; None until one arrives.
+        self._grating_pos_mm: float | None = None
+        self._delay_pos_mm: float | None = None
 
+        self._sub(NewUts150ccPosition, self._on_grating_pos)
+        self._sub(NewMfaccPosition, self._on_delay_pos)
         self._sub(XcorrProgress, self._on_progress)
         self._sub(XcorrGroupWritten, self._on_group)
         self._sub(XcorrFinished, self._on_finished)
@@ -98,6 +112,67 @@ class XcorrViewModel(PanelViewModel):
     def bind_update(self, sink: UpdateSink) -> None:
         """Register the view's (text, running) renderer."""
         self._update = sink
+
+    def bind_reload(self, sink: ReloadSink) -> None:
+        """Register the view's repopulate-from-settings callback."""
+        self._reload = sink
+
+    # -- probe-only ------------------------------------------------------
+
+    def _on_grating_pos(self, e: NewUts150ccPosition) -> None:
+        self._grating_pos_mm = e.position
+
+    def _on_delay_pos(self, e: NewMfaccPosition) -> None:
+        self._delay_pos_mm = e.position
+
+    def pin_stages_here(self) -> None:
+        """Arm a probe-only run: pin the grating and delay ranges to where those two
+        stages are standing right now, and stop the routine from commanding them.
+
+        The pin is what keeps the recorded coordinates honest -- probe-only skips the
+        moves, so the file's grating/delay attributes are only true if they already
+        match the hardware. Positions come from the two stages' own position events;
+        a read is requested here as well, but it lands asynchronously, so a first press
+        with nothing cached yet asks the operator to press again rather than guessing.
+        """
+        # Read-only queries. Safe on a stage that must not move: GetCurrentPos never
+        # commands motion.
+        self._grating.get_position()
+        self._delay.get_position()
+
+        g = self._grating_pos_mm
+        d = self._delay_pos_mm
+        if g is None or d is None:
+            missing = ", ".join(
+                n for n, v in (("grating", g), ("delay", d)) if v is None
+            )
+            self._render(
+                f"no position yet for {missing} — start that stage's panel, "
+                f"then press Pin stages here again",
+                running=False,
+            )
+            self._msg(f"XCORR: no position yet for {missing}", MessageLevel.WARNING)
+            return
+
+        st = self._settings
+        # The routine commands delay = base + slope*grating + intercept, so the base that
+        # reproduces the live position has the correction subtracted back out. Recorded
+        # coordinates then match the hardware exactly, correction included.
+        base = d - (st.delay_slope * g + st.delay_intercept_mm)
+        st.grating_start_mm = g
+        st.grating_stop_mm = g
+        st.delay_base_start_mm = base
+        st.delay_base_stop_mm = base
+        st.probe_only = True
+
+        if self._reload is not None:
+            self._post(self._reload)
+        self._render(
+            f"probe only — grating pinned at {g:.4f} mm, delay at {d:.4f} mm "
+            f"(base {base:.4f}). Neither stage will be commanded.",
+            running=False,
+        )
+        self._msg("XCORR: probe-only armed; delay and grating pinned")
 
     # -- commands ---------------------------------------------------------
 

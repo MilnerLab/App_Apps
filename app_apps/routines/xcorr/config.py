@@ -121,8 +121,10 @@ class XcorrConfig:
     freq_per_delay_ghz_per_mm: float = 81.5
     #: Bandwidth vs acceleration: GHz per mm of grating travel away from zero separation.
     freq_bw_ghz_per_grating_mm: float = 1.905
-    #: Grating position of zero separation / zero bandwidth, mm (matches the default 30.1).
-    grating_zero_mm: float = 30.0
+    #: Grating position of zero separation / zero bandwidth, mm. Measured 2026-09-03;
+    #: it was 30.0 here and 30.1 in the display panel before that, which disagreed with
+    #: each other as well as with the hardware.
+    grating_zero_mm: float = 28.15
 
     out_dir: Path = Path(".")
 
@@ -143,6 +145,23 @@ class XcorrConfig:
 
     #: Scope channel to acquire. The TDS2012C has 2.
     channel: int = 1
+
+    #: Record the spectrometer stream alongside the scan.
+    #:
+    #: On means *join* a stream this application is already running; the routine never
+    #: opens the SPM-002 itself, because another application may hold it (see
+    #: ``_ensure_spectrometer_running``). With no stream to join the scan simply runs
+    #: without spectra. Off skips the spectrometer entirely -- no state query, no
+    #: subscription.
+    record_spectra: bool = True
+
+    #: Sweep the probe only: the delay and grating stages are never commanded.
+    #: For runs where those two axes are aligned by hand and moving them would ruin
+    #: the alignment. The plan is unchanged -- the grating/delay setpoints are still
+    #: computed, still limit-checked, and still recorded in the file -- so a probe-only
+    #: run is only meaningful when those setpoints already equal where the stages are
+    #: standing. The UI's "Pin stages here" button is what makes that true.
+    probe_only: bool = False
 
     #: Use the synthetic (position-dependent) scope driver instead of the real TDS2012C.
     #: For hardware-free validation of the acquisition/reduction/storage path; a mock

@@ -406,10 +406,16 @@ class XcorrRoutine(BaseRoutine):
                 len(sp.probe_base_mm), sp.probe_step_mm, sp.max_freq_ghz,
             )
 
-            # Grating first, then delay: the delay position is a function of the
-            # grating position, so this is the order that makes the pair consistent.
-            self._move(self._grating, sp.grating_mm, "grating")
-            self._move(self._delay, sp.delay_mm, "delay")
+            if self._cfg.probe_only:
+                # Probe-only: neither axis is ever commanded, not even to the position
+                # it is already standing at. The operator pinned the setpoints to the
+                # live positions, so the recorded coordinates are still true.
+                log.info("XCORR probe-only: grating and delay left untouched")
+            else:
+                # Grating first, then delay: the delay position is a function of the
+                # grating position, so this is the order that makes the pair consistent.
+                self._move(self._grating, sp.grating_mm, "grating")
+                self._move(self._delay, sp.delay_mm, "delay")
 
             # Blocks here in step mode until the operator releases this setpoint. A no-op
             # otherwise, so the free-running scan is unchanged.
@@ -555,6 +561,12 @@ class XcorrRoutine(BaseRoutine):
         scope, the spectrometer is not something the scan *needs*: an operator who ran a
         four-hour grid should not lose it because a USB spectrometer did not enumerate.
         """
+        if not self._cfg.record_spectra:
+            # The operator has said not to touch the spectrometer. Return before any
+            # contact with it -- no state query, no start, no subscription -- so a scan
+            # cannot disturb another application that is using the device.
+            log.info("XCORR: spectrum recording off — the spectrometer is not touched")
+            return
         if self._spectrometer is None:
             return
         try:
@@ -574,26 +586,30 @@ class XcorrRoutine(BaseRoutine):
             self._recorder = None
 
     def _ensure_spectrometer_running(self) -> bool:
-        """Start the spectrometer worker if it is idle. Returns whether it is running.
+        """Join the spectrum stream if one is already running. Never starts one.
 
         Deliberately *not* folded into ``_start_handles``: everything in that tuple is
         a precondition of the scan and its absence raises. This one is opportunistic —
-        if a device panel already has the spectrometer streaming (the common case, since
-        Phase Control is usually open) we simply join the stream.
+        if a device panel already has the spectrometer streaming we simply join it.
+
+        It will not *start* the worker, and that restraint is the point. ``handle.state``
+        only describes this process's worker; a separate application (Phase Control) with
+        its own spm_002 subprocess is invisible here. Starting one would open the SPM-002
+        through PhotonSpectr.dll a second time while the other application holds it, and
+        nothing in that path checks for contention. Skipping costs a run its spectra;
+        opening costs somebody else their device. So the scan attaches to a stream that
+        exists and otherwise goes without -- to record spectra, start the spectrometer
+        panel first.
         """
         handle = self._spectrometer
         assert handle is not None
         if handle.state == WorkerStatus.RUNNING:
             return True
-        log.info("XCORR starting spectrometer worker for spectrum recording")
-        handle.start()
-        if self._wait_for_running(handle):
-            return True
         log.warning(
-            "XCORR: spectrometer worker did not reach RUNNING within %.0fs — scanning "
-            "without spectrum recording. The spm_002 subprocess needs the 32-bit "
-            "interpreter and PhotonSpectr.dll; check its log.",
-            _START_TIMEOUT_S,
+            "XCORR: no spectrometer stream in this application — scanning without "
+            "spectrum recording. Start the spectrometer panel before the scan to record "
+            "spectra; the routine will not open the device itself, because another "
+            "application may be using it."
         )
         return False
 
@@ -653,10 +669,20 @@ class XcorrRoutine(BaseRoutine):
         # is apply-order — set_config first, then start() below.
         self._scope.set_config(self._scope_cfg)
 
-        handles = (
-            (self._grating, "grating (UTS150CC)"),
-            (self._delay, "delay (MFA-CC)"),
-            (self._probe, "probe (FMS300PP)"),
+        # Probe-only leaves the grating and delay workers alone as well. Starting one
+        # is only bookkeeping plus a serial connection -- it never moves an axis -- but
+        # a run that promises not to touch those two axes should not be the thing that
+        # opens them either.
+        stages = (
+            ((self._probe, "probe (FMS300PP)"),)
+            if self._cfg.probe_only
+            else (
+                (self._grating, "grating (UTS150CC)"),
+                (self._delay, "delay (MFA-CC)"),
+                (self._probe, "probe (FMS300PP)"),
+            )
+        )
+        handles = stages + (
             (self._scope, "scope (mock)" if self._cfg.mock_scope else "scope (TDS2012C)"),
         )
         for handle, label in handles:
@@ -676,7 +702,7 @@ class XcorrRoutine(BaseRoutine):
                     f"list_resources() never returns); nothing in software clears that — "
                     f"power-cycle the scope or replug its USB."
                 )
-        log.info("XCORR: all three stage workers RUNNING")
+        log.info("XCORR: %d worker(s) RUNNING", len(handles))
 
     @staticmethod
     def _wait_for_running(handle: BaseWorkerHandle) -> bool:
@@ -782,6 +808,9 @@ class XcorrRoutine(BaseRoutine):
             "limits_grating_mm": list(AXIS_LIMITS["grating"]),
             "limits_source": "read live 2026-07-19; see XCORR_SPEC.md §3.1",
             "acquisition": "live — reduced positive-mean per trace over the scope worker",
+            "probe_only": self._cfg.probe_only,
+            "record_spectra": self._cfg.record_spectra,
+            "commanded_axes": "probe" if self._cfg.probe_only else "probe, delay, grating",
         }
 
     def _scope_provenance(self) -> dict[str, object]:

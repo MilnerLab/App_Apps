@@ -224,6 +224,15 @@ def plan_scan(cfg: XcorrConfig) -> ScanPlan:
         cfg.delay_base_start_mm, cfg.delay_base_stop_mm, cfg.delay_base_step_mm, name="delay"
     )
 
+    if cfg.probe_only and len(grating) * len(delay_base) > 1:
+        # Probe-only never commands those two axes, so every setpoint would be swept at
+        # the same physical place while being recorded under different coordinates. That
+        # is a corrupt file, not a slow run -- refuse it before anything moves.
+        raise PlanError(
+            f"probe_only allows exactly one (grating, delay) setpoint, but the ranges "
+            f"expand to {len(grating)}x{len(delay_base)}. Set both start and stop to the "
+            f"stage's current position (the panel's \"Pin stages here\" button does this)."
+        )
     if cfg.n_traces < 1:
         raise PlanError(f"n_traces must be >= 1, got {cfg.n_traces}")
     if cfg.adaptive_probe_step and cfg.probe_step_max_mm < cfg.probe_step_mm:

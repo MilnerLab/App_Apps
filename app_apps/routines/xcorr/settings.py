@@ -63,6 +63,16 @@ class XcorrSettings:
     channel: int = 1
     mock_scope: bool = False
 
+    #: Record the spectrometer stream during the scan. On joins a stream this
+    #: application is already running and records nothing if there is none; it never
+    #: opens the device. Off skips the spectrometer entirely.
+    record_spectra: bool = True
+
+    #: Sweep the probe only -- never command the delay or grating stage. Armed by the
+    #: panel's "Pin stages here" button, which also pins the two ranges to wherever
+    #: those stages are standing so the recorded coordinates stay true.
+    probe_only: bool = False
+
     #: Not a form field (no Path widget) — the run directory the writer lands in.
     #: Folded into the run filename; blank gives the plain timestamped name.
     run_name: str = "scan_L_1"
@@ -92,6 +102,8 @@ class XcorrSettings:
             timeout_s=self.timeout_s,
             channel=self.channel,
             mock_scope=self.mock_scope,
+            probe_only=self.probe_only,
+            record_spectra=self.record_spectra,
             out_dir=self.out_dir,
             run_name=self.run_name,
         )

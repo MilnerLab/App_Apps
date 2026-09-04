@@ -300,12 +300,15 @@ def test_physical_slope_does_not_warn():
 
 def test_frequency_model_central_and_bandwidth():
     cfg = make_cfg()
+    # Written against the configured zero rather than a literal: this asserts the shape
+    # of the model, and a re-measured zero should not look like a broken model.
+    zero = cfg.grating_zero_mm
     # zero separation, zero offset -> zero frequency
-    assert approx(max_frequency_hz(cfg, 30.1, 0.0), 0.0)
+    assert approx(max_frequency_hz(cfg, zero, 0.0), 0.0)
     # central only: 81.5 GHz/mm * 1 mm offset
-    assert approx(max_frequency_hz(cfg, 30.1, 1.0), 81.5e9)
-    # bandwidth only: 1.905 GHz/mm * 105 mm, halved
-    assert approx(max_frequency_hz(cfg, -74.9, 0.0), (1.905 * 105.0 / 2.0) * 1e9)
+    assert approx(max_frequency_hz(cfg, zero, 1.0), 81.5e9)
+    # bandwidth only: 1.905 GHz/mm * 100 mm, halved
+    assert approx(max_frequency_hz(cfg, zero - 100.0, 0.0), (1.905 * 100.0 / 2.0) * 1e9)
 
 
 def test_non_adaptive_uses_the_fixed_step_at_every_setpoint():
@@ -386,6 +389,27 @@ def test_adaptive_rejects_non_positive_oversample():
         probe_oversample=0.0,
     )
     raises(PlanError, lambda: plan_scan(cfg), "probe_oversample")
+
+
+# --- probe-only -----------------------------------------------------------
+
+def test_probe_only_accepts_a_single_pinned_setpoint():
+    # What the panel's "Pin stages here" button produces: both ranges collapsed onto
+    # the position the stage is standing at.
+    cfg = make_cfg(
+        probe_only=True,
+        grating_start_mm=-30.0, grating_stop_mm=-30.0,
+        delay_base_start_mm=18.0, delay_base_stop_mm=18.0,
+    )
+    plan = plan_scan(cfg)
+    assert len(plan.setpoints) == 1, len(plan.setpoints)
+
+
+def test_probe_only_refuses_a_grid():
+    # Probe-only never commands those axes, so a second setpoint would be swept at the
+    # same physical place while being recorded under different coordinates.
+    cfg = make_cfg(probe_only=True)
+    raises(PlanError, lambda: plan_scan(cfg), "probe_only")
 
 
 # --- runner ---------------------------------------------------------------
