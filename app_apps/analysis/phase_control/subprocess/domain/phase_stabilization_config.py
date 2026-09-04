@@ -183,7 +183,7 @@ class StabilizationConfig(PrimitiveSerde):
                                         # be caught BEFORE the fit, not after. Editable while
                                         # running: it can only be tuned against a live trace.
     set_phase: Angle = field(default_factory=lambda: Angle(0))
-    invert_correction: bool = False     # flip the HWP rotation direction. NOT a tuning knob:
+    invert_correction: bool = True      # flip the HWP rotation direction. NOT a tuning knob:
                                         # the sense of the correction depends on the QUARTER
                                         # wave plate's orientation, so the same measured error
                                         # calls for opposite rotations on two setups that are
@@ -191,6 +191,21 @@ class StabilizationConfig(PrimitiveSerde):
                                         # corrector is retuned in place. If the loop locks
                                         # stably but pi away from the setpoint, this is the
                                         # knob: see PhaseCorrector.CORRECTION_SIGN.
+                                        #
+                                        # True since 2026-09-03, measured, not guessed. Two
+                                        # recorded soaks (60 s and 15 s) give achieved-vs-
+                                        # intended phase change slopes of -1.11 (r -0.71,
+                                        # n=16) and -0.89 (r -0.61, n=51) against a design
+                                        # +1: every correction doubled the error instead of
+                                        # cancelling it. Both ran with this False, which the
+                                        # files do not record -- so it was established from
+                                        # the data: the setpoint is fixed for a run, and
+                                        # reconstructing it independently from each
+                                        # correction agrees to 1.3 deg (n=15) and 3.9 deg
+                                        # (n=52) under the False hypothesis while scattering
+                                        # over 63.8 and 51.7 deg under True. CORRECTION_SIGN
+                                        # was calibrated against the ELL14; this loop drives
+                                        # the RGV100BL, which turns the other way.
     # --- block-averaged correction loop (see phase_corrector) --------------------------
     avg_spectra: int = AVG_SPECTRA      # accepted fits per correction. The loop collects
                                         # this many phases, circular-averages them, CLEARS
@@ -306,8 +321,11 @@ class StabilizationConfig(PrimitiveSerde):
             # Absent in a config persisted before the gate existed -> the calibrated default.
             min_visibility=float(v.get("min_visibility", MIN_VISIBILITY)),
             set_phase=Angle.from_primitive(v["set_phase"]),
-            # Configs persisted before the toggle existed ran the baseline sign -> False.
-            invert_correction=bool(v.get("invert_correction", False)),
+            # Configs persisted before the toggle existed ran the baseline sign, which the
+            # 2026-09-03 soaks showed to be backwards on this hardware. Defaulting them to
+            # False would faithfully reproduce a broken loop; they load on the corrected
+            # default instead, same as a fresh config.
+            invert_correction=bool(v.get("invert_correction", True)),
             # The knobs of the timed EWMA loop (loop_gain, slow_correction,
             # correction_period_s, shape_mismatch_max) went with it. A config persisted
             # while it existed still carries them; they are simply not read, so an old file
