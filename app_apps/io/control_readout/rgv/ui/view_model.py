@@ -27,9 +27,9 @@ from base_qt.ui.panel_view_model import ui_thread
 #: On a half-wave plate the OPTICAL modulation is four times this -- a HWP turned by theta
 #: rotates the polarisation by 2*theta and shifts the relative circular phase by 4*theta --
 #: so 0.5 rev/s sweeps the phase through four full cycles a second.
-MIN_SPIN_HZ = 0.5
-MAX_SPIN_HZ = 2.0
-DEFAULT_SPIN_HZ = 0.5
+MIN_SPIN_HZ = 0.001 #we don't know what it actually is.
+MAX_SPIN_HZ = 2.0 #a physical hardware limit and should be put in a config in the devices repo. It should not be set in the view or view model.
+DEFAULT_SPIN_HZ = 0.2
 DEG_PER_REV = 360.0
 
 if TYPE_CHECKING:
