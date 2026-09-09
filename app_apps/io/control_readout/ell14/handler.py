@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from base_core.framework.events.event_bus import EventBus
+from base_core.ipc.device_worker_handle import DeviceHandleMixin
 from base_core.ipc.message import OKReply
 from base_core.ipc.worker_handle import BaseWorkerHandle
 from base_core.math.enums import AngleUnit
@@ -19,7 +20,7 @@ from app_apps.io.control_readout.ell14.events import (
 log = logging.getLogger(__name__)
 
 
-class ELL14RotatorHandle(BaseWorkerHandle):
+class ELL14RotatorHandle(DeviceHandleMixin, BaseWorkerHandle):
     """
     Main-process handle to RotatorWorker.
 

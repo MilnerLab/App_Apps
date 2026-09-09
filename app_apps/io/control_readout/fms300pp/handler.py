@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from base_core.ipc.device_worker_handle import DeviceHandleMixin
+
 from base_core.framework.events.event_bus import EventBus
 from control_readout.esp_301.fms300pp.messages import (
     FMS300PPPosReply,
@@ -17,7 +19,7 @@ from app_apps.io.control_readout.fms300pp.events import (
 from app_apps.io.control_readout.motorized_stage_handle import MotorizedStageHandle
 
 
-class Fms300ppHandle(MotorizedStageHandle):
+class Fms300ppHandle(DeviceHandleMixin, MotorizedStageHandle):
     """Main-process handle to the FMS300PP ESP301 linear stage."""
 
     WORKER_ID = "fms300pp"

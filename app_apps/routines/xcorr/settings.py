@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from base_core.ipc.connection_mode import ConnectionMode
+
 from app_apps.routines.xcorr.config import XcorrConfig
 
 
@@ -91,7 +93,10 @@ class XcorrSettings:
             settle_s=self.settle_s,
             timeout_s=self.timeout_s,
             channel=self.channel,
-            mock_scope=self.mock_scope,
+            # The form field stays a checkbox because the operator's decision genuinely
+            # is binary: force the mock, or use the scope if it is there. The three-way
+            # enum lives below this line, where the NONE member would be meaningless.
+            scope_mode=ConnectionMode.MOCK if self.mock_scope else ConnectionMode.DEVICE,
             out_dir=self.out_dir,
             run_name=self.run_name,
         )

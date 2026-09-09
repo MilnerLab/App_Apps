@@ -11,7 +11,8 @@ from PySide6.QtCore import Signal
 from base_core.framework.events import EventBus
 from base_core.ipc.worker_handle import WorkerStatus
 from base_qt.app.dispatcher import QtDispatcher
-from base_qt.ui.panel_view_model import PanelViewModel, ui_thread
+from base_qt.ui.device_panel_view_model import DevicePanelViewModel
+from base_qt.ui.panel_view_model import ui_thread
 from control_readout.picomotor.config import DEFAULT_MIRRORS, MirrorAxes
 
 from app_apps.io.control_readout.picomotor.events import (
@@ -28,7 +29,7 @@ INCREMENT_PRESETS = (1, 10, 50)
 DEFAULT_INCREMENT = 10
 
 
-class PicomotorViewModel(PanelViewModel):
+class PicomotorViewModel(DevicePanelViewModel):
     worker_state_changed = Signal(object)      # emits WorkerStatus
     #: The step counters changed — the view refreshes every axis readout.
     steps_changed = Signal()
@@ -39,7 +40,7 @@ class PicomotorViewModel(PanelViewModel):
         dispatcher: QtDispatcher,
         handle: PicomotorHandle,
     ) -> None:
-        super().__init__(bus, dispatcher)
+        super().__init__(bus, dispatcher, handle)
         self._handle = handle
         self._increment = DEFAULT_INCREMENT
         self._steps: dict[int, int] = {}

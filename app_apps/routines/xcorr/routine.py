@@ -35,6 +35,7 @@ import numpy as np
 from base_core.framework.events.event_bus import EventBus
 from base_core.framework.routines.routine_base import BaseRoutine, routine_thread
 from base_core.framework.serialization.h5_utils import now_utc_iso
+from base_core.ipc.connection_mode import ConnectionMode
 from base_core.ipc.worker_handle import BaseWorkerHandle, WorkerStatus
 from oscilloscope.config import ScopeConfig
 
@@ -101,14 +102,16 @@ class XcorrRoutine(BaseRoutine):
         #: site, including the headless runner, working unchanged.
         self._spectrometer = spectrometer
         self._recorder: XcorrSpectrumRecorder | None = None
-        #: Built once at start from the run config; carries the VISA resource, channel,
-        #: fixed 2500 record and the mock flag. ``discard`` is reused per acquire.
+        #: Built once at start from the run config; carries the VISA resource and the
+        #: fixed 2500-sample record. Hardware only — the channel is per-acquisition and
+        #: goes with each request, and whether a mock stands in is a start-time mode.
         self._scope_cfg = ScopeConfig(
             resource=SCOPE_RESOURCE,
-            channel=config.channel,
             n_samples=2500,
-            mock=config.mock_scope,
         )
+        #: What to ask the scope worker for. What it actually connected to is read back
+        #: off the handle after start, and only that goes into the run's provenance.
+        self._scope_mode = config.scope_mode
 
         # Set from the caller's thread, read on the routine thread. NOT dispatched —
         # a dispatched abort would queue behind the very loop it is meant to stop.
@@ -524,7 +527,7 @@ class XcorrRoutine(BaseRoutine):
             n_traces=self._cfg.n_traces,
             channel=self._cfg.channel,
             probe_mm=probe_mm,
-            discard=self._scope_cfg.discard,
+            discard=self._cfg.in_flight_discard,
             on_reply=on_reply,
             on_error=on_err,
         )
@@ -657,13 +660,13 @@ class XcorrRoutine(BaseRoutine):
             (self._grating, "grating (UTS150CC)"),
             (self._delay, "delay (MFA-CC)"),
             (self._probe, "probe (FMS300PP)"),
-            (self._scope, "scope (mock)" if self._cfg.mock_scope else "scope (TDS2012C)"),
+            (self._scope, "scope"),
         )
         for handle, label in handles:
             if handle.state == WorkerStatus.RUNNING:
                 continue
             log.info("XCORR starting %s worker", label)
-            handle.start()
+            handle.start(self._scope_mode if handle is self._scope else None)
 
         for handle, label in handles:
             if not self._wait_for_running(handle):
@@ -677,6 +680,11 @@ class XcorrRoutine(BaseRoutine):
                     f"power-cycle the scope or replug its USB."
                 )
         log.info("XCORR: all three stage workers RUNNING")
+        if self._scope.connection_mode == ConnectionMode.MOCK:
+            # Said again here, at the point of no return, because the banner raised at
+            # start scrolls and this run is about to write a file that claims to be data.
+            log.warning("XCORR: the scope is SIMULATED — this run records synthetic "
+                        "traces, and its provenance will say so")
 
     @staticmethod
     def _wait_for_running(handle: BaseWorkerHandle) -> bool:
@@ -792,13 +800,20 @@ class XcorrRoutine(BaseRoutine):
         trigger, vertical scale) is read subprocess-side by ``TdsScope.provenance`` but
         not yet surfaced over IPC; extend with a provenance request message when needed.
         """
+        # Read off the handle, never off the request. A scope that was asked for and did
+        # not answer is silently replaced by the mock, and a run recorded against the
+        # requested mode would then file synthetic traces as instrument data.
+        mode = self._scope.connection_mode
+        mocked = mode == ConnectionMode.MOCK
         return {
-            "model": "Tektronix TDS 2012C" if not self._cfg.mock_scope else "MOCK TDS 2012C",
+            "model": "MOCK TDS 2012C" if mocked else "Tektronix TDS 2012C",
             "resource": self._scope_cfg.resource,
-            "channel": self._scope_cfg.channel,
+            "channel": self._cfg.channel,
             "record_length": self._scope_cfg.n_samples,
             "n_traces_per_point": self._cfg.n_traces,
-            "in_flight_discard": self._scope_cfg.discard,
-            "mock": self._cfg.mock_scope,
+            "in_flight_discard": self._cfg.in_flight_discard,
+            "mock": mocked,
+            "connection_mode": mode.value if mode is not None else "not_started",
+            "connection_mode_requested": self._scope_mode.value,
             "reduction": "within-trace mean of samples > 0, then mean/std across traces (D3)",
         }

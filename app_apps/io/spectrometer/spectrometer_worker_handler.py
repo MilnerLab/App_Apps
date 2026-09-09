@@ -5,6 +5,8 @@ from multiprocessing.shared_memory import SharedMemory
 
 from base_core.framework.events.event_bus import EventBus
 from base_core.framework.shm.writer_worker_handle import WriterWorkerHandle
+from base_core.ipc.connection_mode import ConnectionMode
+from base_core.ipc.device_worker_handle import DeviceHandleMixin
 from base_core.ipc.message import OKReply
 from spm_002.config import SpectrometerConfig
 from spm_002.messages import SetSpectrometerConfig
@@ -20,7 +22,10 @@ from app_apps.io.spectrometer.events import (
 log = logging.getLogger(__name__)
 
 
-class SpectrometerWorkerHandle(WriterWorkerHandle[SpectrumBuffer, SpectrumAvailable, SpectrumAck]):
+class SpectrometerWorkerHandle(
+    DeviceHandleMixin,
+    WriterWorkerHandle[SpectrumBuffer, SpectrumAvailable, SpectrumAck],
+):
     """
     Main-process handle to SpectrometerWorker.
 
@@ -73,7 +78,7 @@ class SpectrometerWorkerHandle(WriterWorkerHandle[SpectrumBuffer, SpectrumAvaila
     def subscribe(self) -> None:
         self._subscribe(SpectrometerConfigChanged, self._on_config_changed)
     
-    def start(self):
+    def start(self, mode: ConnectionMode | None = None):
         """Apply the config, and start only once it has actually been applied.
 
         These were fired back to back, and that was a race the operator lost every time they
@@ -88,7 +93,7 @@ class SpectrometerWorkerHandle(WriterWorkerHandle[SpectrumBuffer, SpectrumAvaila
         """
         self._request(
             SetSpectrometerConfig(config=self._config),
-            lambda _reply: super(SpectrometerWorkerHandle, self).start(),
+            lambda _reply: super(SpectrometerWorkerHandle, self).start(mode),
             on_error=self._on_start_config_error,
         )
 

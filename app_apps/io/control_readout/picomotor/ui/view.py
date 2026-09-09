@@ -53,6 +53,9 @@ class PicomotorControls(QWidget):
         self._vm = vm
         #: Per-axis readout labels, keyed by axis number.
         self._readouts: dict[int, QLabel] = {}
+        #: Previous worker status, so the counter read fires on a transition, not on
+        #: every notification. See _on_worker_state.
+        self._last_status: WorkerStatus | None = None
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -63,6 +66,8 @@ class PicomotorControls(QWidget):
         ctrl = WorkerControlWidget(vm.start, vm.pause, vm.resume, vm.stop, parent=self)
         ctrl.set_status(vm.worker_status)
         vm.worker_state_changed.connect(ctrl.set_status)
+        ctrl.set_mode(vm.connection_mode, vm.connection_reason)
+        vm.connection_mode_changed.connect(ctrl.set_mode)
         header.addWidget(ctrl)
         lay.addLayout(header)
 
@@ -85,7 +90,18 @@ class PicomotorControls(QWidget):
         self._render_steps()
 
     def _on_worker_state(self, status: WorkerStatus) -> None:
-        if status == WorkerStatus.RUNNING:
+        """Read the counters once, when the controller actually comes up.
+
+        Only on a genuine transition into RUNNING. Refreshing on *every* RUNNING
+        notification feeds back on itself: the read is a request, a request drives the
+        handle to BUSY and back to RUNNING, and that restore re-enters here and reads
+        again. The panel then spins forever, and the buttons flicker between enabled
+        and disabled because BUSY greys them out on every cycle.
+        """
+        previous, self._last_status = self._last_status, status
+        if status == WorkerStatus.RUNNING and previous not in (
+            WorkerStatus.RUNNING, WorkerStatus.BUSY
+        ):
             self._vm.refresh()
 
     # -- construction -----------------------------------------------------

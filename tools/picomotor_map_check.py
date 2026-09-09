@@ -60,10 +60,11 @@ def main(argv: list[str]) -> int:
     axes = [int(a) for a in args.axes.split(",") if a.strip()]
     _report_mapping()
 
-    cfg = PicomotorConfig.from_env(mock=False)
+    # Always the real driver: the whole point of this tool is to confirm which motor
+    # actually moves the mirror, and a mock would answer for every axis identically.
+    cfg = PicomotorConfig()
     if args.conn:
         cfg.host = args.conn
-        cfg.transport = "network" if "." in args.conn else "usb"
 
     driver = Picomotor8742(cfg)
     driver.open()

@@ -1,32 +1,33 @@
-"""Picomotor stack tests: config, mock driver, and the worker's command surface.
+"""Picomotor stack tests: config, mock driver, the worker, and the handle's coercion.
 
-Deliberately does NOT test the real driver — that needs the controller, and a mock
-has none of the physics. What it does cover is everything that would otherwise only
-be exercised by plugging in: that mock and real expose the same method surface (so
-the mock stays useful for UI work), that the counter semantics are open-loop
-throughout, and that ``from_env`` really does let the rig pick the real driver
-without a source edit.
+Deliberately does NOT test the real driver — that needs the controller, and a mock has
+none of the physics. What it does cover is everything that would otherwise only be
+exercised by plugging in: that mock and real expose the same method surface (so the
+mock stays useful for UI work), that the counter semantics are open-loop throughout,
+and that the mirror mapping is declared and flagged.
 
 Hand-rolled runner, like the rest of test/.
 """
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from base_core.ipc.connection_mode import ConnectionMode  # noqa: E402
 from control_readout.picomotor.config import (  # noqa: E402
-    CONN_ENV_VAR,
     DEFAULT_MIRRORS,
-    MOCK_ENV_VAR,
     PicomotorConfig,
 )
 from control_readout.picomotor.mock_driver import MockPicomotor  # noqa: E402
+from control_readout.picomotor.mock_params import MockPicomotorParams  # noqa: E402
 from control_readout.picomotor.picomotor_driver import Picomotor8742  # noqa: E402
 
 _failures: list[str] = []
+
+#: Instant, so the tests assert behaviour rather than wait on simulated travel.
+INSTANT = MockPicomotorParams(step_time_s=0.0)
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -35,6 +36,12 @@ def check(name: str, cond: bool, detail: str = "") -> None:
     else:
         print(f"FAIL  {name}  {detail}")
         _failures.append(name)
+
+
+def _mock() -> MockPicomotor:
+    d = MockPicomotor(PicomotorConfig(), INSTANT)
+    d.open()
+    return d
 
 
 def test_mock_and_real_expose_the_same_surface() -> None:
@@ -50,8 +57,7 @@ def test_mock_and_real_expose_the_same_surface() -> None:
 
 
 def test_mock_counter_semantics() -> None:
-    d = MockPicomotor(PicomotorConfig())
-    d.open()
+    d = _mock()
     check("counter starts at zero", d.position(3) == 0)
     d.move_by(3, 50)
     d.move_by(3, -20)
@@ -59,43 +65,12 @@ def test_mock_counter_semantics() -> None:
     d.move_to(3, -5)
     check("absolute move sets the counter", d.position(3) == -5, f"got {d.position(3)}")
     d.zero(3)
-    check("zero re-references without moving others", d.position(3) == 0)
+    check("zero re-references the axis", d.position(3) == 0)
     d.move_by(1, 7)
     d.zero(3)
     check("zero touches only its own axis", d.position(1) == 7, f"got {d.position(1)}")
-    check("is_moving is False for the mock", d.is_moving(3) is False)
+    check("is_moving is False once a move has returned", d.is_moving(3) is False)
     d.close()
-
-
-def test_config_from_env() -> None:
-    saved = {k: os.environ.get(k) for k in (MOCK_ENV_VAR, CONN_ENV_VAR)}
-    try:
-        os.environ.pop(MOCK_ENV_VAR, None)
-        os.environ.pop(CONN_ENV_VAR, None)
-        check("defaults to mock", PicomotorConfig.from_env().mock is True)
-        check("defaults to usb", PicomotorConfig.from_env().transport == "usb")
-
-        os.environ[MOCK_ENV_VAR] = "0"
-        check("PICOMOTOR_MOCK=0 selects the real driver",
-              PicomotorConfig.from_env().mock is False)
-        os.environ[MOCK_ENV_VAR] = "true"
-        check("PICOMOTOR_MOCK=true selects the mock",
-              PicomotorConfig.from_env().mock is True)
-
-        os.environ[CONN_ENV_VAR] = "10.1.137.239"
-        cfg = PicomotorConfig.from_env()
-        check("a dotted conn is treated as network",
-              cfg.transport == "network" and cfg.host == "10.1.137.239")
-        os.environ[CONN_ENV_VAR] = "1"
-        cfg = PicomotorConfig.from_env()
-        check("a bare index is treated as usb",
-              cfg.transport == "usb" and cfg.host == "1")
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
 
 
 def test_mirror_mapping_is_declared_and_flagged() -> None:
@@ -108,15 +83,23 @@ def test_mirror_mapping_is_declared_and_flagged() -> None:
           f"got {critical[0].yaw_axis if critical else None}")
 
 
+def test_config_carries_no_mock_flag() -> None:
+    # The config describes the 8742. Whether a mock stands in for it is a start-time
+    # decision on the start message, not a property of the instrument.
+    fields = set(PicomotorConfig().__dataclass_fields__)
+    check("no mock flag on the hardware config", "mock" not in fields, f"got {fields}")
+
+
 def test_worker_commands_reach_the_driver() -> None:
     # Drive the worker's handlers directly against a mock driver, without the IPC
     # plumbing: what matters here is that each message maps to the right driver call
     # and that every one of them reports the counter back.
     from control_readout.picomotor import picomotor_worker as pw
+    from control_readout.picomotor.messages import QuerySteps, StepBy, StepTo, ZeroAxis
 
-    driver = MockPicomotor(PicomotorConfig())
+    driver = _mock()
     notified: list[tuple[int, int]] = []
-    replies: list[str] = []
+    replies: list = []
 
     class _Stub(pw.PicomotorWorker):
         def __init__(self):            # bypass ThreadedWorker's constructor
@@ -128,8 +111,6 @@ def test_worker_commands_reach_the_driver() -> None:
         def _reply_ok(self, request):  replies.append("ok")
         def _reply(self, reply):       replies.append(reply)
         def _reply_error(self, request, error): replies.append(f"error: {error}")
-
-    from control_readout.picomotor.messages import QuerySteps, StepBy, StepTo, ZeroAxis
 
     w = _Stub()
     # The handlers are wrapped in @worker_thread; call the underlying functions.
@@ -159,42 +140,29 @@ def test_worker_commands_reach_the_driver() -> None:
           f"pos={driver.position(2)} reply={replies[-1]}")
 
 
-def test_worker_waits_for_motion_before_reading_the_counter() -> None:
-    """Regression: the readout was one command stale on real hardware.
+def test_worker_falls_back_to_the_mock() -> None:
+    """No 8742 on the network must cost a warning, not a dead panel."""
+    from control_readout.picomotor.picomotor_worker import PicomotorWorker
 
-    The 8742's move commands return when accepted, not when the motion completes, so
-    a ``position()`` taken immediately reports the pre-move count. Modelled here with
-    a driver whose counter only settles once ``wait_for_stop`` has been called — the
-    mock cannot show this, because mock motion is instantaneous.
-    """
-    from control_readout.picomotor import picomotor_worker as pw
-    from control_readout.picomotor.messages import StepBy
-
-    class LaggyDriver:
-        def __init__(self):
-            self.committed = 0
-            self.pending = 0
-        def move_by(self, axis, steps): self.pending = self.committed + steps
-        def wait_for_stop(self, axis, timeout_s=30.0):
-            self.committed = self.pending
-            return True
-        def position(self, axis): return self.committed
-
-    driver = LaggyDriver()
-    notified: list[tuple[int, int]] = []
-
-    class _Stub(pw.PicomotorWorker):
+    class _Stub(PicomotorWorker):
         def __init__(self):
             self._config = PicomotorConfig()
-            self._driver = driver
+            self._driver = None
             self._is_paused = False
-        def _notify(self, msg): notified.append((msg.axis, msg.total_steps))
-        def _reply_ok(self, request): pass
-        def _reply_error(self, request, error): notified.append(("error", error))
+            self._worker_id = "picomotor"
+            self._requested_mode = ConnectionMode.DEVICE
+            self._demotion_reason = ""
+            self._connection_mode = ConnectionMode.NONE
 
-    pw.PicomotorWorker._on_step_by.__wrapped__(_Stub(), StepBy(axis=1, steps=25))
-    check("worker reports the settled counter, not the stale one",
-          notified == [(1, 25)], f"got {notified}")
+        def _connect(self):
+            raise ConnectionRefusedError("no route to 10.1.137.239")
+
+    w = _Stub()
+    w._start()
+    check("the mock is connected instead", isinstance(w._driver, MockPicomotor),
+          f"got {type(w._driver).__name__}")
+    check("the worker reports MOCK", w._connection_mode is ConnectionMode.MOCK)
+    check("and says why", "no route" in w._demotion_reason, w._demotion_reason)
 
 
 def test_handle_coerces_json_string_axis_keys() -> None:
@@ -227,10 +195,10 @@ def main() -> int:
     for fn in (
         test_mock_and_real_expose_the_same_surface,
         test_mock_counter_semantics,
-        test_config_from_env,
         test_mirror_mapping_is_declared_and_flagged,
+        test_config_carries_no_mock_flag,
         test_worker_commands_reach_the_driver,
-        test_worker_waits_for_motion_before_reading_the_counter,
+        test_worker_falls_back_to_the_mock,
         test_handle_coerces_json_string_axis_keys,
     ):
         fn()

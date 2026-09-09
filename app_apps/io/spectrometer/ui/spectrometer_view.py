@@ -30,6 +30,11 @@ class SpectrometerView(DirtyForm):
         ctrl = WorkerControlWidget(vm.start, vm.pause, vm.resume, vm.stop, parent=self)
         ctrl.set_status(vm.worker_status)
         vm.worker_state_changed.connect(ctrl.set_status)
+        # Seeded, not just connected: this panel is opened from the Devices menu
+        # long after the device started, so the demotion it must show has already
+        # happened and no further event is coming.
+        ctrl.set_mode(vm.connection_mode, vm.connection_reason)
+        vm.connection_mode_changed.connect(ctrl.set_mode)
         self.header_layout.addWidget(ctrl)
         self.header_widget.setVisible(True)
 

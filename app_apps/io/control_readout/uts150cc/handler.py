@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from base_core.ipc.device_worker_handle import DeviceHandleMixin
+
 from base_core.framework.events.event_bus import EventBus
 from control_readout.esp_301.uts150cc.messages import (
     GetCurrentPosUTS150CC,
@@ -17,7 +19,7 @@ from app_apps.io.control_readout.uts150cc.events import (
 )
 
 
-class Uts150ccHandle(MotorizedStageHandle):
+class Uts150ccHandle(DeviceHandleMixin, MotorizedStageHandle):
     """Main-process handle to the UTS150CC ESP301 linear stage."""
 
     WORKER_ID = "uts150cc"

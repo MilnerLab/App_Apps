@@ -45,6 +45,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from base_core.ipc.connection_mode import ConnectionMode  # noqa: E402
+
 from app_apps.routines.xcorr.config import XcorrConfig  # noqa: E402
 from app_apps.routines.xcorr.events import (  # noqa: E402
     XcorrFailed,
@@ -81,8 +83,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--settle", type=float, default=0.0, help="post-move dwell, s")
     p.add_argument("--timeout", type=float, default=130.0, help="per-command timeout, s")
     p.add_argument("--channel", type=int, default=1)
-    p.add_argument("--mock-scope", action="store_true",
-                   help="use the synthetic position-dependent scope driver (no laser / no TDS2012C)")
+    p.add_argument("--scope-mode", choices=[ConnectionMode.DEVICE.value, ConnectionMode.MOCK.value],
+                   default=ConnectionMode.DEVICE.value,
+                   help="'device' tries the TDS2012C and falls back to the synthetic "
+                        "driver if it does not answer; 'mock' never touches it")
+    # Kept as an alias rather than removed: it is in scripts and in muscle memory, and
+    # breaking it buys nothing that the new flag does not already give.
+    p.add_argument("--mock-scope", dest="scope_mode", action="store_const",
+                   const=ConnectionMode.MOCK.value,
+                   help="alias for --scope-mode mock")
     p.add_argument("--plan-only", action="store_true",
                    help="print the plan and exit without booting anything or moving")
     return p.parse_args(argv)
@@ -104,7 +113,7 @@ def build_config(a: argparse.Namespace) -> XcorrConfig:
         settle_s=a.settle,
         timeout_s=a.timeout,
         channel=a.channel,
-        mock_scope=a.mock_scope,
+        scope_mode=ConnectionMode(a.scope_mode),
     )
 
 

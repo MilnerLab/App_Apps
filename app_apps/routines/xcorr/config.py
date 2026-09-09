@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from base_core.ipc.connection_mode import ConnectionMode
+
 #: Per-role soft limits in mm, read live from the ESP301 on 2026-07-19
 #: (``SL?``/``SR?``). Keyed by the role names used throughout the routine, which
 #: are also the ``XcorrRoutine`` constructor parameter names — the role binding
@@ -144,7 +146,14 @@ class XcorrConfig:
     #: Scope channel to acquire. The TDS2012C has 2.
     channel: int = 1
 
-    #: Use the synthetic (position-dependent) scope driver instead of the real TDS2012C.
+    #: What to connect the scope to. ``DEVICE`` tries the TDS2012C and falls back to the
+    #: synthetic driver if it does not answer; ``MOCK`` never touches the instrument.
     #: For hardware-free validation of the acquisition/reduction/storage path; a mock
     #: run records a real bell-shaped ``v_mean_pos`` curve, not the old stub's zeros.
-    mock_scope: bool = False
+    #: What was actually connected is read back off the handle, not assumed from here.
+    scope_mode: ConnectionMode = ConnectionMode.DEVICE
+
+    #: Traces to throw away before each point. The scope's buffer can still hold a
+    #: record captured before the stage finished moving, and averaging that in biases
+    #: the point toward the previous position.
+    in_flight_discard: int = 0

@@ -7,6 +7,7 @@ from app_apps.io.control_readout.fms300pp.handler import Fms300ppHandle
 from app_apps.io.control_readout.mfa_cc.handler import MfaccHandle
 from app_apps.io.control_readout.picomotor.handler import PicomotorHandle
 from app_apps.io.control_readout.rgv.handler import RgvHandle
+from app_apps.io.control_readout.servo.handler import ServoShutterHandle
 from app_apps.io.control_readout.service import ControlReadoutService
 from app_apps.io.control_readout.uts150cc.handler import Uts150ccHandle
 from base_core.framework.app.context import AppContext
@@ -23,6 +24,7 @@ _HANDLE_TYPES = (
     Uts150ccHandle,
     RgvHandle,
     PicomotorHandle,
+    ServoShutterHandle,
 )
 
 

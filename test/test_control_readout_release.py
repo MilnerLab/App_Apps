@@ -69,10 +69,21 @@ class FakeConnector:
         self.sent.append(msg)
 
 
+class FakeProvider:
+    """Stands in for a ControllerProvider, which is what owns controllers now.
+
+    The process no longer holds them itself: they are created lazily per connection
+    mode, so which ones exist depends on what has been started and what answered.
+    """
+
+    def __init__(self, controllers) -> None:
+        self.controllers = list(controllers)
+
+
 def _make_process(controllers) -> ControlReadoutProcess:
     """A ControlReadoutProcess without running the full subprocess __init__."""
     p = ControlReadoutProcess.__new__(ControlReadoutProcess)
-    p._controllers = list(controllers)
+    p._providers = [FakeProvider(controllers)]
     p.connector = FakeConnector()
     return p
 

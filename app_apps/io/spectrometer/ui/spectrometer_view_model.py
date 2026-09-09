@@ -5,14 +5,15 @@ from PySide6.QtCore import Signal
 from base_core.framework.events import EventBus
 from base_core.ipc.worker_handle import WorkerStatus
 from base_qt.app.dispatcher import QtDispatcher
-from base_qt.ui.panel_view_model import PanelViewModel, ui_thread
+from base_qt.ui.device_panel_view_model import DevicePanelViewModel
+from base_qt.ui.panel_view_model import ui_thread
 from spm_002.config import SpectrometerConfig
 
 from app_apps.io.spectrometer.events import SpectrometerConfigChanged, SpectrometerWorkerStateChanged
 from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
 
 
-class SpectrometerViewModel(PanelViewModel):
+class SpectrometerViewModel(DevicePanelViewModel):
     worker_state_changed = Signal(object)  # emits WorkerStatus
 
     def __init__(
@@ -22,7 +23,7 @@ class SpectrometerViewModel(PanelViewModel):
         handle: SpectrometerWorkerHandle,
         config: SpectrometerConfig,
     ) -> None:
-        super().__init__(bus, dispatcher)
+        super().__init__(bus, dispatcher, handle)
         self._handle = handle
         self._config = config
         self._sub(SpectrometerWorkerStateChanged, self._on_state_changed)

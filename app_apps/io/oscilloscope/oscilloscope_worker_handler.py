@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Callable
 
 from base_core.framework.events.event_bus import EventBus
+from base_core.ipc.device_worker_handle import DeviceHandleMixin
 from base_core.ipc.message import ErrorReply, OKReply
 from base_core.ipc.worker_handle import BaseWorkerHandle
 from oscilloscope.config import ScopeConfig
@@ -17,7 +18,7 @@ from oscilloscope.messages import (
 from app_apps.io.oscilloscope.events import OscilloscopeWorkerStateChanged
 
 
-class OscilloscopeWorkerHandle(BaseWorkerHandle):
+class OscilloscopeWorkerHandle(DeviceHandleMixin, BaseWorkerHandle):
     """Main-process handle to the OscilloscopeWorker.
 
     Plain ``BaseWorkerHandle`` — no shared memory, no ``SlotCoordinator`` (B14). The

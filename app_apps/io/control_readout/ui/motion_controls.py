@@ -49,6 +49,8 @@ class MotionControls(QGroupBox):
 
         vm.position_changed.connect(self._render_position)
         vm.worker_state_changed.connect(self._ctrl.set_status)
+        self._ctrl.set_mode(vm.connection_mode, vm.connection_reason)
+        vm.connection_mode_changed.connect(self._ctrl.set_mode)
         self._render_position(vm.position)
 
     # -- rows -------------------------------------------------------------------------

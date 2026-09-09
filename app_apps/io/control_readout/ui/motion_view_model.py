@@ -23,12 +23,13 @@ from base_core.framework.events import EventBus
 from base_core.ipc.worker_handle import WorkerStatus
 from base_qt.app.dispatcher import QtDispatcher
 from base_qt.ui.app_message import MessageLevel
-from base_qt.ui.panel_view_model import PanelViewModel, ui_thread
+from base_qt.ui.device_panel_view_model import DevicePanelViewModel
+from base_qt.ui.panel_view_model import ui_thread
 
 log = logging.getLogger(__name__)
 
 
-class MotionViewModel(PanelViewModel):
+class MotionViewModel(DevicePanelViewModel):
     """Read / absolute / relative / home over a handle with ``move_to``, ``home`` and
     ``get_position``.
 
@@ -56,7 +57,7 @@ class MotionViewModel(PanelViewModel):
         position_event: type,
         read_position: Callable[[Any], float] = lambda e: e.position,
     ) -> None:
-        super().__init__(bus, dispatcher)
+        super().__init__(bus, dispatcher, handle)
         self._handle = handle
         self._read_position = read_position
         self._position: float | None = None

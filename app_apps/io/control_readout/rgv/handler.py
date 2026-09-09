@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from base_core.framework.events.event_bus import EventBus
+from base_core.ipc.device_worker_handle import DeviceHandleMixin
 from base_core.ipc.message import ErrorReply, OKReply
 from base_core.ipc.worker_handle import BaseWorkerHandle
 from base_core.math.enums import AngleUnit
@@ -32,7 +33,7 @@ from app_apps.io.control_readout.rgv.events import (
 log = logging.getLogger(__name__)
 
 
-class RgvHandle(BaseWorkerHandle):
+class RgvHandle(DeviceHandleMixin, BaseWorkerHandle):
     """Main-process handle to the RGV100BL HWP rotator.
 
     The phase loop (and the envelope hill-climb) emit *relative* increments — how

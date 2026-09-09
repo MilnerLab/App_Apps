@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from base_core.framework.events.event_bus import EventBus
+from base_core.ipc.device_worker_handle import DeviceHandleMixin
 from base_core.ipc.message import OKReply
 from base_core.ipc.worker_handle import BaseWorkerHandle
 from control_readout.picomotor.messages import (
@@ -23,7 +24,7 @@ from app_apps.io.control_readout.picomotor.events import (
 )
 
 
-class PicomotorHandle(BaseWorkerHandle):
+class PicomotorHandle(DeviceHandleMixin, BaseWorkerHandle):
     """Main-process handle to the mirror picomotors (manual).
 
     Keeps the last known step counter per axis so the UI can render all four
