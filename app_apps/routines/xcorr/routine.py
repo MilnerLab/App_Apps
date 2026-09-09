@@ -37,9 +37,8 @@ from base_core.framework.routines.routine_base import BaseRoutine, routine_threa
 from base_core.framework.serialization.h5_utils import now_utc_iso
 from base_core.ipc.connection_mode import ConnectionMode
 from base_core.ipc.worker_handle import BaseWorkerHandle, WorkerStatus
-from oscilloscope.config import ScopeConfig
 
-from app_apps.routines.xcorr.config import AXIS_LIMITS, SCOPE_RESOURCE, XcorrConfig
+from app_apps.routines.xcorr.config import AXIS_LIMITS, XcorrConfig
 from app_apps.routines.xcorr.events import (
     XcorrFailed,
     XcorrFinished,
@@ -49,6 +48,7 @@ from app_apps.routines.xcorr.events import (
     XcorrSteppingHold,
 )
 from app_apps.routines.xcorr.planner import PlanError, ScanPlan, Setpoint, plan_scan
+from app_apps.routines.xcorr.point_collector import XcorrPointCollector
 from app_apps.routines.xcorr.spectrum_recorder import XcorrSpectrumRecorder, integration_span_ns
 from app_apps.routines.xcorr.storage import XcorrH5Writer, default_run_path
 
@@ -102,13 +102,10 @@ class XcorrRoutine(BaseRoutine):
         #: site, including the headless runner, working unchanged.
         self._spectrometer = spectrometer
         self._recorder: XcorrSpectrumRecorder | None = None
-        #: Built once at start from the run config; carries the VISA resource and the
-        #: fixed 2500-sample record. Hardware only — the channel is per-acquisition and
-        #: goes with each request, and whether a mock stands in is a start-time mode.
-        self._scope_cfg = ScopeConfig(
-            resource=SCOPE_RESOURCE,
-            n_samples=2500,
-        )
+        #: Reduces the scope's free-running trace stream into measurement points. Unlike
+        #: the recorder this one is not optional: it *is* the acquisition path. Built when
+        #: the scope reaches RUNNING, because it registers against the handle's buffer.
+        self._collector: XcorrPointCollector | None = None
         #: What to ask the scope worker for. What it actually connected to is read back
         #: off the handle after start, and only that goes into the run's provenance.
         self._scope_mode = config.scope_mode
@@ -386,6 +383,11 @@ class XcorrRoutine(BaseRoutine):
                 n_groups_written=writer.n_groups_written if writer else 0,
             ))
         finally:
+            # Unregister before anything else: while we are a registered consumer the
+            # coordinator holds every frame waiting for our ack, so a run that ended —
+            # cleanly, aborted or failed — must stop consuming or it stalls the stream
+            # for the alignment view too.
+            self._stop_collector()
             # Stages are left wherever they stopped — parked, not homed. R3 asks for
             # stationary, and every move in this loop is blocking, so by the time we
             # are here nothing is moving.
@@ -501,48 +503,37 @@ class XcorrRoutine(BaseRoutine):
     def _acquire_point(self, probe_mm: float) -> tuple[float, float, int]:
         """One probe point: ``(v_mean_pos, v_std, n_positive_mean_traces)``.
 
-        Blocking ``AcquirePoint`` to the scope worker (B6): it acquires
-        ``n_traces`` freshness-gated traces (``NUMACq?``), reduces each to a
-        positive-mean subprocess-side (D3 step 1), and replies with the N scalars.
-        Here we do D3 step 2 — the average and spread *across* the traces — and count
-        how many of them actually had positive signal.
+        The scope free-runs into shared memory, so a point is a burst taken out of that
+        stream rather than a request to the instrument: the collector reduces each trace
+        to a positive-mean (D3 step 1) and here we do D3 step 2 — the average and spread
+        *across* the traces — and count how many of them actually had positive signal.
 
-        Runs on the routine's own ``TaskRunner`` thread; the reply arrives on the IPC
-        reader thread, so the wait does not deadlock (same contract as ``_move``).
+        ``gate_ns`` is sampled here, after :meth:`_move` returned, so only traces whose
+        capture *began* with the stages already stationary are admitted.
+        ``in_flight_discard`` drops that many admitted traces on top, as a margin.
+
+        Runs on the routine's own ``TaskRunner`` thread; frames arrive on the IPC reader
+        thread, so the wait does not deadlock (same contract as ``_move``).
         """
-        done = threading.Event()
-        result: dict[str, list] = {}
-        error: list[str] = []
+        collector = self._collector
+        if collector is None:
+            raise XcorrError(f"acquire at probe {probe_mm:.4f} mm: no trace collector")
 
-        def on_reply(values: list[float], counts: list[int]) -> None:
-            result["values"] = values
-            result["counts"] = counts
-            done.set()
-
-        def on_err(message: str) -> None:
-            error.append(message)
-            done.set()
-
-        self._scope.acquire_point(
+        gate_ns = time.time_ns()
+        values, counts = collector.collect(
             n_traces=self._cfg.n_traces,
             channel=self._cfg.channel,
-            probe_mm=probe_mm,
-            discard=self._cfg.in_flight_discard,
-            on_reply=on_reply,
-            on_error=on_err,
+            gate_ns=gate_ns,
+            skip=self._cfg.in_flight_discard,
+            timeout_s=self._cfg.timeout_s,
         )
 
-        if not done.wait(self._cfg.timeout_s):
+        if len(values) < self._cfg.n_traces:
             raise XcorrError(
-                f"acquire at probe {probe_mm:.4f} mm: no reply within {self._cfg.timeout_s:.0f}s"
+                f"acquire at probe {probe_mm:.4f} mm: only {len(values)} of "
+                f"{self._cfg.n_traces} traces within {self._cfg.timeout_s:.0f}s -- check "
+                f"that the scope is triggering"
             )
-        if error:
-            raise XcorrError(f"acquire at probe {probe_mm:.4f} mm: {error[0]}")
-
-        values = result.get("values", [])
-        counts = result.get("counts", [])
-        if not values:
-            return 0.0, 0.0, 0
         arr = np.asarray(values, dtype=np.float64)
         # n reported per point is the number of traces that carried positive signal —
         # more informative than a constant n_traces, and 0 flags a dead point.
@@ -650,12 +641,10 @@ class XcorrRoutine(BaseRoutine):
         the spectrometer and Andor hardware on every launch, for every user, as a
         side effect of an XCORR fix.
         """
-        # The scope config must reach the worker before its StartWorker: the worker
-        # builds its driver from the config in _start() and does not re-open on a later
-        # change (B5). Both go through the worker's single serial runner, so send-order
-        # is apply-order — set_config first, then start() below.
-        self._scope.set_config(self._scope_cfg)
-
+        # The scope config is not sent from here: the scope handle's own start() applies it
+        # and chains StartWorker off the reply, which is the only ordering that actually
+        # holds (the two messages are handled on different subprocess threads, so sending
+        # them in order does not make them apply in order).
         handles = (
             (self._grating, "grating (UTS150CC)"),
             (self._delay, "delay (MFA-CC)"),
@@ -685,6 +674,16 @@ class XcorrRoutine(BaseRoutine):
             # start scrolls and this run is about to write a file that claims to be data.
             log.warning("XCORR: the scope is SIMULATED — this run records synthetic "
                         "traces, and its provenance will say so")
+
+        # Only now: registering as a consumer makes the coordinator wait on our ack, so it
+        # must not happen before the stream it is acking for exists.
+        self._collector = XcorrPointCollector(self._bus, self._scope)
+        self._collector.start()
+
+    def _stop_collector(self) -> None:
+        collector, self._collector = self._collector, None
+        if collector is not None:
+            collector.close()
 
     @staticmethod
     def _wait_for_running(handle: BaseWorkerHandle) -> bool:
@@ -789,7 +788,8 @@ class XcorrRoutine(BaseRoutine):
             "limits_delay_mm": list(AXIS_LIMITS["delay"]),
             "limits_grating_mm": list(AXIS_LIMITS["grating"]),
             "limits_source": "read live 2026-07-19; see XCORR_SPEC.md §3.1",
-            "acquisition": "live — reduced positive-mean per trace over the scope worker",
+            "acquisition": "live — positive-mean per trace, reduced from the scope's "
+                           "shared-memory trace stream",
         }
 
     def _scope_provenance(self) -> dict[str, object]:
@@ -807,13 +807,18 @@ class XcorrRoutine(BaseRoutine):
         mocked = mode == ConnectionMode.MOCK
         return {
             "model": "MOCK TDS 2012C" if mocked else "Tektronix TDS 2012C",
-            "resource": self._scope_cfg.resource,
+            "resource": self._scope.config.resource,
             "channel": self._cfg.channel,
-            "record_length": self._scope_cfg.n_samples,
+            "record_length": self._scope.config.n_samples,
             "n_traces_per_point": self._cfg.n_traces,
             "in_flight_discard": self._cfg.in_flight_discard,
             "mock": mocked,
             "connection_mode": mode.value if mode is not None else "not_started",
             "connection_mode_requested": self._scope_mode.value,
             "reduction": "within-trace mean of samples > 0, then mean/std across traces (D3)",
+            "sample_interval_s": self._scope.dt_s,
+            "freshness_gate": (
+                "a trace is admitted only when its capture began after the probe move "
+                "returned, plus in_flight_discard further traces dropped"
+            ),
         }

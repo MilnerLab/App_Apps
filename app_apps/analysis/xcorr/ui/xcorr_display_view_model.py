@@ -28,15 +28,15 @@ import logging
 import os
 import queue
 import threading
+import time
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import ClassVar, TYPE_CHECKING
 
 import numpy as np
 from PySide6.QtCore import QTimer, Signal
 
 from base_core.framework.events import EventBus
-from base_core.ipc.worker_handle import WorkerStatus
 from base_qt.app.dispatcher import QtDispatcher
 from base_qt.ui.panel_view_model import PanelViewModel, ui_thread
 
@@ -51,6 +51,7 @@ from app_apps.analysis.xcorr.frequency import (
     separation_mm,
 )
 from app_apps.analysis.xcorr.run_loader import RunLoadError, load_run
+from app_apps.io.oscilloscope.events import TraceAck, TraceAvailable
 from app_apps.routines.xcorr.events import (
     XcorrFailed,
     XcorrFinished,
@@ -71,6 +72,12 @@ DEFAULT_GRATING_ZERO_MM = 30.1
 #: redraw rebuilds both plots from scratch, and at ~15 Hz the grid still visibly
 #: fills in while the main thread keeps most of its budget.
 SUMMARY_COALESCE_MS = 66
+
+#: Shortest gap between two drawn alignment frames. The scope streams far faster than
+#: 20 Hz and an operator turning a mirror cannot read faster than that, so the rest are
+#: dropped rather than queued -- the stream is always-latest, so what gets drawn is
+#: always the newest frame.
+_TRACE_MIN_PERIOD_S = 0.05
 
 
 def _fit_pool_size() -> int:
@@ -123,7 +130,13 @@ class XcorrDisplayViewModel(PanelViewModel):
     UI thread — the view can therefore read it directly in its slots with no lock.
     The single exception is the fit worker, which reads a *copied* snapshot of one
     finished scan's arrays (safe: a finished scan never grows again).
+
+    When a scope handle is injected this is also a consumer of its shared-memory trace
+    stream, which is where the alignment trace comes from. Frames arrive on their own;
+    there is no polling and nothing to request.
     """
+
+    CONSUMER_ID: ClassVar[str] = "xcorr_display_vm"
 
     #: The history length or membership changed (a scan started or finished) — the
     #: view refreshes its navigation range.
@@ -155,11 +168,11 @@ class XcorrDisplayViewModel(PanelViewModel):
         # Optional: the display is useful without a scope (imported runs), and the live
         # trace is simply unavailable when there is none.
         self._scope = scope
-        # One request in flight at a time. The timer fires faster than a marginal trigger
-        # replies, and queueing them would build a backlog of frames already stale.
-        self._trace_pending = False
         self._holding = False
         self._trace_channel = 1
+        #: When the last drawn frame was taken, for the redraw rate limit. Touched only
+        #: on the IPC reader thread.
+        self._last_trace_s = 0.0
         self._scans: list[Scan] = []
         self._by_index: dict[int, Scan] = {}
         self._selected: int = -1
@@ -208,45 +221,58 @@ class XcorrDisplayViewModel(PanelViewModel):
         self._sub(XcorrFailed, self._on_failed)
         self._sub(XcorrSteppingHold, self._on_hold)
 
+        if self._scope is not None:
+            # Subscribe before registering: registering is what makes the slot coordinator
+            # wait on our ack, so there must be no window where we are pending but not
+            # listening.
+            self._sub(TraceAvailable, self._on_trace)
+            self._scope.register_consumer(self.CONSUMER_ID)
+
+    def on_close(self) -> None:
+        # Unregister first, so the coordinator stops waiting on an ack from a panel that is
+        # going away. Left registered, this panel would stall the scan's own acquisition.
+        if self._scope is not None:
+            self._scope.unregister_consumer(self.CONSUMER_ID)
+        super().on_close()
+
     @property
     def is_holding(self) -> bool:
         return self._holding
 
-    def request_trace(self) -> None:
-        """Ask the worker for one frame. Called from the view's timer, on the Qt thread.
+    def _on_trace(self, event: TraceAvailable) -> None:
+        """Read one frame out of shared memory and hand it to the plot.
 
-        Silently does nothing when a request is already outstanding or the scope worker
-        is not RUNNING — the worker is started by the routine, so before the first scan
-        of a session there is simply nothing to read and that is not an error.
+        Runs on the IPC reader thread, so it stays short: copy, reduce, ack, and marshal
+        the emit to Qt. Most frames are dropped on purpose. The mock streams at several
+        hundred hertz and a fast scope is not far behind, which no operator can read and
+        no Qt thread should spend itself drawing; the stream is always-latest, so
+        dropping means the next frame drawn is the newest one, never a backlog. What is
+        drawn is still strictly fresher than the 2-10 Hz poll this replaced.
         """
         scope = self._scope
-        if scope is None or self._trace_pending:
+        if scope is None:
             return
-        if scope.state != WorkerStatus.RUNNING:
-            return
-        self._trace_pending = True
-        scope.acquire_trace(
-            channel=self._trace_channel,
-            on_reply=self._on_trace,
-            on_error=self._on_trace_error,
-        )
-
-    def _on_trace(self, samples: list, dt_s: float, v_mean_pos: float,
-                  n_pos: int) -> None:
-        self._post(lambda: self._emit_trace(samples, dt_s, v_mean_pos, n_pos))
-
-    def _emit_trace(self, samples: list, dt_s: float, v_mean_pos: float,
-                    n_pos: int) -> None:
-        self._trace_pending = False
-        self.trace_changed.emit(np.asarray(samples, dtype=float), dt_s, v_mean_pos, n_pos)
-
-    def _on_trace_error(self, message: str) -> None:
-        # No banner: a failed frame during alignment is common (marginal trigger) and a
-        # popup per failure would bury the operator. Just free the slot for the next tick.
-        self._post(self._clear_trace_pending)
-
-    def _clear_trace_pending(self) -> None:
-        self._trace_pending = False
+        try:
+            now = time.monotonic()
+            if now - self._last_trace_s < _TRACE_MIN_PERIOD_S:
+                return
+            self._last_trace_s = now
+            # Copy out of shared memory: the slot is reused the moment we ack.
+            frame = scope.trace(event.slot)
+            row = np.array(frame[self._trace_channel - 1], dtype=float)
+            positive = row[row > 0.0]
+            v_mean_pos = float(positive.mean()) if positive.size else 0.0
+            n_positive = int(positive.size)
+            dt_s = scope.dt_s
+            self._post(lambda: self.trace_changed.emit(row, dt_s, v_mean_pos, n_positive))
+        except Exception:
+            # No banner: a bad frame during alignment is common and a popup per failure
+            # would bury the operator. The ack below still has to happen.
+            log.exception("XCORR display: trace read failed for slot %d", event.slot)
+        finally:
+            self._bus.publish(TraceAck(
+                slot=event.slot, item_id=event.item_id, consumer_id=self.CONSUMER_ID
+            ))
 
     def _on_hold(self, e: XcorrSteppingHold) -> None:
         if e.holding:

@@ -41,12 +41,6 @@ from PySide6.QtWidgets import (
 
 from base_qt.ui.panel import Panel
 
-#: Live-trace poll periods, ms. Fast while parked at a step gate -- the operator is
-#: turning a mirror and needs the waveform to follow their hand -- and slow otherwise,
-#: where the scope is busy with the scan and nobody is watching the trace.
-SCOPE_POLL_HOLD_MS = 100
-SCOPE_POLL_SCAN_MS = 500
-
 from app_apps.analysis.xcorr.frequency import C_MM_PER_PS, probe_mm_to_ps
 from app_apps.analysis.xcorr.ui.xcorr_display_view_model import Scan, XcorrDisplayViewModel
 
@@ -201,10 +195,8 @@ class XcorrDisplayView(Panel):
         #: first one did rather than back at the default.
         self._last_import_dir: str = ""
 
-        self._scope_timer = QTimer(self)
-        self._scope_timer.timeout.connect(self.vm.request_trace)
-        self._scope_timer.start(SCOPE_POLL_SCAN_MS)
-
+        # No poll timer: the scope streams into shared memory and the view-model pushes
+        # every frame it reads, at whatever rate this panel can draw.
         self._apply_axis_labels()
         self._connect(self.vm.trace_changed, self._redraw_trace)
         self._connect(self.vm.hold_changed, self._render_hold)
@@ -468,8 +460,6 @@ class XcorrDisplayView(Panel):
     def _render_hold(self, holding: bool, text: str) -> None:
         self._hold_banner.setVisible(holding)
         self._hold_banner.setText(text)
-        self._scope_timer.setInterval(
-            SCOPE_POLL_HOLD_MS if holding else SCOPE_POLL_SCAN_MS)
 
     def _apply_axis_labels(self) -> None:
         label = "Delay t (ps)" if self._time_axis else "Probe stage (mm)"

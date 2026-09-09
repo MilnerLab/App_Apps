@@ -47,6 +47,7 @@ class AppShell(LabMainWindow):
     def _build_devices_menu(self, container: Container) -> None:
         from base_qt.ui.view_host import ViewHost
         from app_apps.io.spectrometer.ui.spectrometer_view import SpectrometerView
+        from app_apps.io.oscilloscope.ui.oscilloscope_view import OscilloscopeView
         from app_apps.io.control_readout.ell14.ui.view import ELL14RotatorView
         from app_apps.io.control_readout.fms300pp.ui.view import Fms300ppView
         from app_apps.io.control_readout.mfa_cc.ui.view import MfaccView
@@ -56,6 +57,7 @@ class AppShell(LabMainWindow):
 
         menu = self.menuBar().addMenu("Devices")
         self._spectrometer_host = ViewHost(container, SpectrometerView, parent=self)
+        self._oscilloscope_host = ViewHost(container, OscilloscopeView, parent=self)
         self._ell14_host = ViewHost(container, ELL14RotatorView, parent=self)
         self._fms300pp_host = ViewHost(container, Fms300ppView, parent=self)
         self._mfa_cc_host = ViewHost(container, MfaccView, parent=self)
@@ -64,6 +66,7 @@ class AppShell(LabMainWindow):
         self._picomotor_host = ViewHost(container, PicomotorView, parent=self)
 
         menu.addAction("Spectrometer", self._spectrometer_host.open)
+        menu.addAction("Oscilloscope", self._oscilloscope_host.open)
         menu.addAction("ELL14 Rotator", self._ell14_host.open)
         menu.addAction("FMS300PP Stage", self._fms300pp_host.open)
         menu.addAction("MFA-CC Stage", self._mfa_cc_host.open)

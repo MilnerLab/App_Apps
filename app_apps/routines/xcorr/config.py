@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from base_core.ipc.connection_mode import ConnectionMode
+from oscilloscope.config import ScopeConfig
 
 #: Per-role soft limits in mm, read live from the ESP301 on 2026-07-19
 #: (``SL?``/``SR?``). Keyed by the role names used throughout the routine, which
@@ -29,9 +30,11 @@ AXIS_LIMITS: dict[str, tuple[float, float]] = {
     "grating": (-75.0, 75.0),
 }
 
-#: Tektronix TDS 2012C, USBTMC. Verified 2026-07-20; note this is a TDS, not the
-#: TBS2012C that ``Devices/oscilloscope/tbs_driver.py`` targets (defect G8).
-SCOPE_RESOURCE = "USB0::0x0699::0x03A3::C015100::INSTR"
+#: The scope's VISA resource, kept here only as the name this routine's documentation
+#: uses. The value belongs to the device: it is ``ScopeConfig.resource``'s default, which
+#: is what the oscilloscope module actually registers and the handle actually sends. Two
+#: literals for one USB address is one too many.
+SCOPE_RESOURCE = ScopeConfig.resource
 
 #: Absolute tolerance, in mm, for deciding whether a setpoint sits on a limit.
 #: Range expansion accumulates float error, so an endpoint that is mathematically
@@ -153,7 +156,7 @@ class XcorrConfig:
     #: What was actually connected is read back off the handle, not assumed from here.
     scope_mode: ConnectionMode = ConnectionMode.DEVICE
 
-    #: Traces to throw away before each point. The scope's buffer can still hold a
-    #: record captured before the stage finished moving, and averaging that in biases
-    #: the point toward the previous position.
+    #: Extra traces to throw away before each point, on top of the freshness gate. The
+    #: gate already rejects every trace whose capture began before the move returned, so
+    #: 0 is the right value; this is margin for a suspicion the timestamps cannot express.
     in_flight_discard: int = 0
