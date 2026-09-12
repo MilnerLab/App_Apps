@@ -23,7 +23,7 @@ class AppPanelWindow(PanelWindow):
     def _build_panels(self, container: Container) -> None:
         from app_apps.analysis.phase_control.ui.phase_control_view import PhaseControlView
         from app_apps.analysis.xcorr.ui.xcorr_display_view import XcorrDisplayView
-        from app_apps.io.control_readout.ui.devices_view import DevicesView
+        from app_apps.io.ui.devices_view import DevicesView
 
         c = container
         # Both panels go into the *same* dock area and are then tabbed on top of each

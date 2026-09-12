@@ -27,6 +27,10 @@ class OscilloscopeViewModel(DevicePanelViewModel):
 
     worker_state_changed = Signal(object)  # emits WorkerStatus
     timebase_changed = Signal()             # the instrument reported a new sample interval
+    #: The config was written back. This VM is a singleton shared by the popout and the
+    #: Devices page, and both bind forms to the one config object -- so whichever of them
+    #: applied, the other has to re-read or it keeps showing the old numbers.
+    config_updated = Signal()
 
     def __init__(
         self,
@@ -76,3 +80,4 @@ class OscilloscopeViewModel(DevicePanelViewModel):
 
     def set_config(self) -> None:
         self._bus.publish(OscilloscopeConfigChanged())
+        self.config_updated.emit()

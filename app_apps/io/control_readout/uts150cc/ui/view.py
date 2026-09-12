@@ -7,12 +7,18 @@ from base_qt.ui.panel_view import PanelView
 from app_apps.io.control_readout.ui.motion_controls import MotionControls
 from app_apps.io.control_readout.uts150cc.ui.view_model import Uts150ccViewModel
 
+TITLE = "UTS150CC Stage (grating)"
+
 
 class Uts150ccView(PanelView):
     """The floating Devices-menu popout. The panel embeds the same ``MotionControls``
-    block directly, so there is one implementation of the controls, not two."""
+    block directly, so there is one implementation of the controls, not two.
+
+    No ``vm=``: the view model is a singleton shared with the Devices page, so closing
+    this popout must hide it rather than tear those subscriptions down."""
 
     def __init__(self, vm: Uts150ccViewModel, parent: QWidget) -> None:
-        super().__init__("UTS150CC Stage (grating)", parent, vm=vm)
+        super().__init__(TITLE, parent)
         self._vm = vm
-        self.body_layout.addWidget(MotionControls("UTS150CC Stage (grating)", vm, self))
+        self.add_worker_controls(vm)
+        self.body_layout.addWidget(MotionControls(vm, self))

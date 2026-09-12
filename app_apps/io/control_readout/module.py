@@ -55,39 +55,36 @@ class ControlReadoutModule(BaseModule):
         from app_apps.io.control_readout.uts150cc.ui.view import Uts150ccView
         from base_qt.app.dispatcher import QtDispatcher
 
-        c.register_factory(ELL14RotatorViewModel, lambda c: ELL14RotatorViewModel(
+        c.register_singleton(ELL14RotatorViewModel, lambda c: ELL14RotatorViewModel(
             ctx.event_bus, c.get(QtDispatcher), c.get(ELL14RotatorHandle)
         ))
-        c.register_factory(Fms300ppViewModel, lambda c: Fms300ppViewModel(
+        c.register_singleton(Fms300ppViewModel, lambda c: Fms300ppViewModel(
             ctx.event_bus, c.get(QtDispatcher), c.get(Fms300ppHandle)
         ))
-        c.register_factory(MfaccViewModel, lambda c: MfaccViewModel(
+        c.register_singleton(MfaccViewModel, lambda c: MfaccViewModel(
             ctx.event_bus, c.get(QtDispatcher), c.get(MfaccHandle)
         ))
-        c.register_factory(Uts150ccViewModel, lambda c: Uts150ccViewModel(
+        c.register_singleton(Uts150ccViewModel, lambda c: Uts150ccViewModel(
             ctx.event_bus, c.get(QtDispatcher), c.get(Uts150ccHandle)
         ))
         # PhaseControlService, not PhaseStabilizationHandle: the envelope worker drives the
         # same half-wave plate, and stop_worker() stops whichever of the two is active.
         # Resolved lazily inside the factory, so module registration order does not matter.
         from app_apps.analysis.phase_control.service import PhaseControlService
-        c.register_factory(RgvViewModel, lambda c: RgvViewModel(
+        c.register_singleton(RgvViewModel, lambda c: RgvViewModel(
             ctx.event_bus, c.get(QtDispatcher), c.get(RgvHandle),
             c.get(PhaseControlService),
         ))
-        c.register_factory(PicomotorViewModel, lambda c: PicomotorViewModel(
+        c.register_singleton(PicomotorViewModel, lambda c: PicomotorViewModel(
             ctx.event_bus, c.get(QtDispatcher), c.get(PicomotorHandle)
         ))
 
-        c.register_factory(ELL14RotatorView, lambda c: ELL14RotatorView(c.get(ELL14RotatorViewModel), parent=None))
-        c.register_factory(Fms300ppView, lambda c: Fms300ppView(c.get(Fms300ppViewModel), parent=None))
-        c.register_factory(MfaccView, lambda c: MfaccView(c.get(MfaccViewModel), parent=None))
-        c.register_factory(Uts150ccView, lambda c: Uts150ccView(c.get(Uts150ccViewModel), parent=None))
-        c.register_factory(RgvView, lambda c: RgvView(c.get(RgvViewModel), parent=None))
-        c.register_factory(PicomotorView, lambda c: PicomotorView(c.get(PicomotorViewModel), parent=None))
-
-        from app_apps.io.control_readout.ui.devices_view import DevicesView
-        c.register_factory(DevicesView, lambda c: DevicesView(c))
+        c.register_singleton(ELL14RotatorView, lambda c: ELL14RotatorView(c.get(ELL14RotatorViewModel), parent=None))
+        c.register_singleton(Fms300ppView, lambda c: Fms300ppView(c.get(Fms300ppViewModel), parent=None))
+        c.register_singleton(MfaccView, lambda c: MfaccView(c.get(MfaccViewModel), parent=None))
+        c.register_singleton(Uts150ccView, lambda c: Uts150ccView(c.get(Uts150ccViewModel), parent=None))
+        c.register_singleton(RgvView, lambda c: RgvView(c.get(RgvViewModel), parent=None))
+        c.register_singleton(PicomotorView, lambda c: PicomotorView(c.get(PicomotorViewModel), parent=None))
 
     def on_startup(self, c: Container, ctx: AppContext) -> None:
         c.get(ControlReadoutService).start()

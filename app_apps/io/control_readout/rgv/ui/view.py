@@ -22,6 +22,19 @@ from app_apps.io.control_readout.rgv.ui.view_model import (
 TITLE = "RGV100BL HWP"
 
 
+def _release_hooks(vm: RgvViewModel, move: object, spin: object) -> None:
+    """Clear the interlock hooks a destroyed ``RgvControls`` installed, if still current.
+
+    ``==`` not ``is``: attribute access builds a fresh bound-method object every time, so
+    the one stored on the VM is never the identical object we captured -- but bound
+    methods compare equal when they share a receiver and a function.
+    """
+    if vm.confirm_move == move:
+        vm.confirm_move = None
+    if vm.confirm_spin_override == spin:
+        vm.confirm_spin_override = None
+
+
 class RgvControls(MotionControls):
     """``MotionControls`` plus continuous rotation, and the two interlocks that go with it.
 
@@ -35,13 +48,22 @@ class RgvControls(MotionControls):
     """
 
     def __init__(self, vm: RgvViewModel, parent: QWidget | None = None) -> None:
-        super().__init__(TITLE, vm, parent)
+        super().__init__(vm, parent)
         self._rgv_vm = vm
         # Installed rather than subclassed into the view model, so MotionControls and
         # MotionViewModel stay free of any knowledge of phase control -- the other four
         # devices have no interlock and need none.
         vm.confirm_move = self._confirm_move
         vm.confirm_spin_override = self._confirm_spin_override
+        # The view model is a singleton, so the popout and the Devices page each install
+        # their own hooks and the later one wins. Release them when this widget goes, or
+        # the VM calls into a deleted widget on the next move -- but only if they are
+        # still OURS, so a block being torn down cannot unhook the one that replaced it.
+        # Captured as locals rather than read off self in the handler: this runs during
+        # destruction, when touching the widget is exactly what we are avoiding.
+        hooks = (vm, self._confirm_move, self._confirm_spin_override)
+        self.destroyed.connect(lambda *_: _release_hooks(*hooks))
+
         self.layout().addLayout(self._build_spin_row())
         vm.spin_state_changed.connect(self._render_spin)
         self._render_spin(vm.spinning, DEFAULT_SPIN_HZ)
@@ -123,7 +145,14 @@ class RgvControls(MotionControls):
 
 
 class RgvView(PanelView):
+    """The floating Devices-menu popout. The panel embeds the same ``RgvControls``
+    block directly, so there is one implementation of the controls, not two.
+
+    No ``vm=``: the view model is a singleton shared with the Devices page, so closing
+    this popout must hide it rather than tear those subscriptions down."""
+
     def __init__(self, vm: RgvViewModel, parent: QWidget) -> None:
-        super().__init__(TITLE, parent, vm=vm)
+        super().__init__(TITLE, parent)
         self._vm = vm
+        self.add_worker_controls(vm)
         self.body_layout.addWidget(RgvControls(vm, self))

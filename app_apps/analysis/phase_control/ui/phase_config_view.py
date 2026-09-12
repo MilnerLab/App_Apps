@@ -9,6 +9,7 @@ from base_qt.ui.form import (
     AngleSpec,
     BoolSpec,
     DirtyForm,
+    DirtyFormWidget,
     FloatSpec,
     IntSpec,
     LengthSpec,
@@ -30,7 +31,9 @@ if TYPE_CHECKING:
 _EDITABLE_STATES = (WorkerStatus.NEW, WorkerStatus.PAUSED)
 
 
-class PhaseConfigView(DirtyForm):
+class PhaseConfigForm(DirtyFormWidget):
+    """The fields themselves. Split across TWO dataclasses -- see ``_obj``."""
+
     # Derived, not hand-listed: a spec name lives on FringeFitParams if and only if
     # FringeFitParams declares it, and every other spec belongs to StabilizationConfig.
     # Spelling this set out by hand made it a fourth list that had to agree with _specs,
@@ -88,23 +91,11 @@ class PhaseConfigView(DirtyForm):
         "trunc_threshold", "trust_nsig", "lambda_ref",
     })
 
-    def __init__(
-        self,
-        svc: PhaseControlService,
-        vm: StabilizationControlViewModel,
-        parent: QWidget,
-    ) -> None:
-        self._params = svc._config.params   # set before super().__init__ calls _populate
-        super().__init__("Phase Tracking Configuration", svc._config, parent)
+    def __init__(self, svc: PhaseControlService, parent: QWidget | None = None) -> None:
+        # Both set before super().__init__ builds and populates the fields.
         self._svc = svc
-
-        self.set_running(vm.worker_state not in _EDITABLE_STATES)
-        vm.worker_state_changed.connect(
-            lambda status: self.set_running(status not in _EDITABLE_STATES)
-        )
-        vm.config_updated.connect(
-            lambda: self.refresh_fields(self._readonly_when_running)
-        )
+        self._params = svc._config.params
+        super().__init__(svc._config, parent)
 
     def _obj(self, name: str) -> Any:
         return self._params if name in self._PARAMS_FIELDS else self._config
@@ -131,3 +122,31 @@ class PhaseConfigView(DirtyForm):
 
     def on_apply(self) -> None:
         self._svc.set_config()
+
+
+class PhaseConfigView(DirtyForm):
+    """The popout wrapper: fields in the scrolling body, Apply pinned in the footer.
+
+    Constructed inline by ``PhaseControlView`` with a borrowed, longer-lived VM, so it
+    deliberately passes no ``vm=`` -- closing hides it rather than destroying it.
+    """
+
+    def __init__(
+        self,
+        svc: PhaseControlService,
+        vm: StabilizationControlViewModel,
+        parent: QWidget,
+    ) -> None:
+        self._svc = svc
+        super().__init__("Phase Tracking Configuration", parent)
+
+        self.set_running(vm.worker_state not in _EDITABLE_STATES)
+        vm.worker_state_changed.connect(
+            lambda status: self.set_running(status not in _EDITABLE_STATES)
+        )
+        vm.config_updated.connect(
+            lambda: self.refresh_fields(PhaseConfigForm._readonly_when_running)
+        )
+
+    def build_form(self) -> PhaseConfigForm:
+        return PhaseConfigForm(self._svc, self)

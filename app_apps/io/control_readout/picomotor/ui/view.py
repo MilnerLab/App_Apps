@@ -32,7 +32,6 @@ from PySide6.QtWidgets import (
 
 from base_core.ipc.worker_handle import WorkerStatus
 from base_qt.ui.panel_view import PanelView
-from base_qt.ui.worker_control_widget import WorkerControlWidget
 from control_readout.picomotor.config import MirrorAxes
 
 from app_apps.io.control_readout.picomotor.ui.view_model import (
@@ -45,8 +44,11 @@ TITLE = "Mirror picomotors (8742)"
 
 
 class PicomotorControls(QWidget):
-    """The controls themselves, free of any window. The Devices PANEL embeds this
-    directly and the Devices-MENU popout wraps it, so there is one implementation."""
+    """The controls themselves, free of any window and of any Start/Pause bar.
+
+    The Devices PANEL embeds this directly and the Devices-MENU popout wraps it, so there
+    is one implementation. The bar belongs to whichever of the two is hosting it -- see
+    ``MotionControls``."""
 
     def __init__(self, vm: PicomotorViewModel, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -60,16 +62,6 @@ class PicomotorControls(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
-
-        header = QHBoxLayout()
-        header.addStretch(1)
-        ctrl = WorkerControlWidget(vm.start, vm.pause, vm.resume, vm.stop, parent=self)
-        ctrl.set_status(vm.worker_status)
-        vm.worker_state_changed.connect(ctrl.set_status)
-        ctrl.set_mode(vm.connection_mode, vm.connection_reason)
-        vm.connection_mode_changed.connect(ctrl.set_mode)
-        header.addWidget(ctrl)
-        lay.addLayout(header)
 
         lay.addWidget(self._build_increment_row())
         for mirror in vm.mirrors:
@@ -228,7 +220,14 @@ class PicomotorControls(QWidget):
 
 
 class PicomotorView(PanelView):
+    """The floating Devices-menu popout. The panel embeds the same ``PicomotorControls``
+    block directly, so there is one implementation of the controls, not two.
+
+    No ``vm=``: the view model is a singleton shared with the Devices page, so closing
+    this popout must hide it rather than tear those subscriptions down."""
+
     def __init__(self, vm: PicomotorViewModel, parent: QWidget) -> None:
-        super().__init__(TITLE, parent, vm=vm)
+        super().__init__(TITLE, parent)
         self._vm = vm
+        self.add_worker_controls(vm)
         self.body_layout.addWidget(PicomotorControls(vm, self))

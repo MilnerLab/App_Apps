@@ -15,6 +15,10 @@ from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWor
 
 class SpectrometerViewModel(DevicePanelViewModel):
     worker_state_changed = Signal(object)  # emits WorkerStatus
+    #: The config was written back. This VM is a singleton shared by the popout and the
+    #: Devices page, and both bind forms to the one config object -- so whichever of them
+    #: applied, the other has to re-read or it keeps showing the old numbers.
+    config_updated = Signal()
 
     def __init__(
         self,
@@ -54,3 +58,4 @@ class SpectrometerViewModel(DevicePanelViewModel):
 
     def set_config(self) -> None:
         self._bus.publish(SpectrometerConfigChanged())
+        self.config_updated.emit()

@@ -21,7 +21,6 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -29,18 +28,25 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from base_qt.ui.worker_control_widget import WorkerControlWidget
-
 from app_apps.io.control_readout.ui.motion_view_model import MotionViewModel
 
 
-class MotionControls(QGroupBox):
-    def __init__(self, title: str, vm: MotionViewModel,
-                 parent: QWidget | None = None) -> None:
-        super().__init__(title, parent)
+class MotionControls(QWidget):
+    """The three rows and nothing else -- no title, no Start/Pause bar.
+
+    Both of those belong to whatever is showing this device: the popout puts the title in
+    its own title bar and the bar in its pinned header, and a block on the Devices page
+    puts the title on its group box and the bar in the block's header. Owning either here
+    meant the title appeared twice in a popout and the bar sat in a different place
+    depending on which of the two you were looking at.
+    """
+
+    def __init__(self, vm: MotionViewModel, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
         self._vm = vm
 
         outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(4)
 
         outer.addLayout(self._build_readout_row())
@@ -48,9 +54,6 @@ class MotionControls(QGroupBox):
         outer.addLayout(self._build_absolute_row())
 
         vm.position_changed.connect(self._render_position)
-        vm.worker_state_changed.connect(self._ctrl.set_status)
-        self._ctrl.set_mode(vm.connection_mode, vm.connection_reason)
-        vm.connection_mode_changed.connect(self._ctrl.set_mode)
         self._render_position(vm.position)
 
     # -- rows -------------------------------------------------------------------------
@@ -73,17 +76,12 @@ class MotionControls(QGroupBox):
         home.setToolTip("Drive to the home switch and re-reference")
         home.clicked.connect(self._vm.home)
 
-        self._ctrl = WorkerControlWidget(self._vm.start, self._vm.pause,
-                                         self._vm.resume, self._vm.stop, parent=self)
-        self._ctrl.set_status(self._vm.worker_status)
-
         row.addWidget(QLabel("Position"))
         row.addWidget(self._readout)
         row.addWidget(QLabel(self._vm.units))
         row.addWidget(read)
         row.addWidget(home)
         row.addStretch(1)
-        row.addWidget(self._ctrl)
         return row
 
     def _build_relative_row(self) -> QHBoxLayout:

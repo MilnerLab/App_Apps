@@ -11,7 +11,14 @@ TITLE = "ELL14 Rotator"
 
 
 class ELL14RotatorView(PanelView):
+    """The floating Devices-menu popout. The panel embeds the same ``MotionControls``
+    block directly, so there is one implementation of the controls, not two.
+
+    No ``vm=``: the view model is a singleton shared with the Devices page, so closing
+    this popout must hide it rather than tear those subscriptions down."""
+
     def __init__(self, vm: ELL14RotatorViewModel, parent: QWidget) -> None:
-        super().__init__(TITLE, parent, vm=vm)
+        super().__init__(TITLE, parent)
         self._vm = vm
-        self.body_layout.addWidget(MotionControls(TITLE, vm, self))
+        self.add_worker_controls(vm)
+        self.body_layout.addWidget(MotionControls(vm, self))

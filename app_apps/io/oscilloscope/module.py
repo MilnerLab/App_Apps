@@ -42,10 +42,10 @@ class OscilloscopeModule(BaseModule):
         from app_apps.io.oscilloscope.ui.oscilloscope_view import OscilloscopeView
         from app_apps.io.oscilloscope.ui.oscilloscope_view_model import OscilloscopeViewModel
         from base_qt.app.dispatcher import QtDispatcher
-        c.register_factory(OscilloscopeViewModel, lambda c: OscilloscopeViewModel(
+        c.register_singleton(OscilloscopeViewModel, lambda c: OscilloscopeViewModel(
             ctx.event_bus, c.get(QtDispatcher), c.get(OscilloscopeWorkerHandle), c.get(ScopeConfig)
         ))
-        c.register_factory(OscilloscopeView, lambda c: OscilloscopeView(
+        c.register_singleton(OscilloscopeView, lambda c: OscilloscopeView(
             c.get(OscilloscopeViewModel), parent=None
         ))
 
