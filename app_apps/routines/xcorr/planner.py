@@ -14,9 +14,9 @@ Two structural decisions live in this module:
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
+from app_apps.routines.scanning.patterns import ScanPatternError, expand_range
 from app_apps.routines.xcorr.config import (
     AXIS_LIMITS,
     LIMIT_TOLERANCE_MM,
@@ -24,9 +24,22 @@ from app_apps.routines.xcorr.config import (
     XcorrConfig,
 )
 
+#: Planning errors and pattern errors are one thing under two names: both mean "this
+#: configuration cannot produce a valid scan", both are raised before anything moves, and
+#: every caller treats them identically. ``expand_range`` now lives in the shared pattern
+#: layer and raises ``ScanPatternError``; ``PlanError`` is the name XCORR has always used
+#: for it, kept so callers and tests do not have to care where the check happened.
+PlanError = ScanPatternError
 
-class PlanError(ValueError):
-    """The configuration cannot produce a valid scan. Raised before any motion."""
+__all__ = [
+    "PlanError",
+    "ScanPlan",
+    "Setpoint",
+    "expand_range",
+    "max_frequency_hz",
+    "plan_scan",
+    "probe_step_for",
+]
 
 
 @dataclass(frozen=True)
@@ -100,46 +113,6 @@ class ScanPlan:
         """(finest, coarsest) probe step actually used across the run."""
         steps = [sp.probe_step_mm for sp in self.setpoints]
         return (min(steps), max(steps))
-
-
-def expand_range(
-    start: float, stop: float, step: float, *, name: str, include_endpoint: bool = False
-) -> tuple[float, ...]:
-    """Inclusive range from ``start`` to ``stop`` in increments of ``step``.
-
-    ``step`` is unsigned; direction comes from ``stop - start``. ``stop`` is
-    included when the step divides the interval to within a relative tolerance —
-    without that, ``0..10`` by ``0.1`` would silently drop its endpoint to float
-    error. Positions are computed as ``start + i*step`` rather than accumulated,
-    so error does not grow along the scan.
-
-    With ``include_endpoint`` the true ``stop`` is *always* the last position, even
-    when the step does not divide the interval — it is appended as a final, shorter
-    step. Used for the probe sweep so every setpoint ends exactly on ``probe_stop_mm``
-    regardless of its adaptive step, which lets analysis interpolate onto and truncate
-    to one common right edge. Left off for grating/delay, where a stray short final
-    step on a physical outer axis is undesirable.
-    """
-    if step <= 0:
-        raise PlanError(f"{name}: step must be > 0, got {step}")
-
-    span = stop - start
-    if span == 0.0:
-        return (start,)
-
-    n_steps = abs(span) / step
-    # Snap to an integer count when we are within a hair of one, so the endpoint
-    # survives; otherwise truncate, leaving the last point short of `stop`.
-    n_int = round(n_steps)
-    count = n_int if math.isclose(n_steps, n_int, rel_tol=1e-9, abs_tol=1e-9) else int(n_steps)
-
-    direction = math.copysign(1.0, span)
-    positions = [start + direction * step * i for i in range(count + 1)]
-    # Append the exact endpoint when the truncating step fell short of it (a genuine
-    # miss, not float noise the snap above already absorbed).
-    if include_endpoint and not math.isclose(positions[-1], stop, rel_tol=1e-9, abs_tol=1e-9):
-        positions.append(stop)
-    return tuple(positions)
 
 
 #: Speed of light in mm/s — for the double-pass Nyquist step.

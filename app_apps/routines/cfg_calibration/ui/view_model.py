@@ -32,7 +32,7 @@ class CfgCalibrationViewModel(PanelViewModel):
 
     def start(self) -> None:
         if self._routine is not None:
-            self._routine.stop()
+            self._routine.dispose()
         self._routine = CfgCalibrationRoutine(
             bus=self._bus,
             handle=self._handle,

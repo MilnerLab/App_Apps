@@ -4,6 +4,7 @@ from typing import Callable, ClassVar
 
 from base_core.ipc.message import Message, Reply, Request
 from base_core.ipc.worker_handle import BaseWorkerHandle
+from control_readout.base.stage_spec import StageSpec
 
 
 class MotorizedStageHandle(BaseWorkerHandle):
@@ -16,6 +17,16 @@ class MotorizedStageHandle(BaseWorkerHandle):
 
     REQUEST_MOVE_EVENT: ClassVar[type]
     POS_UPDATE_MSG: ClassVar[type[Message]]
+    #: The stage's own :class:`StageSpec`, re-exported from its Devices package so that
+    #: anything holding a handle can ask what units it counts in and how far it may
+    #: travel, without a lookup table on the application side. Subclasses assign the
+    #: ``SPEC`` from their stage's ``spec.py`` — never a fresh literal.
+    SPEC: ClassVar[StageSpec]
+    #: The last position the worker reported, in the stage's own units; ``None`` until the
+    #: first report. Workers report once after every move or home and on a position query,
+    #: so between moves this is where the stage is. Lets a late subscriber (a recorder
+    #: starting mid-session) know the position without waiting for the next move.
+    last_position: float | None = None
 
     def subscribe(self) -> None:
         self._subscribe(self.REQUEST_MOVE_EVENT, self._on_request_move)
@@ -59,10 +70,12 @@ class MotorizedStageHandle(BaseWorkerHandle):
         """Override to react to a successful home (default: no-op)."""
 
     def _on_position_update(self, msg: Message) -> None:
-        self._bus.publish(self._build_position_event(self._msg_value(msg)))
+        self.last_position = self._msg_value(msg)
+        self._bus.publish(self._build_position_event(self.last_position))
 
     def _on_position_reply(self, reply: Reply) -> None:
-        self._bus.publish(self._build_position_event(self._msg_value(reply)))
+        self.last_position = self._msg_value(reply)
+        self._bus.publish(self._build_position_event(self.last_position))
 
     # --- hooks: subclasses implement against their own message types -----
 

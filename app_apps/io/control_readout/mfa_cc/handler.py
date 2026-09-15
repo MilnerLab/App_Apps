@@ -3,6 +3,7 @@ from __future__ import annotations
 from base_core.ipc.device_worker_handle import DeviceHandleMixin
 
 from base_core.framework.events.event_bus import EventBus
+from control_readout.esp_301.mfa_cc.spec import SPEC as STAGE_SPEC
 from control_readout.esp_301.mfa_cc.messages import (
     GetCurrentPosMFACC,
     HomeMFACC,
@@ -23,6 +24,7 @@ class MfaccHandle(DeviceHandleMixin, MotorizedStageHandle):
     """Main-process handle to the MFA-CC ESP301 linear stage."""
 
     WORKER_ID = "mfacc"
+    SPEC = STAGE_SPEC
     REQUEST_MOVE_EVENT = RequestMoveMfacc
     POS_UPDATE_MSG = MFACCPosUpdate
 

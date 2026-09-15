@@ -107,7 +107,7 @@ class XcorrViewModel(PanelViewModel):
             return
         # A prior, finished routine still holds a TaskRunner thread — retire it.
         if self._routine is not None:
-            self._routine.stop()
+            self._routine.dispose()
             self._routine = None
 
         cfg = self._settings.to_config()
@@ -146,7 +146,7 @@ class XcorrViewModel(PanelViewModel):
 
     def on_close(self) -> None:
         if self._routine is not None:
-            self._routine.stop()
+            self._routine.dispose()
             self._routine = None
         super().on_close()
 

@@ -1,44 +1,50 @@
 """``XcorrRoutine`` — the cross-correlation grid scan.
 
-Deliberately **zero** ``Step`` subclasses. With the grid flattened at plan time
-there is nothing left for ``Step`` to sequence: ``Prepare -> Scan -> Finalize``
-would be three method calls in a state-machine costume, and ``Step`` is a
-three-method ABC with no result, no completion signal and no error channel.
-``BaseRoutine`` stays, for its serial ``TaskRunner`` and its ``_unsubs`` discipline.
-The whole run is one method dispatched onto that thread, wrapped in ``try/finally``
-— which is what actually delivers the flush-and-park guarantee (R3) that step
-transitions do not (defect G16, XCORR_TASKS.md §7).
+The whole run is one method dispatched onto ``BaseRoutine``'s serial ``TaskRunner``,
+wrapped in ``run_lifecycle`` — which is what delivers the flush-and-park guarantee (R3).
+The sequence is ordinary Python: a loop over setpoints containing a loop over probe
+points. It is written that way because that is what it *is*; a nested grid does not map
+onto a flat list of phases, and pretending otherwise was what forced the grid to be
+flattened at plan time in the first place.
 
-Two framework holes are worked *with* rather than around:
+Three things this routine no longer owns, and where they went:
 
-* **``BaseRoutine.stop()`` cannot interrupt a running loop** (G16). ``TaskRunner``'s
-  ``_STOP`` goes to the *back* of the queue, so ``stop()`` returns after 5 s having
-  achieved nothing while a daemon thread keeps driving hardware. Hence
-  :attr:`_abort`, a ``threading.Event`` set from the *caller's* thread — never
-  dispatched — and checked at every probe point.
-* **A moving stage cannot be aborted** (G15). ``Device._lock`` *is*
-  ``controller._lock``, and ``move_to`` holds it across a blocking
-  ``wait_for_motion``, so an abort from another thread waits for the move it is
-  cancelling. This is **accepted, not fixed**: abort takes effect at the next probe
-  point. Do not engineer around it without revisiting that decision.
+* **Run control** — pause, resume, abort, step — is ``RunControl`` on ``BaseRoutine``.
+  This routine only chooses *where* the checkpoints are: between probe points, and
+  between setpoints.
+* **Moving a stage** is :class:`TranslationStage`, which validates against the stage's
+  own soft limits (from the Devices repo) and blocks until motion is genuinely complete.
+* **Walking an axis through a list of positions** is :class:`TranslationStageScan`.
+
+One framework hole is worked *with* rather than around:
+
+* **A moving stage cannot be aborted** (G15). ``Device._lock`` *is* ``controller._lock``,
+  and ``move_to`` holds it across a blocking ``wait_for_motion``, so an abort from another
+  thread waits for the move it is cancelling. This is **accepted, not fixed**: abort takes
+  effect at the next probe point. Do not engineer around it without revisiting that
+  decision.
 """
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from pathlib import Path
-from typing import Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from base_core.framework.events.event_bus import EventBus
 from base_core.framework.routines.routine_base import BaseRoutine, routine_thread
+from base_core.framework.routines.run_control import ScanAborted
 from base_core.framework.serialization.h5_utils import now_utc_iso
+from base_core.ipc.blocking import wait_for_status
 from base_core.ipc.connection_mode import ConnectionMode
 from base_core.ipc.worker_handle import BaseWorkerHandle, WorkerStatus
 
-from app_apps.routines.xcorr.config import AXIS_LIMITS, XcorrConfig
+from app_apps.routines.axes import AXIS_ROLES
+from app_apps.routines.scanning.translation_stage import TranslationStage
+from app_apps.routines.scanning.translation_stage_scan import TranslationStageScan
+from app_apps.routines.xcorr.config import XcorrConfig
 from app_apps.routines.xcorr.events import (
     XcorrFailed,
     XcorrFinished,
@@ -74,10 +80,11 @@ class XcorrError(RuntimeError):
 class XcorrRoutine(BaseRoutine):
     """Walk the (grating, delay) grid, sweep the probe at each, write one HDF5 group.
 
-    The role binding *is* this constructor signature — the parameter names are the
-    roles. There is no ``AxisRole`` enum and no binding config: that would be an
-    abstraction layer over three integers that have not changed since the hardware
-    was installed, and the axis constants in the three workers are already correct.
+    Which handle plays which role *is* this constructor signature — the parameter names
+    are the roles. What each of those stages can do (its model, units and soft limits)
+    comes from the stage's own package in the Devices repo, reached through the handle's
+    ``SPEC``; what it is called and how far it jogs comes from ``routines/axes.py``.
+    Nothing about the hardware is restated here.
     """
 
     def __init__(
@@ -91,9 +98,18 @@ class XcorrRoutine(BaseRoutine):
         spectrometer: "SpectrometerWorkerHandle | None" = None,
     ) -> None:
         self._cfg = config
-        self._probe = probe
-        self._delay = delay
-        self._grating = grating
+        # One TranslationStage per role. ``before_move`` is the same on all three
+        # deliberately: it is the single choke point through which every commanded move
+        # passes, so nothing can start moving without the spectrum gate shutting first.
+        self._probe = TranslationStage(
+            probe, role="probe", timeout_s=config.timeout_s,
+            settle_s=config.settle_s, before_move=self._gate_close)
+        self._delay = TranslationStage(
+            delay, role="delay", timeout_s=config.timeout_s,
+            settle_s=config.settle_s, before_move=self._gate_close)
+        self._grating = TranslationStage(
+            grating, role="grating", timeout_s=config.timeout_s,
+            settle_s=config.settle_s, before_move=self._gate_close)
         self._scope = scope
         #: Optional and purely additive. When present, the free-running spectrum stream
         #: is recorded into ``/spectra`` alongside the scan; when absent — or when it
@@ -109,36 +125,17 @@ class XcorrRoutine(BaseRoutine):
         #: What to ask the scope worker for. What it actually connected to is read back
         #: off the handle after start, and only that goes into the run's provenance.
         self._scope_mode = config.scope_mode
-
-        # Set from the caller's thread, read on the routine thread. NOT dispatched —
-        # a dispatched abort would queue behind the very loop it is meant to stop.
-        self._abort = threading.Event()
-        # Pause gate, same threading discipline as _abort: set = free to run,
-        # cleared = paused. The routine thread blocks on it at each probe point, so a
-        # pause (like an abort) takes effect at the next point, never mid-move. Starts
-        # set so a fresh run is never born paused.
-        self._resume = threading.Event()
-        self._resume.set()
-        # Step mode: the operator advances the run one grating setpoint at a time, so a
-        # mirror can be tweaked at each one. The Event is the MODE; the Semaphore is the
-        # queue of presses. Two objects rather than one because they answer different
-        # questions -- "are we stepping?" and "how many advances are owed?" -- and a
-        # press made before the routine reaches the gate must not be lost.
-        self._step_mode = threading.Event()
-        self._step_permits = threading.Semaphore(0)
-        self._running = threading.Event()
         self._run_path: Path | None = None
         super().__init__(bus)
 
     # -- public API -------------------------------------------------------
-
-    @property
-    def is_running(self) -> bool:
-        return self._running.is_set()
-
-    @property
-    def is_paused(self) -> bool:
-        return self._running.is_set() and not self._resume.is_set()
+    #
+    # is_running / is_paused / is_step_mode and pause / resume / abort / step /
+    # set_step_mode are all inherited from BaseRoutine. Note what they now mean here:
+    # a pause or an abort lands at the **next probe point** (G15), because an in-flight
+    # move cannot be interrupted and neither can an in-flight acquisition. The current
+    # combination is flushed with ``status="aborted"`` before the file closes, so no
+    # completed data is lost.
 
     @property
     def run_path(self) -> Path | None:
@@ -147,84 +144,17 @@ class XcorrRoutine(BaseRoutine):
 
     def start_scan(self) -> None:
         """Begin a run. Returns immediately; the scan executes on the routine thread."""
-        if self._running.is_set():
+        if self.is_running:
             log.warning("XcorrRoutine.start_scan() ignored — a run is already in progress")
             return
-        self._abort.clear()
-        # Drain permits left over from a previous run. A press that arrived after the
-        # last setpoint would otherwise be spent silently on the first gate of this one,
-        # advancing past a position the operator never looked at.
-        while self._step_permits.acquire(blocking=False):
-            pass
+        # Arm on the caller's thread, before dispatching, so a second start_scan() cannot
+        # slip through the guard above while the first is still queued.
+        self._control.begin()
         self._run_scan()
 
-    def abort(self) -> None:
-        """Request an orderly stop.
-
-        Takes effect at the **next probe point** (G15): an in-flight move cannot be
-        interrupted, and neither can an in-flight acquisition. The current
-        combination is flushed with ``status="aborted"`` before the file closes, so
-        no completed data is lost.
-        """
-        if not self._running.is_set():
-            return
-        log.info("XcorrRoutine: abort requested — will stop at the next probe point")
-        self._abort.set()
-        # If a pause is in force the routine thread is parked in _wait_while_paused();
-        # release it so it wakes, sees the abort and unwinds. Without this an abort
-        # requested while paused would hang until someone resumed.
-        self._resume.set()
-
-    def pause(self) -> None:
-        """Request a pause. Takes effect at the **next probe point** (like abort).
-
-        An in-flight move or acquisition is never interrupted; the routine parks at
-        the next point until :meth:`resume`. Stages hold position while paused.
-        """
-        if not self._running.is_set():
-            return
-        log.info("XcorrRoutine: pause requested — will hold at the next probe point")
-        self._resume.clear()
-
-    def resume(self) -> None:
-        """Lift a pause; the scan continues from where it parked."""
-        if not self._resume.is_set():
-            log.info("XcorrRoutine: resuming scan")
-        self._resume.set()
-
-    @property
-    def is_step_mode(self) -> bool:
-        return self._step_mode.is_set()
-
-    def set_step_mode(self, enabled: bool) -> None:
-        """Turn operator-advanced stepping between grating setpoints on or off.
-
-        Takes effect at the next setpoint, so an in-progress probe sweep always
-        finishes — arming this mid-sweep never strands a half-written group. Turning it
-        *off* frees a routine already parked at the gate within one poll interval, so it
-        runs on without waiting for a press it no longer needs.
-        """
-        if enabled == self._step_mode.is_set():
-            return
-        if enabled:
-            log.info("XcorrRoutine: step mode ON — each grating position waits for step()")
-            self._step_mode.set()
-            return
-        log.info("XcorrRoutine: step mode OFF — free running")
-        self._step_mode.clear()
-
-    def step(self, n: int = 1) -> None:
-        """Permit ``n`` more setpoints (grating positions). No-op unless running.
-
-        Safe to call ahead of the routine reaching the gate: permits accumulate, so
-        the count is what the operator pressed, not what happened to be timed right.
-        """
-        if not self._running.is_set():
-            return
-        for _ in range(max(1, n)):
-            self._step_permits.release()
-
-    def _hold_for_alignment(self, si: int, sp: Setpoint, n_setpoints: int) -> None:
+    def _hold_for_alignment(
+        self, si: int, sp: Setpoint, probe_scan: TranslationStageScan, n_setpoints: int
+    ) -> None:
         """Park the probe mid-sweep and wait for the operator (step mode only).
 
         The probe is driven to the **centre of this setpoint's commanded sweep** before
@@ -236,15 +166,19 @@ class XcorrRoutine(BaseRoutine):
 
         The sweep then starts from its true beginning; the mid-point park costs one
         extra probe move per setpoint and nothing else.
+
+        The gate is shut for the duration of the hold so an operator who spends ten
+        minutes on a mirror does not bury the run under spectra attributed to one
+        stationary point.
         """
-        if not self._step_mode.is_set():
+        if not self.is_step_mode:
             return
-        probe_cmd = sp.probe_base_mm[len(sp.probe_base_mm) // 2] + sp.probe_offset_mm
+        probe_cmd = probe_scan.centre
         log.info(
             "XCORR setpoint %d/%d: parking probe at %.4f mm (sweep centre) for alignment",
             si + 1, n_setpoints, probe_cmd,
         )
-        self._move(self._probe, probe_cmd, "probe")
+        self._probe.move_to(probe_cmd)
         # Published only once the stages have settled, so a subscriber that starts
         # streaming here is never looking at an optic in flight.
         self._bus.publish(XcorrSteppingHold(
@@ -255,66 +189,29 @@ class XcorrRoutine(BaseRoutine):
             delay_mm=sp.delay_mm,
             probe_mm=probe_cmd,
         ))
+        log.info(
+            "XCORR holding at setpoint %d/%d (grating %.4f mm) — waiting for step()",
+            si + 1, n_setpoints, sp.grating_mm,
+        )
         try:
-            self._wait_for_step(si, n_setpoints, sp.grating_mm)
+            self._control.wait_for_step(on_hold=self._gate_close)
         finally:
             # In a finally so an abort raised at the gate still tells the display to
             # stop; a viewer left believing it is still holding keeps polling forever.
             self._bus.publish(XcorrSteppingHold(
                 holding=False, setpoint_index=si, n_setpoints=n_setpoints))
 
-    def _wait_for_step(self, si: int, n_setpoints: int, grating_mm: float) -> None:
-        """Block between setpoints until a step permit arrives (step mode only).
-
-        Same shape as :meth:`_wait_while_paused`: the spectrum gate is shut for the
-        duration so an operator who spends ten minutes on a mirror does not bury the
-        run under spectra with nothing to attribute them to, and the wait polls so an
-        abort raised while parked is noticed. Consumes exactly one permit per setpoint.
-        """
-        if not self._step_mode.is_set():
-            return
-        log.info(
-            "XCORR holding at setpoint %d/%d (grating %.4f mm) — waiting for step()",
-            si + 1, n_setpoints, grating_mm,
-        )
-        self._gate_close()
-        while not self._step_permits.acquire(timeout=_START_POLL_S):
-            if self._abort.is_set():
-                return
-            if not self._step_mode.is_set():
-                return
-
-    def _wait_while_paused(self) -> None:
-        """Block the routine thread while paused, staying responsive to abort.
-
-        Polls rather than a bare ``wait()`` so an abort raised while paused is noticed
-        promptly — ``abort()`` also sets ``_resume``, but polling keeps the contract
-        robust to either order.
-
-        A pause also shuts the spectrum gate. The stages *are* stationary, so the
-        spectra would be honestly labelled, but an operator who pauses for ten minutes
-        would otherwise bury one probe point under thousands of rows. The gate reopens
-        at the next probe point like any other.
-        """
-        if self._resume.is_set():
-            return
-        self._gate_close()
-        while not self._resume.wait(_START_POLL_S):
-            if self._abort.is_set():
-                return
-
     # -- the run ----------------------------------------------------------
 
     @routine_thread
     def _run_scan(self) -> None:
-        self._running.set()
         writer: XcorrH5Writer | None = None
         try:
             plan = plan_scan(self._cfg)
         except PlanError as exc:
             # Refused before anything moved — which is the entire point of R2/S1.
             log.error("XCORR plan rejected: %s", exc)
-            self._running.clear()
+            self._control.end()
             self._bus.publish(XcorrFailed(error=str(exc)))
             return
         except Exception as exc:
@@ -324,11 +221,23 @@ class XcorrRoutine(BaseRoutine):
             # subprocess would be orphaned holding COM7 (defect G25). Publish and
             # clear like any other failure so the run always ends cleanly.
             log.exception("XCORR planning failed")
-            self._running.clear()
+            self._control.end()
             self._bus.publish(XcorrFailed(error=str(exc)))
             return
 
-        try:
+        # run_lifecycle owns the rest: XcorrFailed on any raise, the collector
+        # unregistered whatever happens, the run marked stopped. Unregistering first is
+        # not optional — while we are a registered consumer the coordinator holds every
+        # frame waiting for our ack, so a run that ended (cleanly, aborted or failed)
+        # must stop consuming or it stalls the stream for the alignment view too.
+        with self.run_lifecycle(
+            lambda exc: XcorrFailed(
+                error=str(exc),
+                path=str(self._run_path or ""),
+                n_groups_written=writer.n_groups_written if writer else 0,
+            ),
+            cleanup=self._stop_collector,
+        ):
             for w in plan.warnings:
                 log.warning("XCORR plan warning: %s", w)
 
@@ -367,64 +276,53 @@ class XcorrRoutine(BaseRoutine):
                     # Before mark_finished, so the drop count and the last spectra are
                     # in the file by the time the run is stamped complete.
                     self._stop_recorder()
-                writer.mark_finished(aborted=self._abort.is_set())
+                writer.mark_finished(aborted=self._control.is_aborting)
 
+            # Stages are left wherever they stopped — parked, not homed. R3 asks for
+            # stationary, and every move in this loop is blocking, so by the time we are
+            # here nothing is moving.
             self._bus.publish(XcorrFinished(
                 path=str(self._run_path),
-                aborted=self._abort.is_set(),
+                aborted=self._control.is_aborting,
                 n_groups_written=writer.n_groups_written,
                 warnings=plan.warnings,
             ))
-        except Exception as exc:
-            log.exception("XCORR run failed")
-            self._bus.publish(XcorrFailed(
-                error=str(exc),
-                path=str(self._run_path or ""),
-                n_groups_written=writer.n_groups_written if writer else 0,
-            ))
-        finally:
-            # Unregister before anything else: while we are a registered consumer the
-            # coordinator holds every frame waiting for our ack, so a run that ended —
-            # cleanly, aborted or failed — must stop consuming or it stalls the stream
-            # for the alignment view too.
-            self._stop_collector()
-            # Stages are left wherever they stopped — parked, not homed. R3 asks for
-            # stationary, and every move in this loop is blocking, so by the time we
-            # are here nothing is moving.
-            self._running.clear()
 
     def _scan(self, plan: ScanPlan, writer: XcorrH5Writer) -> None:
         """The grid walk. Every exit path leaves the current group flushed."""
         n_points = plan.n_points
         points_done = 0
+        n_setpoints = len(plan.setpoints)
         for si, sp in enumerate(plan.setpoints):
-            if self._abort.is_set():
-                log.info("XCORR aborted before setpoint %d/%d", si + 1, len(plan.setpoints))
-                break
-
             utc_start = now_utc_iso()
-            log.info(
-                "XCORR setpoint %d/%d: grating=%.4f mm, delay=%.4f mm (base %.4f + "
-                "correction %.4f); %d probe pts @ %.3f mm (f_max=%.1f GHz)",
-                si + 1, len(plan.setpoints), sp.grating_mm, sp.delay_mm,
-                sp.delay_base_mm, sp.delay_correction_mm,
-                len(sp.probe_base_mm), sp.probe_step_mm, sp.max_freq_ghz,
-            )
+            probe_scan = self._probe_scan(si, sp)
+            try:
+                # Between setpoints is the coarser of this routine's two checkpoints.
+                # Nothing has been written for this setpoint yet, so stopping here simply
+                # ends the run — there is no partial group to flush.
+                self._checkpoint()
 
-            # Grating first, then delay: the delay position is a function of the
-            # grating position, so this is the order that makes the pair consistent.
-            self._move(self._grating, sp.grating_mm, "grating")
-            self._move(self._delay, sp.delay_mm, "delay")
+                log.info(
+                    "XCORR setpoint %d/%d: grating=%.4f mm, delay=%.4f mm (base %.4f + "
+                    "correction %.4f); %d probe pts @ %.3f mm (f_max=%.1f GHz)",
+                    si + 1, n_setpoints, sp.grating_mm, sp.delay_mm,
+                    sp.delay_base_mm, sp.delay_correction_mm,
+                    len(sp.probe_base_mm), sp.probe_step_mm, sp.max_freq_ghz,
+                )
 
-            # Blocks here in step mode until the operator releases this setpoint. A no-op
-            # otherwise, so the free-running scan is unchanged.
-            self._hold_for_alignment(si, sp, len(plan.setpoints))
-            if self._abort.is_set():
-                log.info("XCORR aborted while stepping at setpoint %d/%d",
-                         si + 1, len(plan.setpoints))
+                # Grating first, then delay: the delay position is a function of the
+                # grating position, so this is the order that makes the pair consistent.
+                self._grating.move_to(sp.grating_mm)
+                self._delay.move_to(sp.delay_mm)
+
+                # Blocks here in step mode until the operator releases this setpoint. A
+                # no-op otherwise, so the free-running scan is unchanged.
+                self._hold_for_alignment(si, sp, probe_scan, n_setpoints)
+            except ScanAborted:
+                log.info("XCORR aborted before sweeping setpoint %d/%d", si + 1, n_setpoints)
                 break
 
-            rows, aborted = self._sweep_probe(plan, si, sp, points_done, n_points)
+            rows, aborted = self._sweep_probe(plan, si, sp, probe_scan, points_done, n_points)
             points_done += len(rows)
 
             writer.write_group(
@@ -448,6 +346,7 @@ class XcorrRoutine(BaseRoutine):
         plan: ScanPlan,
         si: int,
         sp: Setpoint,
+        probe_scan: TranslationStageScan,
         points_done: int,
         n_points: int,
     ) -> tuple[list[tuple[float, float, float, int]], bool]:
@@ -456,47 +355,71 @@ class XcorrRoutine(BaseRoutine):
         ``points_done`` is the run-wide count completed before this setpoint, so the
         published progress is monotonic across setpoints even when their sweeps differ
         in length. Returns the rows collected and whether an abort cut it short.
+
+        The abort is caught here rather than allowed to propagate because the rows
+        already collected are worth keeping: the caller writes them out as a group with
+        ``status="aborted"``, so a run stopped halfway through a sweep still leaves
+        every completed point on disk.
         """
-        n_probe = len(sp.probe_base_mm)
         rows: list[tuple[float, float, float, int]] = []
-        for pi, p_base in enumerate(sp.probe_base_mm):
-            # Hold here while paused (stages stationary), then re-check abort: a pause
-            # can be turned into an abort, and _wait_while_paused returns on abort too.
-            self._wait_while_paused()
-            if self._abort.is_set():
-                log.info(
-                    "XCORR aborted at probe point %d/%d of setpoint %d",
-                    pi + 1, n_probe, si + 1,
-                )
-                return rows, True
+        try:
+            for pt in probe_scan:
+                mean, std, n = self._acquire_point(pt.commanded)
+                rows.append((pt.commanded, mean, std, n))
 
-            # The probe overlap tracks the grating: the base sweep is the delay axis,
-            # but the stage is commanded to base + grating + intercept (planner has
-            # already validated every such position against the soft limits).
-            p_cmd = p_base + sp.probe_offset_mm
-            self._move(self._probe, p_cmd, "probe")
-            # All three stages are now stationary and stay that way until the next
-            # _move, so this is the window in which a spectrum can be attributed to a
-            # position. It spans the scope acquisition, which is the bulk of the dwell.
-            self._gate_open(sp, si, pi, p_cmd)
-            mean, std, n = self._acquire_point(p_cmd)
-            rows.append((p_cmd, mean, std, n))
-
-            self._bus.publish(XcorrProgress(
-                setpoint_index=si,
-                n_setpoints=len(plan.setpoints),
-                probe_index=pi,
-                n_probe=n_probe,
-                points_done=points_done + pi + 1,
-                n_points=n_points,
-                grating_mm=sp.grating_mm,
-                delay_mm=sp.delay_mm,
-                delay_base_mm=sp.delay_base_mm,
-                probe_mm=p_cmd,
-                probe_base_mm=p_base,
-                v_mean_pos=mean,
-            ))
+                self._bus.publish(XcorrProgress(
+                    setpoint_index=si,
+                    n_setpoints=len(plan.setpoints),
+                    probe_index=pt.index,
+                    n_probe=pt.n,
+                    points_done=points_done + pt.index + 1,
+                    n_points=n_points,
+                    grating_mm=sp.grating_mm,
+                    delay_mm=sp.delay_mm,
+                    delay_base_mm=sp.delay_base_mm,
+                    probe_mm=pt.commanded,
+                    probe_base_mm=pt.base,
+                    v_mean_pos=mean,
+                ))
+        except ScanAborted:
+            log.info(
+                "XCORR aborted at probe point %d/%d of setpoint %d",
+                probe_scan.index + 1, probe_scan.n, si + 1,
+            )
+            return rows, True
         return rows, False
+
+    def _probe_scan(self, si: int, sp: Setpoint) -> TranslationStageScan:
+        """The probe sweep for one setpoint.
+
+        The probe overlap tracks the grating: the base sweep is the delay axis, but the
+        stage is commanded to ``base + grating + intercept``. The planner has already
+        validated every such position against the soft limits, which is what lets this
+        walk be a plain traversal of a fixed list.
+
+        ``before_move`` is this routine's checkpoint, so the operator's pause and abort
+        take effect between probe points and never mid-move. ``on_settled`` fires with
+        all three stages stationary — and they stay that way until the next iteration —
+        so that is the window in which a spectrum can honestly be attributed to a
+        position. It spans the scope acquisition, which is the bulk of the dwell.
+        """
+        return TranslationStageScan(
+            self._probe,
+            sp.probe_base_mm,
+            offset=sp.probe_offset_mm,
+            before_move=self._checkpoint,
+            on_settled=lambda pt: self._gate_open(sp, si, pt.index, pt.commanded),
+        )
+
+    def _checkpoint(self) -> None:
+        """This routine's checkpoint: the base one, plus shutting the spectrum gate.
+
+        The stages *are* stationary while paused, so spectra recorded then would be
+        honestly labelled — but an operator who pauses for ten minutes would bury one
+        probe point under thousands of rows. The gate reopens at the next probe point
+        like any other.
+        """
+        self.checkpoint(on_hold=self._gate_close)
 
     # -- acquisition ------------------------------------------------------
 
@@ -646,9 +569,9 @@ class XcorrRoutine(BaseRoutine):
         # holds (the two messages are handled on different subprocess threads, so sending
         # them in order does not make them apply in order).
         handles = (
-            (self._grating, "grating (UTS150CC)"),
-            (self._delay, "delay (MFA-CC)"),
-            (self._probe, "probe (FMS300PP)"),
+            (self._grating.handle, "grating (UTS150CC)"),
+            (self._delay.handle, "delay (MFA-CC)"),
+            (self._probe.handle, "probe (FMS300PP)"),
             (self._scope, "scope"),
         )
         for handle, label in handles:
@@ -687,84 +610,11 @@ class XcorrRoutine(BaseRoutine):
 
     @staticmethod
     def _wait_for_running(handle: BaseWorkerHandle) -> bool:
-        """Poll until the handle reports RUNNING, or the start timeout expires.
-
-        Polling rather than event-driven on purpose. ``WorkerState`` does publish a
-        no-arg event on every transition, but a ``_start()`` that *raises* in the
-        subprocess sends no reply at all — ``BaseWorker._on_start_cmd`` calls
-        ``_start()`` before ``_reply_ok`` with no try/except, and the exception is
-        swallowed by the worker's ``TaskRunner``. So the failure case produces no
-        transition and no error reply, and there would be nothing to wake on. The
-        timeout is the only thing that distinguishes it from a slow start.
-        """
-        clock = threading.Event()
-        deadline = time.monotonic() + _START_TIMEOUT_S
-        while time.monotonic() < deadline:
-            if handle.state == WorkerStatus.RUNNING:
-                return True
-            clock.wait(_START_POLL_S)
-        return handle.state == WorkerStatus.RUNNING
-
-    def _move(self, handle, position: float, role: str) -> None:
-        """Blocking, reply-correlated absolute move, plus the configured dwell.
-
-        Blocking on the routine's own ``TaskRunner`` thread is safe — replies arrive
-        on the IPC reader thread, so nothing deadlocks. **Do not** call this from an
-        EventBus handler, which runs on the publisher's thread.
-
-        Closing the spectrum gate here rather than at the call sites is deliberate: this
-        is the single choke point for all three axes, so no move can start without the
-        gate shutting. Re-opening it is the caller's job, because the positions to stamp
-        are only known once the *whole* move sequence for a point is complete.
-        """
-        self._gate_close()
-        lo, hi = AXIS_LIMITS[role]
-        if not (lo <= position <= hi):
-            # Belt and braces: the planner already refused out-of-range setpoints,
-            # so reaching here means a bug, not a bad config.
-            raise XcorrError(f"{role} setpoint {position:.4f} mm outside [{lo}, {hi}]")
-
-        self._call(
-            lambda ok, err: handle.move_to(position, on_done=ok, on_error=err),
-            what=f"{role} move to {position:.4f} mm",
+        """Poll until the handle reports RUNNING, or the start timeout expires."""
+        return wait_for_status(
+            handle, WorkerStatus.RUNNING,
+            timeout_s=_START_TIMEOUT_S, poll_s=_START_POLL_S,
         )
-        if self._cfg.settle_s > 0:
-            threading.Event().wait(self._cfg.settle_s)
-
-    def _call(
-        self,
-        submit: Callable[[Callable[[], None], Callable[[str], None]], None],
-        *,
-        what: str,
-    ) -> None:
-        """Turn an async ``_request`` into a blocking call, correlated on the reply.
-
-        There is no in-repo precedent for this: every other handle's ``_on_reply`` is
-        ``pass``, discarding both the result and the error. The framework already
-        supports it — ``BaseWorkerHandle._request(msg, on_reply, on_error)`` takes
-        both callbacks — this is simply the first caller to use them.
-
-        The alternative, publishing a completion event, cannot work: the event
-        carries no request id and no target position, so it cannot be correlated to
-        a specific move, and it races the device panel's own live ``RequestMove*``
-        subscription.
-        """
-        done = threading.Event()
-        error: list[str] = []
-
-        def on_ok() -> None:
-            done.set()
-
-        def on_err(message: str) -> None:
-            error.append(message)
-            done.set()
-
-        submit(on_ok, on_err)
-
-        if not done.wait(self._cfg.timeout_s):
-            raise XcorrError(f"{what}: no reply within {self._cfg.timeout_s:.0f}s")
-        if error:
-            raise XcorrError(f"{what}: {error[0]}")
 
     def _esp301_provenance(self) -> dict[str, object]:
         """What is known about the controller without adding IPC (R5, partial).
@@ -774,23 +624,22 @@ class XcorrRoutine(BaseRoutine):
         here is the *configuration in force* — port, role-to-axis binding and the
         limits the plan was validated against — which is what makes a file
         reinterpretable. Extend when the query messages exist.
+
+        Every per-axis value is read from the axis registry rather than restated, so a
+        run file cannot claim limits the run was not actually validated against.
         """
-        return {
+        out: dict[str, object] = {
             "port": "COM2",
             "baud": 921600,
-            "axis_probe": 1,
-            "axis_delay": 2,
-            "axis_grating": 3,
-            "model_probe": "FMS300PP",
-            "model_delay": "MFA-CC",
-            "model_grating": "UTS150CC",
-            "limits_probe_mm": list(AXIS_LIMITS["probe"]),
-            "limits_delay_mm": list(AXIS_LIMITS["delay"]),
-            "limits_grating_mm": list(AXIS_LIMITS["grating"]),
             "limits_source": "read live 2026-07-19; see XCORR_SPEC.md §3.1",
             "acquisition": "live — positive-mean per trace, reduced from the scope's "
                            "shared-memory trace stream",
         }
+        for axis, role in AXIS_ROLES.items():
+            out[f"axis_{axis.value}"] = role.esp_axis
+            out[f"model_{axis.value}"] = role.spec.model
+            out[f"limits_{axis.value}_mm"] = list(role.spec.limits)
+        return out
 
     def _scope_provenance(self) -> dict[str, object]:
         """The scope configuration in force (R5, partial).

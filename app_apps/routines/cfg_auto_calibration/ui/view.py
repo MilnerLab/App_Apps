@@ -29,7 +29,7 @@ from base_qt.ui.panel_view import PanelView
 from base_qt.ui.toggle_switch import ToggleSwitch
 from base_qt.ui.worker_control_widget import WorkerControlWidget
 
-from app_apps.routines.cfg_auto_calibration.arms import ARM_SPECS, Arm
+from app_apps.routines.axes import AXIS_ROLES, Axis
 from app_apps.routines.cfg_auto_calibration.target import CfgTarget, TargetMode
 from app_apps.routines.cfg_auto_calibration.ui.view_model import CfgAutoCalibrationViewModel
 
@@ -48,8 +48,8 @@ class CfgAutoCalibrationView(PanelView):
         super().__init__("CFG Auto-Calibration", parent, vm=vm)
         self._vm = vm
         self._mode = TargetMode.CENTER_BANDWIDTH
-        self._pos_spin: dict[Arm, QDoubleSpinBox] = {}
-        self._worker_ctrl: dict[Arm, WorkerControlWidget] = {}
+        self._pos_spin: dict[Axis, QDoubleSpinBox] = {}
+        self._worker_ctrl: dict[Axis, WorkerControlWidget] = {}
 
         self.body_layout.addWidget(self._build_target_group())
         self.body_layout.addWidget(self._build_manual_group())
@@ -156,13 +156,13 @@ class CfgAutoCalibrationView(PanelView):
         box = QGroupBox("Manual adjustment")
         v = QVBoxLayout(box)
         v.setSpacing(8)
-        for arm in (Arm.GRATING, Arm.DELAY, Arm.PROBE):
+        for arm in (Axis.GRATING, Axis.DELAY, Axis.PROBE):
             v.addWidget(self._build_stage_group(arm))
         return box
 
-    def _build_stage_group(self, arm: Arm) -> QGroupBox:
-        spec = ARM_SPECS[arm]
-        box = QGroupBox(f"{spec.label}  ·  {spec.stage} (axis {spec.axis})")
+    def _build_stage_group(self, arm: Axis) -> QGroupBox:
+        spec = AXIS_ROLES[arm]
+        box = QGroupBox(f"{spec.label}  ·  {spec.stage} (axis {spec.esp_axis})")
         v = QVBoxLayout(box)
         v.setSpacing(4)
 
@@ -227,7 +227,7 @@ class CfgAutoCalibrationView(PanelView):
 
         return box
 
-    def _on_position(self, arm: Arm, position_mm: float) -> None:
+    def _on_position(self, arm: Axis, position_mm: float) -> None:
         spin = self._pos_spin.get(arm)
         if spin is None:
             return
@@ -238,7 +238,7 @@ class CfgAutoCalibrationView(PanelView):
             spin.setValue(position_mm)
             spin.blockSignals(False)
 
-    def _on_state(self, arm: Arm, status: WorkerStatus) -> None:
+    def _on_state(self, arm: Axis, status: WorkerStatus) -> None:
         ctrl = self._worker_ctrl.get(arm)
         if ctrl is not None:
             ctrl.set_status(status)

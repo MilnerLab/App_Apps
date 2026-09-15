@@ -58,13 +58,16 @@ from app_apps.io.oscilloscope.ui.oscilloscope_view import OscilloscopeControls
 from app_apps.io.oscilloscope.ui.oscilloscope_view_model import OscilloscopeViewModel
 from app_apps.io.spectrometer.ui.spectrometer_view import SpectrometerControls
 from app_apps.io.spectrometer.ui.spectrometer_view_model import SpectrometerViewModel
+from app_apps.recording.ui.view_model import SpectrumRecordingViewModel
 
 #: (tab label, [block builders]) in tab order. Each builder takes the container and the
 #: page widget and returns the block. Adding a device is one entry here and nothing else.
 _GROUPS: list[tuple[str, list[Callable[[Container, QWidget], QWidget]]]] = [
     ("Acquisition", [
-        lambda c, p: _form_block("Spectrometer", c.get(SpectrometerViewModel),
-                                 SpectrometerControls, p),
+        # No footer: SpectrometerControls places its own Apply, above its Record box.
+        lambda c, p: _block("Spectrometer", c.get(SpectrometerViewModel),
+                            SpectrometerControls(c.get(SpectrometerViewModel),
+                                                 c.get(SpectrumRecordingViewModel), p), p),
         lambda c, p: _form_block("Oscilloscope", c.get(OscilloscopeViewModel),
                                  OscilloscopeControls, p),
     ]),

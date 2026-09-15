@@ -217,9 +217,9 @@ def main(argv: list[str] | None = None) -> int:
             u()
         if routine is not None:
             try:
-                routine.stop()
+                routine.dispose()
             except Exception:
-                log.exception("routine.stop() failed during teardown")
+                log.exception("routine.dispose() failed during teardown")
         # ALWAYS tear the modules down — even on a bootstrap failure — so a spawned
         # port-holding subprocess is released and never orphaned. Guarded so a teardown
         # error on a partial boot cannot mask the original failure.

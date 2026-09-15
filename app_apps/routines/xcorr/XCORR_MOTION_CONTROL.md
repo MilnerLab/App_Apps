@@ -12,33 +12,46 @@ failure mode), see `control_readout/esp_301/esp_301.md` in the **Devices** repo.
 
 ## 1. The three axes and the scan's drive loop
 
-Roles are bound by the `XcorrRoutine` constructor signature — there is no axis-role enum
-(`config.py`, `routine.py`):
+Which handle plays which role is bound by the `XcorrRoutine` constructor signature. What
+each stage *is* comes from its own package in the **Devices** repo:
 
-| Role | Axis | Stage | Purpose | Soft limits (mm) |
-|---|---|---|---|---|
-| `probe` | 1 | FMS300PP | scanned axis | `-9.5 … 290.5` |
-| `delay` | 2 | MFA-CC | central frequency | `0.0 … 25.0` |
-| `grating` | 3 | UTS150CC | chirp difference | `-75.0 … 75.0` |
+| Role | Axis | Stage | Purpose | Soft limits (mm) | Defined in |
+|---|---|---|---|---|---|
+| `probe` | 1 | FMS300PP | scanned axis | `-9.5 … 290.5` | `esp_301/fms300pp/spec.py` |
+| `delay` | 2 | MFA-CC | central frequency | `0.0 … 25.0` | `esp_301/mfa_cc/spec.py` |
+| `grating` | 3 | UTS150CC | chirp difference | `-75.0 … 75.0` | `esp_301/uts150cc/spec.py` |
 
-`AXIS_LIMITS` (config.py) were read live from the ESP301 (`SL?`/`SR?`, 2026-07-19). The
-whole run executes on **one** `BaseRoutine` `TaskRunner` thread, wrapped in `try/finally`
-for the flush-and-park guarantee. Per setpoint:
+Each `spec.py` holds one `StageSpec` (model, units, soft limits) plus the ESP301 `AXIS`,
+read live from the controller (`SL?`/`SR?`, 2026-07-19). **Nothing restates these numbers.**
+The worker takes its axis from there, the mock's motion profile takes its travel from
+there, the handle re-exports the spec as `SPEC`, `AXIS_LIMITS` is derived from it, and the
+run's provenance is written from it. They used to exist in four places and the mock's copy
+had silently drifted into the datasheet frame (`0…300`, `0…150`) rather than the
+post-homing frame the application commands in — which pinned every mocked negative grating
+position to 0 while the run file recorded the position that had been asked for.
 
-1. `_move(grating)` → `_move(delay)` — **grating first**, because the delay position tracks
-   the grating (`commanded = base + slope·grating + intercept`).
-2. `_sweep_probe` — for each probe point: `_move(probe)` (commanded =
-   `probe_base + grating + probe_intercept`) then `_acquire_point` (**stubbed**, returns
-   zeros in Build Step 1).
+Role-level facts — the UI label, the rig-tuned jog steps — live in
+`app_apps/routines/axes.py`, not in Devices: the delay's jog is 20x finer than the
+grating's because of this rig's optics (§4.3), not because of the stage.
+
+The whole run executes on **one** `BaseRoutine` `TaskRunner` thread, wrapped in
+`run_lifecycle` for the flush-and-park guarantee. Per setpoint:
+
+1. `self._grating.move_to(...)` → `self._delay.move_to(...)` — **grating first**, because
+   the delay position tracks the grating (`commanded = base + slope·grating + intercept`).
+2. `_sweep_probe` — iterates a `TranslationStageScan` over the probe positions; each
+   iteration gates, moves (commanded = `probe_base + grating + probe_intercept`), settles,
+   and yields the point, whereupon `_acquire_point` takes a burst from the scope stream.
 3. `writer.write_group(...)` — one HDF5 group per setpoint, flushed before the next.
 
 ### How a move actually reaches the controller
 
-`_move` → `handle.move_to(pos, on_done, on_error)` → IPC to the `control_readout`
-subprocess → `ESP301Controller.move_absolute` → `wait_for_motion` (polls `MD?`). `_call`
-turns that async request into a **blocking, reply-correlated** call: it waits on a
-`threading.Event` until `on_done`/`on_error` fires or `timeout_s` elapses. This is the only
-handle in the repo that uses the reply callbacks — every other `_on_reply` is `pass`.
+`TranslationStage.move_to` → `handle.move_to(pos, on_done, on_error)` → IPC to the
+`control_readout` subprocess → `ESP301Controller.move_absolute` → `wait_for_motion` (polls
+`MD?`). `base_core.ipc.blocking.blocking_request` turns that async request into a
+**blocking, reply-correlated** call: it waits on a `threading.Event` until
+`on_done`/`on_error` fires or `timeout_s` elapses. These are the only handles in the repo
+whose reply callbacks are used — every other `_on_reply` is `pass`.
 
 ---
 
@@ -55,15 +68,31 @@ would raise a false *"no reply"* while the move is still legitimately running. W
 resync fix, a *comms fault* now fails in **seconds** (not 120 s), so this margin only
 matters for the true stuck-axis case — but keep it.
 
+### Run control — pause, resume, abort, step
+
+All four live on `RunControl` (`base_core/framework/routines/run_control.py`), reached
+through `BaseRoutine`, so any future routine gets them without reimplementing the threading
+discipline. Note that `BaseRoutine.dispose()` is *disposal* — it shuts the TaskRunner
+thread down and queues behind a running loop. To stop a run, call `abort()`.
+
+This routine places two checkpoints: between probe points, and between setpoints.
+
 ### Abort (defects G15/G16) — accepted, not fixed
 
-- `abort()` sets `_abort` (a `threading.Event` set from the **caller's** thread, never
-  dispatched — a dispatched abort would queue *behind* the loop it must stop).
-- It is checked only at **probe points**. An in-flight move **cannot** be interrupted:
+- `abort()` sets a `threading.Event` from the **caller's** thread, never dispatched — a
+  dispatched abort would queue *behind* the loop it must stop.
+- It takes effect only at a **checkpoint**. An in-flight move **cannot** be interrupted:
   `Device._lock` *is* `controller._lock`, held across the blocking `wait_for_motion`. So
   abort takes effect at the next probe point; the current group is flushed with
-  `status="aborted"`. **Do not** engineer around this without revisiting the decision in
-  `routine.py`'s module docstring.
+  `status="aborted"` and `XcorrFinished(aborted=True)` is published. **Do not** engineer
+  around this without revisiting the decision in `routine.py`'s module docstring.
+- The checkpoint raises `ScanAborted` on the routine thread, so the run unwinds through its
+  own `try/finally`. `_sweep_probe` catches it precisely so the points already collected
+  are kept.
+
+> **Testing an abort:** do not use SIGINT on the headless runner from a script. The signal
+> reaches the device subprocesses too, so the pending move never gets a reply and a clean
+> abort looks like a 130 s timeout. Call `routine.abort()`, which is what the UI does.
 
 ### Start (defect A11 / G12) — RUNNING ≠ live link
 
@@ -137,7 +166,7 @@ whole-process-elevated run).
 | `timeout_s` | 130.0 | per-move reply wait; **must exceed** the driver's 120 s (§2) |
 | `settle_s` | 0.0 | explicit dwell after each move before acquiring — don't trust `MD?` settling |
 | `n_traces` | 10 | software-averaged (the TDS2012C's `NUMAVg` only accepts 4/16/64/128) |
-| `AXIS_LIMITS` | — | soft limits; the planner validates every corrected setpoint against these |
+| `AXIS_LIMITS` | — | derived from the Devices stage specs (§1); the planner validates every corrected setpoint against these |
 | `SCOPE_RESOURCE` | — | TDS2012C USBTMC (not the TBS2012C — defect G8) |
 
 ---
@@ -149,3 +178,10 @@ whole-process-elevated run).
 - `Docs/XCORR_WEDGE_TESTING_20260721.md` — FM-2 bridge-wedge test-to-failure (H1–H5).
 - `Docs/XCORR_SESSION_20260721.md` — session handoff (also covers the §2/§3 scan features).
 - Code: `app_apps/routines/xcorr/routine.py`, `config.py`.
+- Shared scan pieces: `app_apps/routines/scanning/` (`patterns.py`, `translation_stage.py`,
+  `translation_stage_scan.py`), `app_apps/routines/axes.py`.
+- Framework: `base_core/framework/routines/run_control.py`, `base_core/ipc/blocking.py`.
+- Stage facts: `control_readout/base/stage_spec.py` and each stage's `spec.py` (Devices).
+- Tests: `test/test_translation_stage_scan.py` (the subroutine contract),
+  `test/xcorr_step_mode_test.py` (the step gate), `test/test_xcorr_spectra.py` (the
+  motion gate).

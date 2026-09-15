@@ -33,7 +33,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import h5py  # noqa: E402
 
-from base_core.framework.events.event_bus import EventBus  # noqa: E402
+from base_core.framework.events.event_bus import EventBus
+from base_core.framework.routines.run_control import ScanAborted
+from control_readout.base.stage_spec import StageLimitError
+from control_readout.esp_301.fms300pp import spec as fms300pp_spec
+from control_readout.esp_301.mfa_cc import spec as mfa_cc_spec
+from control_readout.esp_301.uts150cc import spec as uts150cc_spec  # noqa: E402
 
 from app_apps.analysis.xcorr.run_loader import load_run, load_spectra  # noqa: E402
 from app_apps.io.spectrometer.events import SpectrumAck, SpectrumAvailable  # noqa: E402
@@ -396,6 +401,17 @@ class RecordingGate:
 
 
 class StubStage:
+    """A stage handle that answers every move immediately.
+
+    Carries a real ``StageSpec`` because ``TranslationStage`` reads its limits and units
+    off the handle -- which is the point of the specs living with the stages. Each role
+    therefore needs *its own* spec here, exactly as in the application; giving all three
+    the probe's would put a legal grating position outside the probe's travel.
+    """
+
+    def __init__(self, spec=fms300pp_spec.SPEC) -> None:
+        self.SPEC = spec
+
     def move_to(self, position, on_done, on_error) -> None:
         on_done()
 
@@ -426,7 +442,10 @@ def _routine_with_gate():
     try:
         r = XcorrRoutine(
             bus=EventBus(), config=cfg,
-            probe=StubStage(), delay=StubStage(), grating=StubStage(), scope=None,
+            probe=StubStage(fms300pp_spec.SPEC),
+            delay=StubStage(mfa_cc_spec.SPEC),
+            grating=StubStage(uts150cc_spec.SPEC),
+            scope=None,
         )
     except TypeError as exc:
         raise Skipped(f"XcorrRoutine is not constructible against this Devices checkout: {exc}")
@@ -436,45 +455,66 @@ def _routine_with_gate():
 
 
 def test_every_move_closes_the_gate():
-    """_move() is the single choke point for all three axes; if it does not close the
-    gate, a spectrum integrated during a move gets stamped with a stale position."""
+    """TranslationStage.move_to is the single choke point for all three axes; if it does
+    not close the gate, a spectrum integrated during a move gets stamped with a stale
+    position."""
     r, gate = _routine_with_gate()
     try:
-        r._move(StubStage(), 150.0, "probe")
-        r._move(StubStage(), 18.0, "delay")
-        r._move(StubStage(), -30.0, "grating")
+        r._probe.move_to(150.0)
+        r._delay.move_to(18.0)
+        r._grating.move_to(-30.0)
     finally:
-        r.stop()
+        r.dispose()
     assert gate.events == [("close",)] * 3, gate.events
 
 
 def test_move_closes_the_gate_even_when_the_position_is_rejected():
-    from app_apps.routines.xcorr.routine import XcorrError
-
+    """The gate shuts BEFORE the limit check, not after. A rejected move still means the
+    caller intended motion, and leaving the gate open would attribute the next spectra to
+    a position the routine has already stopped believing in."""
     r, gate = _routine_with_gate()
     try:
         try:
-            r._move(StubStage(), 9999.0, "probe")
-        except XcorrError:
+            r._probe.move_to(9999.0)
+        except StageLimitError:
             pass
         else:
             raise AssertionError("an out-of-limit move must raise")
     finally:
-        r.stop()
+        r.dispose()
     assert gate.events == [("close",)], gate.events
 
 
 def test_pause_closes_the_gate_and_no_op_does_not():
     r, gate = _routine_with_gate()
     try:
-        r._wait_while_paused()            # not paused — must not touch the gate
+        r._control.begin()
+        r._checkpoint()                   # not paused — must not touch the gate
         assert gate.events == [], gate.events
-        r._resume.clear()
-        r._abort.set()                    # so the wait unwinds immediately
-        r._wait_while_paused()
+
+        r.pause()
+        released = threading.Thread(target=lambda: (time.sleep(0.15), r.resume()))
+        released.start()
+        r._checkpoint()                   # parks, shuts the gate, then runs on
+        released.join()
     finally:
-        r.stop()
+        r.dispose()
     assert gate.events == [("close",)], gate.events
+
+
+def test_an_abort_at_a_checkpoint_stops_the_run():
+    r, _gate = _routine_with_gate()
+    try:
+        r._control.begin()
+        r.abort()
+        try:
+            r._checkpoint()
+        except ScanAborted:
+            pass
+        else:
+            raise AssertionError("a checkpoint must raise once an abort is pending")
+    finally:
+        r.dispose()
 
 
 def test_sweep_opens_the_gate_with_the_commanded_positions():
@@ -484,9 +524,11 @@ def test_sweep_opens_the_gate_with_the_commanded_positions():
     from app_apps.routines.xcorr.planner import ScanPlan
     plan = ScanPlan(setpoints=(sp,), outer_axis="grating", outer_reason="test")
     try:
-        rows, aborted = r._sweep_probe(plan, 0, sp, 0, len(sp.probe_base_mm))
+        r._control.begin()
+        rows, aborted = r._sweep_probe(
+            plan, 0, sp, r._probe_scan(0, sp), 0, len(sp.probe_base_mm))
     finally:
-        r.stop()
+        r.dispose()
     assert not aborted and len(rows) == 2, (rows, aborted)
 
     opens = [e for e in gate.events if e[0] == "open"]

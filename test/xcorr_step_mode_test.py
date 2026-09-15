@@ -23,6 +23,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from base_core.framework.events.event_bus import EventBus  # noqa: E402
+from base_core.framework.routines.run_control import RunControl, ScanAborted  # noqa: E402
 
 from app_apps.routines.xcorr.events import XcorrSteppingHold  # noqa: E402
 from app_apps.routines.xcorr.routine import XcorrRoutine  # noqa: E402
@@ -47,18 +48,26 @@ class _Setpoint:
     probe_base_mm = [0.0, 10.0, 20.0, 30.0, 40.0]
 
 
+class _StubStage:
+    """The two members of ``TranslationStage`` the hold and sweep paths touch."""
+
+    def __init__(self, role: str, moves: list) -> None:
+        self.role = role
+        self._moves = moves
+
+    def move_to(self, position: float) -> None:
+        self._moves.append((self.role, position))
+
+
 def _routine():
     """A routine with its hardware and gate plumbing stubbed, nothing else patched."""
     bus = EventBus()
     r = XcorrRoutine.__new__(XcorrRoutine)
     r._bus = bus
-    r._abort = threading.Event()
-    r._step_mode = threading.Event()
-    r._step_permits = threading.Semaphore(0)
-    r._running = threading.Event()
-    r._probe = object()
+    r._control = RunControl()
+    r._recorder = None
     moves: list[tuple[str, float]] = []
-    r._move = lambda handle, position, role: moves.append((role, position))
+    r._probe = _StubStage("probe", moves)
     gate: list[str] = []
     r._gate_close = lambda: gate.append("close")
     held: list[XcorrSteppingHold] = []
@@ -66,10 +75,38 @@ def _routine():
     return r, moves, gate, held
 
 
+def _hold(r, si: int, sp, n_setpoints: int) -> None:
+    """Drive one alignment hold, building the probe sweep the way the run does."""
+    r._hold_for_alignment(si, sp, r._probe_scan(si, sp), n_setpoints)
+
+
+def _arm(r, presses: int = 0) -> None:
+    """Put the routine in a running, stepping state with ``presses`` already banked."""
+    r._control.begin()
+    r.set_step_mode(True)
+    if presses:
+        r.step(presses)
+
+
+def _park(r) -> threading.Event:
+    """Wait at the step gate on a daemon thread; the Event is set once released."""
+    done = threading.Event()
+
+    def wait() -> None:
+        try:
+            r._control.wait_for_step(on_hold=r._gate_close)
+        except ScanAborted:
+            pass
+        done.set()
+
+    threading.Thread(target=wait, daemon=True).start()
+    return done
+
+
 # -- the gate ---------------------------------------------------------------------------
 def test_off_by_default_costs_nothing() -> None:
     r, moves, gate, held = _routine()
-    r._hold_for_alignment(0, _Setpoint(), 4)
+    _hold(r, 0, _Setpoint(), 4)
     check(moves == [] and gate == [] and held == [],
           "with step mode off the hold is a no-op: no move, no gate, no event")
 
@@ -77,18 +114,16 @@ def test_off_by_default_costs_nothing() -> None:
 def test_the_probe_parks_at_the_sweep_centre() -> None:
     """Not the sweep's start, where the stage happens to be -- the peak is at the centre."""
     r, moves, _gate, _held = _routine()
-    r._step_mode.set()
-    r._step_permits.release()
-    r._hold_for_alignment(2, _Setpoint(), 4)
+    _arm(r, presses=1)
+    _hold(r, 2, _Setpoint(), 4)
     check(moves == [("probe", 22.0)],
           f"probe parked at middle base 20.0 + offset 2.0 = 22.0 (got {moves})")
 
 
 def test_the_hold_is_announced_then_released() -> None:
     r, _moves, _gate, held = _routine()
-    r._step_mode.set()
-    r._step_permits.release()
-    r._hold_for_alignment(1, _Setpoint(), 4)
+    _arm(r, presses=1)
+    _hold(r, 1, _Setpoint(), 4)
     check([h.holding for h in held] == [True, False],
           f"one holding=True then one holding=False (got {[h.holding for h in held]})")
     first = held[0]
@@ -101,14 +136,14 @@ def test_the_hold_is_announced_then_released() -> None:
 def test_the_release_is_published_even_when_the_wait_aborts() -> None:
     """The finally clause. A display left holding polls the scope forever."""
     r, _moves, _gate, held = _routine()
-    r._step_mode.set()
+    _arm(r)
 
-    def boom(*_a):
+    def boom(*_a, **_kw):
         raise RuntimeError("wait blew up")
 
-    r._wait_for_step = boom
+    r._control.wait_for_step = boom
     try:
-        r._hold_for_alignment(0, _Setpoint(), 2)
+        _hold(r, 0, _Setpoint(), 2)
     except RuntimeError:
         pass
     check([h.holding for h in held] == [True, False],
@@ -117,11 +152,8 @@ def test_the_release_is_published_even_when_the_wait_aborts() -> None:
 
 def test_the_gate_actually_blocks_until_step() -> None:
     r, _moves, gate, _held = _routine()
-    r._step_mode.set()
-    r._running.set()
-    done = threading.Event()
-    threading.Thread(
-        target=lambda: (r._wait_for_step(0, 3, 1.0), done.set()), daemon=True).start()
+    _arm(r)
+    done = _park(r)
 
     check(not done.wait(0.35), "still parked after 350 ms with no press")
     check(gate == ["close"], "and the spectrum gate was shut while parked")
@@ -132,39 +164,29 @@ def test_the_gate_actually_blocks_until_step() -> None:
 def test_a_press_made_early_is_not_lost() -> None:
     """Permits accumulate: the count is what the operator pressed, not what was timed right."""
     r, _moves, _gate, _held = _routine()
-    r._step_mode.set()
-    r._running.set()
-    r.step(3)
+    _arm(r, presses=3)
     for i in range(3):
         t0 = time.perf_counter()
-        r._wait_for_step(i, 3, 1.0)
+        r._control.wait_for_step()
         check(time.perf_counter() - t0 < 0.05, f"setpoint {i + 1} passed immediately")
-    done = threading.Event()
-    threading.Thread(
-        target=lambda: (r._wait_for_step(3, 4, 1.0), done.set()), daemon=True).start()
+    done = _park(r)
     check(not done.wait(0.3), "and the fourth blocks -- exactly three were banked")
 
 
 def test_abort_frees_a_parked_run() -> None:
     r, _moves, _gate, _held = _routine()
-    r._step_mode.set()
-    r._running.set()
-    done = threading.Event()
-    threading.Thread(
-        target=lambda: (r._wait_for_step(0, 3, 1.0), done.set()), daemon=True).start()
+    _arm(r)
+    done = _park(r)
     check(not done.wait(0.2), "parked")
-    r._abort.set()
+    r.abort()
     check(done.wait(2.0), "an abort raised while parked is noticed, not deadlocked")
 
 
 def test_disarming_frees_a_parked_run() -> None:
     """Turning step mode off must release a routine already waiting at the gate."""
     r, _moves, _gate, _held = _routine()
-    r._step_mode.set()
-    r._running.set()
-    done = threading.Event()
-    threading.Thread(
-        target=lambda: (r._wait_for_step(0, 3, 1.0), done.set()), daemon=True).start()
+    _arm(r)
+    done = _park(r)
     check(not done.wait(0.2), "parked")
     r.set_step_mode(False)
     check(done.wait(2.0), "runs on without waiting for a press it no longer needs")
@@ -172,12 +194,10 @@ def test_disarming_frees_a_parked_run() -> None:
 
 def test_step_is_ignored_when_not_running() -> None:
     r, _moves, _gate, _held = _routine()
-    r._step_mode.set()
-    r.step(5)
-    r._running.set()
-    done = threading.Event()
-    threading.Thread(
-        target=lambda: (r._wait_for_step(0, 1, 1.0), done.set()), daemon=True).start()
+    r.set_step_mode(True)
+    r.step(5)                       # not running yet -- banks nothing
+    r._control.begin()
+    done = _park(r)
     check(not done.wait(0.3),
           "presses before the run started banked nothing -- the gate still holds")
 

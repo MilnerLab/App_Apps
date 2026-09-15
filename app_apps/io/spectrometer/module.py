@@ -38,7 +38,12 @@ class SpectrometerModule(BaseModule):
         c.register_singleton(SpectrometerViewModel, lambda c: SpectrometerViewModel(
             ctx.event_bus, c.get(QtDispatcher), c.get(SpectrometerWorkerHandle), c.get(SpectrometerConfig)
         ))
-        c.register_singleton(SpectrometerView, lambda c: SpectrometerView(c.get(SpectrometerViewModel), parent=None))
+        # The recording VM comes from RecordingModule; resolved lazily, when the view is
+        # first opened, by which time every module has registered.
+        from app_apps.recording.ui.view_model import SpectrumRecordingViewModel
+        c.register_singleton(SpectrometerView, lambda c: SpectrometerView(
+            c.get(SpectrometerViewModel), c.get(SpectrumRecordingViewModel), parent=None
+        ))
 
     def on_startup(self, c: Container, ctx: AppContext) -> None:
         service = c.get(SpectrometerService)

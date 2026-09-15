@@ -1,6 +1,6 @@
 """ViewModel for the CFG auto-calibration panel.
 
-Arm-agnostic: the view drives everything through (Arm, ...) calls and the VM routes each to
+Axis-agnostic: the view drives everything through (Axis, ...) calls and the VM routes each to
 the right stage handle. It never touches the serial link directly — every move is an IPC
 request to the device subprocess (which owns the COM7 lock), so calling these from the Qt
 thread is safe (the blocking motion happens in the subprocess, per N1).
@@ -38,14 +38,14 @@ from app_apps.io.control_readout.uts150cc.events import (
     Uts150ccWorkerStateChanged,
 )
 from app_apps.io.control_readout.uts150cc.handler import Uts150ccHandle
-from app_apps.routines.cfg_auto_calibration.arms import ARM_SPECS, Arm
+from app_apps.routines.axes import AXIS_ROLES, Axis
 from app_apps.routines.cfg_auto_calibration.fit import CentrifugeFitMap, FitMapError
 
 
 class CfgAutoCalibrationViewModel(PanelViewModel):
-    # (Arm, position_mm)
+    # (Axis, position_mm)
     position_changed = Signal(object, float)
-    # (Arm, WorkerStatus)
+    # (Axis, WorkerStatus)
     state_changed = Signal(object, object)
     # (grating_mm, delay_mm) — the send-to solution, for display
     solution_ready = Signal(float, float)
@@ -63,20 +63,20 @@ class CfgAutoCalibrationViewModel(PanelViewModel):
     ) -> None:
         super().__init__(bus, dispatcher)
         self._fit = fit_map
-        self._handles = {Arm.GRATING: grating, Arm.DELAY: delay, Arm.PROBE: probe}
-        self._busy = {arm: False for arm in Arm}
+        self._handles = {Axis.GRATING: grating, Axis.DELAY: delay, Axis.PROBE: probe}
+        self._busy = {arm: False for arm in Axis}
         # Last position pushed for each arm (mm); seeds the jog reference and displays.
-        self._displayed: dict[Arm, float] = {}
+        self._displayed: dict[Axis, float] = {}
 
-        self._sub(Uts150ccWorkerStateChanged, lambda _: self._on_state(Arm.GRATING))
-        self._sub(MfaccWorkerStateChanged, lambda _: self._on_state(Arm.DELAY))
-        self._sub(Fms300ppWorkerStateChanged, lambda _: self._on_state(Arm.PROBE))
-        self._sub(NewUts150ccPosition, lambda e: self._on_position(Arm.GRATING, e.position))
-        self._sub(NewMfaccPosition, lambda e: self._on_position(Arm.DELAY, e.position))
-        self._sub(NewFms300ppPosition, lambda e: self._on_position(Arm.PROBE, e.position))
+        self._sub(Uts150ccWorkerStateChanged, lambda _: self._on_state(Axis.GRATING))
+        self._sub(MfaccWorkerStateChanged, lambda _: self._on_state(Axis.DELAY))
+        self._sub(Fms300ppWorkerStateChanged, lambda _: self._on_state(Axis.PROBE))
+        self._sub(NewUts150ccPosition, lambda e: self._on_position(Axis.GRATING, e.position))
+        self._sub(NewMfaccPosition, lambda e: self._on_position(Axis.DELAY, e.position))
+        self._sub(NewFms300ppPosition, lambda e: self._on_position(Axis.PROBE, e.position))
 
     # -- introspection -------------------------------------------------------
-    def worker_status(self, arm: Arm) -> WorkerStatus:
+    def worker_status(self, arm: Axis) -> WorkerStatus:
         return self._handles[arm].state
 
     @property
@@ -90,21 +90,21 @@ class CfgAutoCalibrationViewModel(PanelViewModel):
                 handle.get_position()
 
     # -- worker lifecycle (per arm) ------------------------------------------
-    def start(self, arm: Arm) -> None:
+    def start(self, arm: Axis) -> None:
         self._handles[arm].start()
 
-    def pause(self, arm: Arm) -> None:
+    def pause(self, arm: Axis) -> None:
         self._handles[arm].pause()
 
-    def resume(self, arm: Arm) -> None:
+    def resume(self, arm: Axis) -> None:
         self._handles[arm].resume()
 
-    def stop(self, arm: Arm) -> None:
+    def stop(self, arm: Axis) -> None:
         self._handles[arm].stop()
 
     # -- manual motion -------------------------------------------------------
-    def move_absolute(self, arm: Arm, position_mm: float) -> None:
-        spec = ARM_SPECS[arm]
+    def move_absolute(self, arm: Axis, position_mm: float) -> None:
+        spec = AXIS_ROLES[arm]
         if not spec.in_limits(position_mm):
             self._msg(
                 f"{spec.label}: {position_mm:.4f} mm is outside "
@@ -114,17 +114,17 @@ class CfgAutoCalibrationViewModel(PanelViewModel):
             return
         self._dispatch_move(arm, position_mm)
 
-    def jog(self, arm: Arm, delta_mm: float) -> None:
+    def jog(self, arm: Axis, delta_mm: float) -> None:
         current = self._displayed.get(arm)
         if current is None:
             self._msg(
-                f"{ARM_SPECS[arm].label}: position unknown yet — cannot jog "
+                f"{AXIS_ROLES[arm].label}: position unknown yet — cannot jog "
                 "(start the stage / read its position first).",
                 MessageLevel.WARNING,
             )
             return
         target = current + delta_mm
-        spec = ARM_SPECS[arm]
+        spec = AXIS_ROLES[arm]
         if not spec.in_limits(target):
             self._msg(
                 f"{spec.label}: jog to {target:.4f} mm would leave "
@@ -136,7 +136,7 @@ class CfgAutoCalibrationViewModel(PanelViewModel):
                 return
         self._dispatch_move(arm, target)
 
-    def home(self, arm: Arm) -> None:
+    def home(self, arm: Axis) -> None:
         handle = self._handles[arm]
         if handle.state != WorkerStatus.RUNNING:
             self._not_running(arm)
@@ -157,8 +157,8 @@ class CfgAutoCalibrationViewModel(PanelViewModel):
             return
 
         problems = []
-        for arm, mm in ((Arm.GRATING, grating_mm), (Arm.DELAY, delay_mm)):
-            spec = ARM_SPECS[arm]
+        for arm, mm in ((Axis.GRATING, grating_mm), (Axis.DELAY, delay_mm)):
+            spec = AXIS_ROLES[arm]
             if not spec.in_limits(mm):
                 problems.append(
                     f"{spec.label} {mm:.4f} mm ∉ {spec.limit_min_mm}..{spec.limit_max_mm} mm"
@@ -169,7 +169,7 @@ class CfgAutoCalibrationViewModel(PanelViewModel):
 
         self.solution_ready.emit(grating_mm, delay_mm)
         moved = 0
-        for arm, mm in ((Arm.GRATING, grating_mm), (Arm.DELAY, delay_mm)):
+        for arm, mm in ((Axis.GRATING, grating_mm), (Axis.DELAY, delay_mm)):
             if self._dispatch_move(arm, mm):
                 moved += 1
         if moved:
@@ -192,7 +192,7 @@ class CfgAutoCalibrationViewModel(PanelViewModel):
         )
 
     # -- internals -----------------------------------------------------------
-    def _dispatch_move(self, arm: Arm, position_mm: float) -> bool:
+    def _dispatch_move(self, arm: Axis, position_mm: float) -> bool:
         handle = self._handles[arm]
         if handle.state != WorkerStatus.RUNNING:
             self._not_running(arm)
@@ -204,26 +204,26 @@ class CfgAutoCalibrationViewModel(PanelViewModel):
         handle.move_to(position_mm)
         return True
 
-    def _not_running(self, arm: Arm) -> None:
+    def _not_running(self, arm: Axis) -> None:
         self._msg(
-            f"{ARM_SPECS[arm].label} stage is not running — start it first.",
+            f"{AXIS_ROLES[arm].label} stage is not running — start it first.",
             MessageLevel.WARNING,
         )
 
-    def _busy_msg(self, arm: Arm) -> None:
+    def _busy_msg(self, arm: Axis) -> None:
         self._msg(
-            f"{ARM_SPECS[arm].label} stage is still moving — wait for it to settle.",
+            f"{AXIS_ROLES[arm].label} stage is still moving — wait for it to settle.",
             MessageLevel.INFO,
         )
 
     @ui_thread
-    def _on_position(self, arm: Arm, position_mm: float) -> None:
+    def _on_position(self, arm: Axis, position_mm: float) -> None:
         self._busy[arm] = False
         self._displayed[arm] = position_mm
         self.position_changed.emit(arm, position_mm)
 
     @ui_thread
-    def _on_state(self, arm: Arm) -> None:
+    def _on_state(self, arm: Axis) -> None:
         handle = self._handles[arm]
         status = handle.state
         # Seed the position display when a stage comes up, so jog has a reference

@@ -16,19 +16,21 @@ from pathlib import Path
 from base_core.ipc.connection_mode import ConnectionMode
 from oscilloscope.config import ScopeConfig
 
-#: Per-role soft limits in mm, read live from the ESP301 on 2026-07-19
-#: (``SL?``/``SR?``). Keyed by the role names used throughout the routine, which
-#: are also the ``XcorrRoutine`` constructor parameter names — the role binding
-#: *is* the constructor signature, so there is no axis-role indirection layer.
+from app_apps.routines.axes import AXIS_LIMITS as _AXIS_LIMITS
+
+#: Per-role soft limits in mm, keyed by the role names used throughout the routine —
+#: which are also the ``XcorrRoutine`` constructor parameter names, so the role binding
+#: *is* the constructor signature and there is no axis-role indirection layer.
 #:
 #:   probe   = axis 1, FMS300PP   (scanned)
 #:   delay   = axis 2, MFA-CC     (central frequency)
 #:   grating = axis 3, UTS150CC   (chirp difference)
-AXIS_LIMITS: dict[str, tuple[float, float]] = {
-    "probe": (-9.5, 290.5),
-    "delay": (0.0, 25.0),
-    "grating": (-75.0, 75.0),
-}
+#:
+#: Re-exported from :mod:`app_apps.routines.axes`, which derives it from each stage's
+#: ``StageSpec`` in the Devices repo. The numbers themselves are not written here and
+#: must not be: they were once restated in four places and the mock's copy had drifted
+#: into a different coordinate frame, silently clamping every mocked scan.
+AXIS_LIMITS = _AXIS_LIMITS
 
 #: The scope's VISA resource, kept here only as the name this routine's documentation
 #: uses. The value belongs to the device: it is ``ScopeConfig.resource``'s default, which

@@ -24,6 +24,7 @@ from base_core.ipc.connection_mode import ConnectionMode  # noqa: E402
 from base_core.ipc.message import ErrorReply  # noqa: E402
 from base_core.ipc.worker_messages import StartWorker  # noqa: E402
 from control_readout.control_readout_process import ControlReadoutProcess  # noqa: E402
+from control_readout.esp_301.fms300pp import spec as fms300pp_spec  # noqa: E402
 
 _failures: list[str] = []
 
@@ -121,9 +122,15 @@ def test_a_mocked_stage_is_actually_usable() -> None:
     stage.move_to(12.5)
     check("it moves where it is told", stage.position() == 12.5, f"got {stage.position()}")
     stage.move_to(-100.0)
-    check("and stops at the travel limit", stage.position() == 0.0,
-          f"got {stage.position()} — a mock that drives through a hard stop teaches "
-          f"the operator a habit the real stage punishes")
+    # Asserted against the stage's own StageSpec, not a literal. The two used to
+    # disagree: the mock clamped to the 0..300 mm datasheet travel while the soft limits
+    # the application commands against are -9.5..290.5 mm, so a mocked move to a legal
+    # negative position was silently pinned to 0 and reported as done.
+    check("and stops at the soft limit, in the frame the application commands in",
+          stage.position() == fms300pp_spec.SPEC.limit_min,
+          f"got {stage.position()}, expected {fms300pp_spec.SPEC.limit_min} — a mock "
+          f"that drives through a hard stop teaches the operator a habit the real stage "
+          f"punishes, and one that stops somewhere else teaches a wrong reach")
 
 
 def test_the_three_esp301_stages_share_one_mock_box() -> None:

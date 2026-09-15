@@ -47,6 +47,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, fields as dataclass_fields
+from enum import Enum
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -217,7 +218,11 @@ class XcorrH5Writer:
             g = ensure_group(self.file, "/config")
             for f in dataclass_fields(cfg):
                 value = getattr(cfg, f.name)
-                g.attrs[f.name] = str(value) if isinstance(value, Path) else value
+                # Paths and enums both have to be spelled out. ConnectionMode mixes in
+                # ``str``, but h5py does not take its string fast path for a str
+                # *subclass* — it falls through to numpy, gets dtype ``<U4`` and raises
+                # "No conversion path". str() first, and every config field survives.
+                g.attrs[f.name] = str(value) if isinstance(value, (Path, Enum)) else value
 
             g.attrs["outer_axis"] = plan.outer_axis
             g.attrs["outer_reason"] = plan.outer_reason
