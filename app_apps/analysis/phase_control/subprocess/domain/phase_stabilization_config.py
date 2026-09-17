@@ -191,6 +191,18 @@ class StabilizationConfig(PrimitiveSerde):
                                         # corrector is retuned in place. If the loop locks
                                         # stably but pi away from the setpoint, this is the
                                         # knob: see PhaseCorrector.CORRECTION_SIGN.
+    phase_sign_positive: bool = True    # overall sign convention of the fitted phase. The fit
+                                        # cannot tell Theta from -Theta (cos is even), so every
+                                        # capture is normalised to chirp c2 > 0 (True) or
+                                        # c2 < 0 (False). True is the legacy convention (seed
+                                        # acceleration a > 0). The chirp, not the carrier c1:
+                                        # c1 is the fringe frequency at the window centre and
+                                        # changes sign wherever the delay puts the frequency
+                                        # zero, which can sit inside the window.
+                                        # Together with invert_correction this
+                                        # fixes the plate direction; flip it when the circular
+                                        # polarization is swapped. Changing it mid-run flips
+                                        # the installed template and negates set_phase.
     # --- block-averaged correction loop (see phase_corrector) --------------------------
     avg_spectra: int = AVG_SPECTRA      # accepted fits per correction. The loop collects
                                         # this many phases, circular-averages them, CLEARS
@@ -282,6 +294,7 @@ class StabilizationConfig(PrimitiveSerde):
             "min_visibility": self.min_visibility,
             "set_phase": self.set_phase.to_primitive(),
             "invert_correction": self.invert_correction,
+            "phase_sign_positive": self.phase_sign_positive,
             "avg_spectra": self.avg_spectra,
             "capture_n": self.capture_n,
             "min_amplitude_frac": self.min_amplitude_frac,
@@ -308,6 +321,8 @@ class StabilizationConfig(PrimitiveSerde):
             set_phase=Angle.from_primitive(v["set_phase"]),
             # Configs persisted before the toggle existed ran the baseline sign -> False.
             invert_correction=bool(v.get("invert_correction", False)),
+            # Configs persisted before the setting existed normalised to c1 > 0 -> True.
+            phase_sign_positive=bool(v.get("phase_sign_positive", True)),
             # The knobs of the timed EWMA loop (loop_gain, slow_correction,
             # correction_period_s, shape_mismatch_max) went with it. A config persisted
             # while it existed still carries them; they are simply not read, so an old file

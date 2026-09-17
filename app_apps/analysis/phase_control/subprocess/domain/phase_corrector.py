@@ -8,13 +8,23 @@ import numpy as np
 from base_core.math.enums import AngleUnit
 from base_core.math.models import Angle
 
-# Legacy default, restored. The loop holds when the block-averaged error is inside this and
-# corrects the WHOLE error when it is outside -- there is no proportional band and no gain.
-PHASE_TOLERANCE = Angle(10, AngleUnit.DEG)
+# THE TRACKED PHASE IS TWICE THE LEGACY ONE. The legacy loop (Phase_Control dcf82bb) fit
+# usCFG_projection = baseline + (1-baseline)*[G*sin(p + a*(l-ls)^2)]^2, and sin^2(x) =
+# (1 - cos 2x)/2, so its fitted p was HALF the fringe phase: Theta0 = 2p + pi. This loop fits
+# mid + half*cos(Phi) and tracks Theta0 itself. The legacy constants were tuned on p, so each
+# is doubled or halved here to issue the SAME plate move for the same light. Copying them
+# over unchanged gave twice the gain -- with a full step that turns an error e into -e and
+# the loop swings between the two forever -- and folded the error at half a turn.
 
-# Converts phase error [deg] to half-wave-plate rotation [deg]. A property of the optics:
-# rotating the HWP by theta moves the phase by 4*theta.
-CONVERSION_CONST = 1 / 4
+# Legacy 10 deg on p. The loop holds when the block-averaged error is inside this and
+# corrects the WHOLE error when it is outside -- there is no proportional band.
+PHASE_TOLERANCE = Angle(20, AngleUnit.DEG)
+
+# Converts phase error [deg] to half-wave-plate rotation [deg]. Legacy was -dp/4 = -dTheta0/8,
+# and that is what worked on the bench. If the coupling is 4*gamma (the Jones-matrix
+# derivation) this halves the error every block; if it is 8*gamma it closes it in one. Either
+# way it converges, which the 1/4 on Theta0 does not in the second case.
+CONVERSION_CONST = 1 / 8
 # Baseline direction: which way the plate must turn to REDUCE a positive phase error. Not a
 # free parameter -- it FLIPS with the quarter-wave plate's orientation, so the operator gets
 # a toggle (StabilizationConfig.invert_correction) rather than this constant being retuned.
@@ -127,9 +137,9 @@ class PhaseCorrector:
 
     Restored to the legacy control law, which is deliberately not a servo:
 
-        err = wrap_pi(phase - target)
+        err = wrap_2pi(phase - target)
         if |err| <= tolerance:  do nothing
-        else:                   rotate by -err/4, the WHOLE error, in one move
+        else:                   rotate by -err/8, the WHOLE error, in one move
 
     There is no gain. The loop's stability comes from correcting on a block-averaged error
     at full step, not from taking a fraction of a noisy per-frame one -- a fractional gain
@@ -175,7 +185,7 @@ class PhaseCorrector:
         a differently wrapped error would make the loop look like it was ignoring an error it
         never saw.
         """
-        return self._wrap_phase_pi(Angle(phase - self._target_phase))
+        return self._wrap_phase(Angle(phase - self._target_phase))
 
     def update(self, phase: Angle) -> CorrectionResult | None:
         phase_error = self.wrap_error(phase)
@@ -188,21 +198,16 @@ class PhaseCorrector:
         return CorrectionResult(angle=self._correction_angle, sign=sign)
 
     @staticmethod
-    def _wrap_phase_pi(phase: Angle) -> Angle:
-        """Fold to the nearest multiple of pi, i.e. into [-pi/2, +pi/2].
+    def _wrap_phase(phase: Angle) -> Angle:
+        """Fold to the nearest multiple of 2*pi, i.e. into [-pi, +pi].
 
-        This is the legacy law, restored verbatim, and it is modulo PI -- not 2*pi. A phase
-        exactly pi from target therefore reads as ZERO error and the loop holds there.
-
-        That is not an oversight to be tidied away. The measured quantity is a fringe
-        pattern and the HWP conversion is 1/4, so the loop is only ever asked to move the
-        plate by at most pi/4 in phase terms; folding at pi keeps every commanded move
-        inside that range. Wrapping to 2*pi instead lets a near-pi error command a move
-        twice as large as anything the optics were characterised over, which is the regime
-        where the previous loop shot away. If the two fixed points need telling apart, that
-        is what invert_correction is for -- not this wrap.
+        2*pi on Theta0 is the legacy fold: the legacy loop folded at pi, but on p = Theta0/2,
+        where sin^2 repeats every pi. Folding Theta0 itself at pi would make a phase exactly
+        pi off target -- inverted fringes, a different physical state -- read as zero error,
+        and would send every error between 90 and 180 deg towards that false fixed point.
+        The largest commanded move is pi/8 in plate terms (22.5 deg), as it was before.
         """
-        step = math.pi
+        step = 2.0 * math.pi
         k = round(float(phase) / step)
         return Angle(float(phase) - k * step, wrap=False)
 

@@ -300,7 +300,7 @@ class PhaseStabilizationWorker(ThreadedWorker):
         """How far the block currently sits from the setpoint, in degrees.
 
         Folded through the corrector's own wrap so the number on the panel is the same one
-        the deadband is tested against -- including the fold at pi. Publishing a differently
+        the deadband is tested against -- including the fold at 2pi. Publishing a differently
         wrapped error would make the loop look like it was ignoring a large error whenever
         the two disagreed.
 
@@ -334,6 +334,7 @@ class PhaseStabilizationWorker(ThreadedWorker):
 
     @worker_thread
     def _on_set_config(self, msg: SetStabilizationConfig) -> None:
+        sign_changed = msg.config.phase_sign_positive != self._config.phase_sign_positive
         self._config = msg.config
         # A config change can move lambda_ref, the window or the target, so the phases
         # already collected no longer describe the same quantity. The block goes; there is
@@ -345,6 +346,19 @@ class PhaseStabilizationWorker(ThreadedWorker):
         # spurious refit that made the previous loop untrustworthy.
         if self._tracker is not None:
             self._tracker.retune(self._config)
+            if sign_changed and self._tracker.flip_sign():
+                # The sign convention flipped under a locked loop: Phi -> -Phi, so the
+                # setpoint and the drawn polynomial are negated with it. The error keeps its
+                # magnitude and changes sign, which invert_correction must then account for.
+                tpl = self._tracker.template
+                assert tpl is not None
+                self._config.set_phase = Angle((-float(self._config.set_phase)) % _TWO_PI)
+                p = self._config.params
+                p.c0, p.c1, p.c2, p.c3 = (float(c) for c in tpl.csig)
+                p.phase_ref = -float(p.phase_ref)
+                log.info("phase sign -> %s: template flipped, set_phase = %.3f rad",
+                         "+" if self._config.phase_sign_positive else "-",
+                         float(self._config.set_phase))
         if self._corrector is not None:
             # Retuned in place, not reconstructed: these are knobs the operator turns WHILE
             # watching the loop, and a fresh PhaseCorrector would be a behaviour change

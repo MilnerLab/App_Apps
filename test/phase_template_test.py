@@ -121,10 +121,10 @@ def test_rigid_freeze_survives_intensity_drift() -> None:
             worst = max(worst, abs(np.angle(np.exp(1j * (got - base)))))
     # The residual is not zero: scaling leaves ((s-1)*mid + offset)*half in the correlation,
     # which is oscillatory and nearly -- but not exactly -- orthogonal to cos(Phi). What
-    # matters is the size: ~10 mrad is 0.6 deg, against a PHASE_TOLERANCE of 10 deg.
+    # matters is the size: ~10 mrad is 0.6 deg, against a PHASE_TOLERANCE of 20 deg.
     check(worst < 0.02,
           f"phase shifts {worst*1e3:.2f} mrad under 0.3x-2x intensity and +-50 ct baseline "
-          f"(tolerance is 10 deg = 175 mrad)")
+          f"(tolerance is 20 deg = 349 mrad)")
 
 
 def test_amplitude_collapses_without_fringes() -> None:
@@ -260,31 +260,34 @@ def test_block_never_straddles_a_correction() -> None:
 
 def test_deadband_and_full_step() -> None:
     """There is no gain: inside the deadband nothing moves, outside it the WHOLE error is
-    corrected in one step of -err/4."""
+    corrected in one step of -err/8 (the legacy -dp/4 on p = Theta0/2)."""
     c = PhaseCorrector()
     c.target_phase = Angle(0.0)
     check(c.update(Angle(0.15, wrap=False)) is None,
-          "0.15 rad (8.6 deg) is inside the 10 deg deadband -- hold")
+          "0.15 rad (8.6 deg) is inside the 20 deg deadband -- hold")
     r = c.update(Angle(1.0, wrap=False))
     check(r is not None, "1.0 rad is outside the deadband -- correct")
-    expected = -math.degrees(1.0) / 4.0
+    expected = -math.degrees(1.0) / 8.0
     check(abs(r.angle.Deg - expected) < 1e-9,
           f"the whole error, at once: {r.angle.Deg:.4f} deg (expected {expected:.4f})")
 
 
-def test_wrap_is_modulo_pi() -> None:
-    """The legacy wrap folds at pi, not 2*pi, so a phase pi from target reads as ZERO error.
+def test_wrap_is_modulo_2pi() -> None:
+    """The error folds at 2*pi on Theta0 -- the legacy fold at pi on p = Theta0/2.
 
-    This is restored deliberately -- see PhaseCorrector._wrap_phase_pi. The test exists so
-    that if anyone ever "fixes" it to 2*pi, they do it on purpose.
+    A phase pi from target is inverted fringes, a different state, and must be corrected,
+    not held. The largest commanded move stays at the legacy 22.5 deg.
     """
     c = PhaseCorrector()
     c.target_phase = Angle(0.0)
-    check(c.update(Angle(math.pi, wrap=False)) is None,
-          "exactly pi off target folds to zero error -- the loop holds there")
-    r = c.update(Angle(math.pi / 2 + 0.3, wrap=False))
-    check(r is not None and abs(r.angle.Deg) < 90.0 / 4.0,
-          "no commanded move ever exceeds a quarter of the pi fold")
+    r = c.update(Angle(math.pi - 0.01, wrap=False))
+    check(r is not None and abs(r.angle.Deg + math.degrees(math.pi - 0.01) / 8.0) < 1e-9,
+          "pi - 0.01 off target is corrected in full, not folded to ~0")
+    r = c.update(Angle(math.pi + 0.3, wrap=False))
+    check(r is not None and r.angle.Deg > 0.0,
+          "just past pi folds to a negative error -- the short way round")
+    check(abs(r.angle.Deg) <= 180.0 / 8.0 + 1e-9,
+          "no commanded move ever exceeds an eighth of the 2pi fold")
 
 
 def test_capture_survives_a_drifting_phase() -> None:
@@ -344,7 +347,58 @@ def test_capture_survives_a_drifting_phase() -> None:
           f"({err:.4f} rad), which the first block then corrects")
 
 
+def test_phase_sign_setting() -> None:
+    """The configured sign convention decides which of Phi / -Phi the loop tracks.
+
+    The same light must read as the same error magnitude with the opposite sign under the
+    two settings, flipping the setting on a locked tracker must equal capturing under the
+    other setting, and a config saved before the setting existed must load as positive.
+    """
+    def locked(positive: bool) -> tuple[StabilizationTracker, float]:
+        cfg = StabilizationConfig(params=FringeFitParams(), phase_sign_positive=positive)
+        tracker = StabilizationTracker(cfg)
+        target = None
+        for i in range(cfg.capture_n):
+            out = tracker.update(X, trace(0.0, seed=i))
+            if out.target_phase is not None:
+                target = out.target_phase
+        assert target is not None, "capture did not complete"
+        return tracker, target
+
+    def err(tracker: StabilizationTracker, target: float, delta: float) -> float:
+        out = tracker.update(X, trace(delta, seed=99))
+        assert out.phase_abs is not None
+        return float(np.angle(np.exp(1j * (out.phase_abs - target))))
+
+    pos, t_pos = locked(True)
+    neg, t_neg = locked(False)
+    assert pos.template is not None and neg.template is not None
+    check(pos.template.csig[2] > 0 and neg.template.csig[2] < 0,
+          f"capture normalises the chirp c2 to the configured sign "
+          f"(+: {pos.template.csig[2]:.3g}, -: {neg.template.csig[2]:.3g})")
+    check(abs(pos._config.params.c1 - pos.template.csig[1]) < 1e-12
+          and abs(neg._config.params.c1 - neg.template.csig[1]) < 1e-12,
+          "the committed overlay params carry the template's sign, not the raw fit's")
+
+    e_pos, e_neg = err(pos, t_pos, 0.4), err(neg, t_neg, 0.4)
+    check(abs(e_pos - 0.4) < 0.05 and abs(e_neg + 0.4) < 0.05,
+          f"a +0.4 rad shift reads {e_pos:+.3f} under + and {e_neg:+.3f} under -")
+
+    check(pos.flip_sign(), "flip_sign acts on an installed template")
+    e_flip = err(pos, -t_pos, 0.4)
+    check(abs(e_flip - e_neg) < 0.05,
+          f"flipping a locked tracker matches capturing under - ({e_flip:+.3f} vs {e_neg:+.3f})")
+
+    prim = StabilizationConfig(params=FringeFitParams(), phase_sign_positive=False).to_primitive()
+    check(StabilizationConfig.from_primitive(prim).phase_sign_positive is False,
+          "phase_sign_positive round-trips")
+    del prim["phase_sign_positive"]
+    check(StabilizationConfig.from_primitive(prim).phase_sign_positive is True,
+          "a config saved before the setting existed loads as positive")
+
+
 TESTS = [
+    test_phase_sign_setting,
     test_closed_form_matches_brute_force,
     test_cost,
     test_rigid_freeze_survives_intensity_drift,
@@ -357,7 +411,7 @@ TESTS = [
     test_phase_batch_is_circular,
     test_block_never_straddles_a_correction,
     test_deadband_and_full_step,
-    test_wrap_is_modulo_pi,
+    test_wrap_is_modulo_2pi,
 ]
 
 if __name__ == "__main__":

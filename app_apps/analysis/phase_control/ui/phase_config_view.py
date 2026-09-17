@@ -61,6 +61,7 @@ class PhaseConfigForm(DirtyFormWidget):
         "min_visibility":    FloatSpec("Abort fit below visibility", 0.0, 1.0,   decimals=3, step=0.01),
         "phase_tolerance":   AngleSpec("Deadband"),
         "invert_correction": BoolSpec("Invert correction sign"),
+        "phase_sign_positive": BoolSpec("Phase sign: chirp positive"),
         "avg_spectra":       IntSpec("Frames averaged per correction", 1, 1000),
         "move_settle_s":     FloatSpec("Settle after move (s)",    0.0,  10.0,   decimals=2, step=0.05),
         "capture_n":         IntSpec("Traces per reference capture", 1, 1000),
@@ -74,7 +75,8 @@ class PhaseConfigForm(DirtyFormWidget):
             "wavelength_range", "rms_frac_threshold", "inlier_threshold", "min_visibility",
         ]),
         ("Control loop", [
-            "phase_tolerance", "invert_correction", "avg_spectra", "move_settle_s",
+            "phase_tolerance", "invert_correction", "phase_sign_positive", "avg_spectra",
+            "move_settle_s",
         ]),
         # Both are editable while running, and for the same reason min_visibility is: they
         # can only be judged against a live trace and a running loop.

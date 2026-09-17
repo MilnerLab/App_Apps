@@ -43,7 +43,6 @@ from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_confi
 )
 from app_apps.analysis.phase_control.subprocess.domain.phase_template import (
     PhaseTemplate,
-    align_sign,
     fit_phase,
     instantaneous_frequency,
 )
@@ -227,36 +226,58 @@ class StabilizationTracker:
         # from here on nothing else will commit -- the tracking fit solves one parameter and
         # never touches these.
         self._config.params.commit(r, float(r.phase_at(lam_ref)))
+        # ...but in the template's sign convention, not the raw fit's. The raw csig can have
+        # either sign; drawing it next to a c0 later taken from the template (_redraw_at)
+        # would mix the two conventions in one polynomial.
+        p = self._config.params
+        p.c0, p.c1, p.c2, p.c3 = (float(c) for c in tpl.csig)
+        p.phase_ref = tpl.absolute_phase(0.0, lam_ref)
 
         # The setpoint is the phase of the trace the template was built FROM, so the first
         # tracked frame reads ~0 error rather than an arbitrary offset.
         target = tpl.absolute_phase(fit_phase(wl, avg, tpl).delta, lam_ref)
-        log.info("captured over %d traces, vis=%.3f, c1=%.4g, amp_ref=%.3g, target=%.3f rad",
-                 n_run, vis, tpl.csig[1], tpl.amp_ref, target)
+        log.info("captured over %d traces, vis=%.3f, c2=%.4g (sign %s), amp_ref=%.3g, "
+                 "target=%.3f rad", n_run, vis, tpl.csig[2],
+                 "+" if self._config.phase_sign_positive else "-", tpl.amp_ref, target)
         return float(target)
 
+    def flip_sign(self) -> bool:
+        """Negate the installed template (Phi -> -Phi) after the sign setting changed.
+
+        The fringe fit is identical under the flip, so tracking simply continues in the new
+        convention; the caller negates the setpoint to match. Returns False with nothing
+        installed -- the next capture then applies the setting on its own.
+        """
+        tpl = self._template
+        if tpl is None or tpl.is_empty():
+            return False
+        tpl.csig = [-c for c in tpl.csig]
+        return True
+
     def _fix_sign(self, tpl: PhaseTemplate) -> PhaseTemplate:
-        """Pin the sign of the frozen phase, across captures AND across app launches.
+        """Normalise the frozen phase to the configured sign convention.
 
         The cold fit is sign-ambiguous -- the model is ``mid + half*cos(Phi)`` and cosine is
         even, so ``Phi -> -Phi`` is a bit-identical fit and which one the optimiser lands on
         is a seed accident. An inverted template inverts the LOOP: the measured error changes
         sign and the correction drives away from the setpoint instead of towards it.
 
-        ``align_sign`` keeps each capture consistent with the one before it, which is what
-        makes the operator's ``invert_correction`` stay valid across a re-capture. But it is
-        only a RELATIVE guard -- with no predecessor it returns the template unchanged, so
-        the first capture after every launch was a coin flip and ``invert_correction`` had to
-        be re-decided against a loop that had already been let go. Fixing ``c1 > 0`` when
-        there is no predecessor makes that first capture deterministic too, so the toggle is
-        set once for the optics and then stays put.
+        The convention is ABSOLUTE and set by the operator (``phase_sign_positive``): the
+        chirp c2 is made positive or negative on every capture, independent of any earlier
+        template. Together with ``invert_correction`` it fixes the plate direction for the
+        optics; flip it when the circular polarization is swapped.
 
-        Near c1 = 0 the convention is arbitrary -- but so is the fit's own sign there, and a
-        carrier that weak has no phase worth tracking anyway.
+        c2, not c1, because that is what the legacy loop pinned (its fit was seeded with, and
+        warm-started from, acceleration a > 0) and because c1 -- the fringe frequency at the
+        window centre -- changes sign wherever the delay puts the frequency zero. With the
+        zero at ~808 nm and the window centred near 803 nm, legacy a > 0 meant c1 < 0: pinning
+        c1 > 0 had silently inverted the working convention.
+
+        Near c2 = 0 (grating at zero chirp) the convention is arbitrary -- but so is the
+        centrifuge, which is not sweeping there.
         """
-        if self._template is not None and not self._template.is_empty():
-            return align_sign(tpl, self._template)
-        if float(tpl.csig[1]) < 0.0:
+        want_positive = bool(self._config.phase_sign_positive)
+        if (float(tpl.csig[2]) > 0.0) != want_positive and float(tpl.csig[2]) != 0.0:
             tpl.csig = [-c for c in tpl.csig]
         return tpl
 
