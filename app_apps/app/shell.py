@@ -29,7 +29,7 @@ class AppShell(LabMainWindow):
         bus: EventBus,
         dispatcher: QtDispatcher,
     ) -> None:
-        super().__init__("Phase Control Lab", bus, dispatcher)
+        super().__init__("App Apps", bus, dispatcher)
         self.resize(500, 350)
         install_ui(QApplication.instance())
 
