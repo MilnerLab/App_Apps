@@ -196,7 +196,7 @@ class PhaseControlView(Panel):
 
     def _update_axis_label(self, *_: object) -> None:
         freq = self.vm.svc.mode == ControlMode.PHASE_TRACKING and self.vm.stabilization_vm.plot_frequency
-        self._plot.setLabel("bottom", "Detuning Ω (rad/ps)" if freq else "Wavelength (nm)")
+        self._plot.setLabel("bottom", "Two-photon Ω (rad/ps)" if freq else "Wavelength (nm)")
 
     def _on_spectrum_updated(self, wavelengths: np.ndarray, intensities: np.ndarray) -> None:
         x = wavelengths
