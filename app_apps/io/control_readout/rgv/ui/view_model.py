@@ -27,7 +27,7 @@ from base_qt.ui.panel_view_model import ui_thread
 #: On a half-wave plate the OPTICAL modulation is four times this -- a HWP turned by theta
 #: rotates the polarisation by 2*theta and shifts the relative circular phase by 4*theta --
 #: so 0.5 rev/s sweeps the phase through four full cycles a second.
-MIN_SPIN_HZ = 0.5
+MIN_SPIN_HZ = 0.001
 MAX_SPIN_HZ = 2.0
 DEFAULT_SPIN_HZ = 0.5
 DEG_PER_REV = 360.0
