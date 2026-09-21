@@ -5,4 +5,13 @@ opencv-python
 pyserial
 lmfit
 pyqtgraph
+pyvisa
+h5py
+# NOTE: pyvisa (oscilloscope over USBTMC) and h5py (XCORR run storage) are imported by
+# Devices/ and Base_Core/ code, not by App_Apps. They belong here anyway: this file
+# provisions App_Apps/.venv, and SubprocessService defaults python_exe to sys.executable,
+# so every device subprocess runs under *this* interpreter. Putting them in
+# Devices/_requirements_x64.txt would not work -- `-e ../Devices` resolves that package's
+# pyproject.toml (dependencies = []), not its sibling requirements file. pyserial above
+# is the existing precedent.
 # spinnaker: install manually on Windows from the .whl in C:\pyspinfiles\

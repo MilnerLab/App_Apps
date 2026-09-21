@@ -1,0 +1,41 @@
+\subsection{Phase Control and Real-Time Stabilization}
+Monitoring the projected centrifuge spectrum and fitting to eq. \eqnref{eq:spectral_intensity_common} lends itself to several feedback loops: one could use the visibility $V$ to stabilize the arm powers by rotating a quarter-wave plate, or tune the centrifuge automatically to a chosen setpoint by using the reconstructed FWHM of $f_\mathrm{cfg}$ and translating the stages that set the chirp and the delay. The largest benefit, however, is that the same fit lets us actively stabilize the centrifuge phase.
+
+Thermal expansion and vibrations change the phase of the centrifuge and thus the phase of the spectrum oscillations (eq. \eqnref{eq:spectrum_phase}). Compensating for vibrations is not possible with our setup, due to limitations set by the reaction time of the components. Phase drift that occurs on a minute timescale, however, can easily be compensated. In theory, thermal expansion can alter the constant, linear and quadratic coefficients in eq. \eqnref{eq:spectrum_phase} all at once. Because the path length and chirp difference introduced by any reasonable expansion do not significantly change $\Theta_1$ and $\Theta_2$, it is enough to correct for a constant phase. When fitting the recorded spectrum to eq. \eqnref{eq:spectral_intensity_common} with $\Theta_0$ being the only free variable, one can calculate the change
+\begin{equation}
+    \delta\Theta_0
+=
+\Theta_0-\Theta_{0,\mathrm{set}}
+\end{equation}
+which is used as the error signal for active phase correction.
+
+The correction is applied by rotating a half-wave plate (see \figref{setup_fig}, component \textbf{2}). A rotation of the half-wave plate by an angle \(\delta\gamma\) adds opposite optical phases to the two circular components\footnote{The Jones matrix for a HWP rotated by $\gamma$ is $J_{\mathrm{HWP}}(\gamma)
+=
+\begin{pmatrix}
+\cos(2\gamma) & \sin(2\gamma) \\
+\sin(2\gamma) & -\cos(2\gamma)
+\end{pmatrix}$. Applying this matrix to the circular polarization basis vector (compare \eqnref{eq:circular_fields}) gives: $J_{\mathrm{HWP}}(\gamma)\,\vec e_R
+=
+e^{i2\gamma}\vec e_L$ and $J_{\mathrm{HWP}}(\gamma)\,\vec e_L
+=
+e^{-i2\gamma}\vec e_R$.}, 
+\begin{equation}
+    \varphi_{R0}\rightarrow \varphi_{R0}+2\delta\gamma,
+\qquad
+\varphi_{L0}\rightarrow \varphi_{L0}-2\delta\gamma,
+\end{equation}
+up to an overall sign convention. Hence, the relative phase entering the interference term changes by
+\begin{equation}
+    \delta\Theta_0
+=
+\delta(\varphi_{R0}-\varphi_{L0})
+=
+4\delta\gamma.
+\end{equation}
+The required wave-plate correction is therefore
+\begin{equation}
+    \delta\gamma
+=
+-\frac{\delta\Theta_0}{4},
+\end{equation}
+where the sign is chosen according to the experimentally calibrated response.

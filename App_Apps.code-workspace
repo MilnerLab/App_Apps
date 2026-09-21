@@ -24,10 +24,12 @@
       "name": "Reusable debug",
       "type": "debugpy",
       "request": "launch",
-      "program": "${file}",
+      "program": "${file}}",
 	    "cwd": "${workspaceFolder:App_Apps}",
-	    "env": { "PYTHONPATH": "${workspaceFolder:App_Apps}" },
-      "python": "${workspaceFolder:App_Apps}/.venv/Scripts/python.exe",
+	    "env":  {
+      "PYTHONPATH": "${workspaceFolder:App_Apps};${workspaceFolder:Base_Core};${workspaceFolder:Base_Qt};${workspaceFolder:Devices}"
+      },
+      //"python": "${workspaceFolder:App_Apps}/.venv/Scripts/python.exe",
       "console": "integratedTerminal",
       "justMyCode": true
     } 

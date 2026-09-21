@@ -47,6 +47,15 @@ class PhaseControlService(SubprocessService):
     def mode(self) -> ControlMode:
         return self._mode
 
+    @property
+    def active_state(self) -> WorkerStatus:
+        """The status of whichever worker is currently driving the HWP.
+
+        The device panel's RGV interlock reads this: the operator must not turn the plate by
+        hand while EITHER worker is running, and which one that is depends on the mode.
+        """
+        return self._active_handle().state
+
     def set_config(self) -> None:
         self._phase_stabilization_handle.set_config(self._config)
 

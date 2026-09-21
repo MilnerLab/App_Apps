@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from base_core.framework.events.event_bus import EventBus
+from base_core.ipc.device_worker_handle import DeviceHandleMixin
 from base_core.ipc.message import OKReply
 from base_core.ipc.worker_handle import BaseWorkerHandle
 from control_readout.servo_shutter.messages import BlockArm, UnblockArm
@@ -8,7 +9,7 @@ from control_readout.servo_shutter.messages import BlockArm, UnblockArm
 from app_apps.io.control_readout.servo.events import RequestSetArmBlocked
 
 
-class ServoShutterHandle(BaseWorkerHandle):
+class ServoShutterHandle(DeviceHandleMixin, BaseWorkerHandle):
     """Main-process handle to the centrifuge-arm servo shutters (manual stub)."""
 
     WORKER_ID = "servo_shutter"

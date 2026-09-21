@@ -1,45 +1,31 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
-
 from base_core.framework.events import EventBus
-from base_core.ipc.worker_handle import WorkerStatus
 from base_qt.app.dispatcher import QtDispatcher
-from base_qt.ui.panel_view_model import PanelViewModel, ui_thread
 
 from app_apps.io.control_readout.mfa_cc.handler import MfaccHandle
-from app_apps.io.control_readout.mfa_cc.events import MfaccWorkerStateChanged
+from app_apps.io.control_readout.mfa_cc.events import (
+    MfaccWorkerStateChanged,
+    NewMfaccPosition,
+)
+from app_apps.io.control_readout.ui.motion_view_model import MotionViewModel
 
 
-class MfaccViewModel(PanelViewModel):
-    worker_state_changed = Signal(object)  # emits WorkerStatus
+class MfaccViewModel(MotionViewModel):
+    """The CENTRIFUGE delay -- not the pump-probe delay, which this stage does not set.
 
-    def __init__(
-        self,
-        bus: EventBus,
-        dispatcher: QtDispatcher,
-        handle: MfaccHandle,
-    ) -> None:
-        super().__init__(bus, dispatcher)
-        self._handle = handle
-        self._sub(MfaccWorkerStateChanged, self._on_state_changed)
+    A commanded move here invalidates the frozen phase template
+    (PhaseStabilizationHandle subscribes to RequestMoveMfacc) -- the fringe shape moves
+    with the delay.
 
-    @property
-    def worker_status(self) -> WorkerStatus:
-        return self._handle.state
+    Everything except the travel limits comes from ``MotionViewModel``; see it for why a
+    relative move is refused until the position has been read.
+    """
 
-    @ui_thread
-    def _on_state_changed(self, _: MfaccWorkerStateChanged) -> None:
-        self.worker_state_changed.emit(self._handle.state)
+    units = "mm"
+    decimals = 4
+    limits = (0.0, 25.0)
+    default_step = 0.01
 
-    def start(self) -> None:
-        self._handle.start()
-
-    def pause(self) -> None:
-        self._handle.pause()
-
-    def resume(self) -> None:
-        self._handle.resume()
-
-    def stop(self) -> None:
-        self._handle.stop()
+    def __init__(self, bus: EventBus, dispatcher: QtDispatcher, handle: MfaccHandle) -> None:
+        super().__init__(bus, dispatcher, handle, MfaccWorkerStateChanged, NewMfaccPosition)

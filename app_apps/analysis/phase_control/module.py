@@ -4,7 +4,7 @@ from app_apps.analysis.phase_control.envelope_handle import EnvelopeHandle
 from app_apps.analysis.phase_control.phase_stabilization_handle import PhaseStabilizationHandle
 from app_apps.analysis.phase_control.service import PhaseControlService
 from app_apps.analysis.phase_control.subprocess.domain.envelope_config import EnvelopeConfig
-from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig, SpectralFitParams
+from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig, FringeFitParams
 from spm_002.buffer import SpectrumMemorySpec
 from app_apps.io.spectrometer.module import SpectrometerModule
 from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
@@ -21,7 +21,7 @@ class PhaseControlModule(BaseModule):
     def register(self, c: Container, ctx: AppContext) -> None:
         spec = c.get(SpectrumMemorySpec)
         writer = c.get(SpectrometerWorkerHandle)
-        config = StabilizationConfig(params=SpectralFitParams())
+        config = StabilizationConfig(params=FringeFitParams())
         envelope_config = EnvelopeConfig()
 
         phase_tracking_handle = PhaseStabilizationHandle(bus=ctx.event_bus, spectrum_writer=writer, config=config)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+import numpy as np
 from PySide6.QtCore import Signal
 
 from app_apps.analysis.phase_control.subprocess.domain.mode import ControlMode
@@ -35,6 +36,7 @@ class PhaseControlViewModel(PanelViewModel):
         self._svc = phase_control_svc
         self._stabilization_vm = stabilization_vm
         self._envelope_vm = envelope_vm
+        self._last_spectrum: tuple[np.ndarray, np.ndarray] | None = None
         spec_handle.register_consumer(self.CONSUMER_ID)
         self._sub(SpectrumAvailable, self._on_spectrum)
 
@@ -53,6 +55,25 @@ class PhaseControlViewModel(PanelViewModel):
     def set_mode(self, mode: ControlMode) -> None:
         self._svc.set_mode(mode)
 
+    def save_spectrum_csv(self, path: str) -> None:
+        """Write the most recently received raw spectrum to a CSV file."""
+        if self._last_spectrum is None:
+            self._msg("No spectrum to save yet.", MessageLevel.WARNING)
+            return
+        wavelengths, intensities = self._last_spectrum
+        try:
+            np.savetxt(
+                path,
+                np.column_stack((wavelengths, intensities)),
+                delimiter=",",
+                header="wavelength_nm,intensity",
+                comments="",
+            )
+        except Exception as exc:
+            self._msg(f"Failed to save spectrum: {exc}", MessageLevel.ERROR)
+            return
+        self._msg(f"Spectrum saved to {path}", MessageLevel.INFO)
+
     def on_close(self) -> None:
         self._spec_handle.unregister_consumer(self.CONSUMER_ID)
         super().on_close()
@@ -63,6 +84,9 @@ class PhaseControlViewModel(PanelViewModel):
             buf = self._spec_handle.buffer
             wavelengths = buf.wavelengths(event.slot)
             intensities = buf.intensities(event.slot)
+            # Copy out of shared memory so the cached spectrum stays valid after
+            # the slot is acked and reused by the writer.
+            self._last_spectrum = (np.array(wavelengths), np.array(intensities))
             self.spectrum_updated.emit(wavelengths, intensities)
         except Exception as exc:
             self._msg(f"Spectrum read error: {exc}", MessageLevel.WARNING)
