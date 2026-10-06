@@ -55,9 +55,6 @@ class ControlReadoutModule(BaseModule):
         from app_apps.io.control_readout.uts150cc.ui.view import Uts150ccView
         from base_qt.app.dispatcher import QtDispatcher
 
-        c.register_singleton(ELL14RotatorViewModel, lambda c: ELL14RotatorViewModel(
-            ctx.event_bus, c.get(QtDispatcher), c.get(ELL14RotatorHandle)
-        ))
         c.register_singleton(Fms300ppViewModel, lambda c: Fms300ppViewModel(
             ctx.event_bus, c.get(QtDispatcher), c.get(Fms300ppHandle)
         ))
@@ -68,9 +65,14 @@ class ControlReadoutModule(BaseModule):
             ctx.event_bus, c.get(QtDispatcher), c.get(Uts150ccHandle)
         ))
         # PhaseControlService, not PhaseStabilizationHandle: the envelope worker drives the
-        # same half-wave plate, and stop_worker() stops whichever of the two is active.
+        # same half-wave plate, stop_worker() stops whichever of the two is active, and the
+        # service knows which rotator (RGV or ELL14) phase stabilization is switched onto.
         # Resolved lazily inside the factory, so module registration order does not matter.
         from app_apps.analysis.phase_control.service import PhaseControlService
+        c.register_singleton(ELL14RotatorViewModel, lambda c: ELL14RotatorViewModel(
+            ctx.event_bus, c.get(QtDispatcher), c.get(ELL14RotatorHandle),
+            c.get(PhaseControlService),
+        ))
         c.register_singleton(RgvViewModel, lambda c: RgvViewModel(
             ctx.event_bus, c.get(QtDispatcher), c.get(RgvHandle),
             c.get(PhaseControlService),

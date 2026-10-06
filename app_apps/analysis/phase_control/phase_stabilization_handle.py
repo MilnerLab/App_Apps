@@ -10,6 +10,7 @@ from app_apps.analysis.phase_control.events import (
     PhaseBatchChanged,
     PhaseTrackingStateChanged,
     StabilizationConfigChanged,
+    StabilizationRotatorChanged,
 )
 
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
@@ -22,8 +23,10 @@ from app_apps.analysis.phase_control.subprocess.messages import (
     SetStabilizationConfig,
     SpectrumProcessed,
 )
+from app_apps.io.control_readout.ell14.events import RequestRotate
 from app_apps.io.control_readout.mfa_cc.events import RequestMoveMfacc
 from app_apps.io.control_readout.rgv.events import RequestRotateRGV
+from app_apps.io.control_readout.rotator import HwpRotator
 from app_apps.io.control_readout.uts150cc.events import RequestMoveUts150cc
 from app_apps.io.spectrometer.events import SpectrometerConfigChanged, SpectrumAck
 from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
@@ -37,6 +40,10 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
         super().__init__(self.WORKER_ID, bus, state_event=PhaseTrackingStateChanged)
         self._spectrum_writer = spectrum_writer
         self._config = config
+        # Which rotator the corrections go to. Held here, in the main process, because this
+        # is where CorrectionAvailable becomes a device command -- the worker only computes
+        # an increment and never needs to know which plate carries it.
+        self._rotator = HwpRotator.RGV100BL
         self._unsub_config_synced: Callable[[], None] | None = None
 
     def subscribe(self) -> None:
@@ -83,8 +90,25 @@ class PhaseStabilizationHandle(BaseWorkerHandle):
             self._unsub_config_synced = None
         super()._on_disconnect()
 
+    @property
+    def rotator(self) -> HwpRotator:
+        return self._rotator
+
+    def set_rotator(self, rotator: HwpRotator) -> None:
+        if rotator == self._rotator:
+            return
+        self._rotator = rotator
+        # The block was measured while the other plate was the actuator; a correction
+        # averaged across the switch would be applied to a plate it does not describe.
+        if self._connector is not None:
+            self._emit(DropBatch(reason="rotator switched"))
+        self._bus.publish(StabilizationRotatorChanged(rotator=rotator))
+
     def _on_correction_available(self, msg: CorrectionAvailable) -> None:
-        self._bus.publish(RequestRotateRGV(angle=msg.angle))
+        if self._rotator == HwpRotator.ELL14:
+            self._bus.publish(RequestRotate(angle=msg.angle, sign=msg.sign))
+        else:
+            self._bus.publish(RequestRotateRGV(angle=msg.angle))
 
     def _on_spectrum_processed(self, msg: SpectrumProcessed) -> None:
         self._bus.publish(SpectrumAck(slot=msg.slot, item_id=msg.item_id, consumer_id=msg.consumer_id))

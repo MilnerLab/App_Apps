@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
@@ -12,10 +13,12 @@ from PySide6.QtWidgets import (
 from base_qt.ui.panel_view import PanelView
 
 from app_apps.io.control_readout.ui.motion_controls import MotionControls
+from app_apps.io.control_readout.ui.stabilization_interlock import confirm_stop_stabilization
 from app_apps.io.control_readout.rgv.ui.view_model import (
     DEFAULT_SPIN_HZ,
     MAX_SPIN_HZ,
     MIN_SPIN_HZ,
+    SPIN_DECIMALS,
     RgvViewModel,
 )
 
@@ -74,9 +77,11 @@ class RgvControls(MotionControls):
         row.setSpacing(6)
 
         self._rate = QDoubleSpinBox()
-        self._rate.setDecimals(2)
+        self._rate.setDecimals(SPIN_DECIMALS)
         self._rate.setRange(MIN_SPIN_HZ, MAX_SPIN_HZ)
-        self._rate.setSingleStep(0.1)
+        # Adaptive: the arrows step by ~a tenth of the current value's decade, so 0.2 steps
+        # by 0.01 and 0.002 by 0.0001 -- a fixed step is either useless slow or useless fast.
+        self._rate.setStepType(QAbstractSpinBox.StepType.AdaptiveDecimalStepType)
         self._rate.setValue(DEFAULT_SPIN_HZ)
         self._rate.setKeyboardTracking(False)
         self._rate.setToolTip(
@@ -113,7 +118,7 @@ class RgvControls(MotionControls):
     def _render_spin(self, spinning: bool, rev_per_s: float) -> None:
         self._spin_btn.setText("Stop spin" if spinning else "Spin")
         self._spin_state.setText(
-            f"spinning — {rev_per_s:.2f} rev/s ({4 * rev_per_s:.1f} Hz phase)"
+            f"spinning — {rev_per_s:.4g} rev/s ({rev_per_s * 360:.4g} deg/s, {4 * rev_per_s:.4g} Hz phase)"
             if spinning else ""
         )
 
@@ -128,20 +133,7 @@ class RgvControls(MotionControls):
         return answer == QMessageBox.StandardButton.Yes
 
     def _confirm_move(self, description: str) -> bool:
-        if not self._rgv_vm.stabilization_running:
-            return True
-        answer = QMessageBox.question(
-            self,
-            "Stabilization is running",
-            f"The phase loop is driving this plate.\n\n"
-            f"Stop stabilization and {description}?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return False
-        self._rgv_vm.stop_stabilization()
-        return True
+        return confirm_stop_stabilization(self, self._rgv_vm, description)
 
 
 class RgvView(PanelView):

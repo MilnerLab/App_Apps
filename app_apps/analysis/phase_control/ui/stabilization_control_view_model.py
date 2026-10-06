@@ -18,8 +18,11 @@ from app_apps.analysis.phase_control.events import (
     PhaseBatchChanged,
     PhaseTrackingStateChanged,
     StabilizationConfigChanged,
+    StabilizationRotatorChanged,
 )
+from app_apps.io.control_readout.ell14.events import NewELL14Angle, RequestRotate
 from app_apps.io.control_readout.rgv.events import NewRGVAngle, RequestRotateRGV
+from app_apps.io.control_readout.rotator import HwpRotator
 from app_apps.io.spectrometer.events import SpectrometerConfigChanged
 from app_apps.analysis.phase_control.subprocess.domain import fringe_core as fc
 from app_apps.analysis.phase_control.subprocess.domain.fringe_fit import display_curve
@@ -95,11 +98,15 @@ class StabilizationControlViewModel(QObject):
         self._capturing = False
         self._error_deg = float("nan")
         self._collected = 0
-        # RequestRotateRGV is what THIS loop asks the plate to do, published by
-        # PhaseStabilizationHandle the moment a correction lands, so it is both the "most
-        # recent correction" readout and the earliest signal that a block just ended.
+        # RequestRotateRGV / RequestRotate is what THIS loop asks the plate to do, published
+        # by PhaseStabilizationHandle the moment a correction lands, so it is both the "most
+        # recent correction" readout and the earliest signal that a block just ended. Both
+        # rotators are subscribed; only the one the loop currently drives is listened to.
         self._unsub_rot = bus.subscribe(RequestRotateRGV, self._on_rotate_requested)
-        self._unsub_rgv = bus.subscribe(NewRGVAngle, self._on_rgv_angle)
+        self._unsub_rot_ell14 = bus.subscribe(RequestRotate, self._on_rotate_requested)
+        self._unsub_rgv = bus.subscribe(NewRGVAngle, self._on_waveplate_angle)
+        self._unsub_ell14 = bus.subscribe(NewELL14Angle, self._on_waveplate_angle)
+        self._unsub_rotator = bus.subscribe(StabilizationRotatorChanged, self._on_rotator_changed)
         # Exposure and averaging change the COUNTS. Frames from either side of that change
         # cannot go into one mean -- the average would sit at some blend of the two
         # amplitudes, which reads as a real change in the light and is not one.
@@ -558,7 +565,14 @@ class StabilizationControlViewModel(QObject):
             return "Next: —"
         return f"Next: {self._remaining} frame{'' if self._remaining == 1 else 's'}"
 
-    def _on_rotate_requested(self, event: RequestRotateRGV) -> None:
+    _ROTATE_EVENT = {HwpRotator.RGV100BL: RequestRotateRGV, HwpRotator.ELL14: RequestRotate}
+    _ANGLE_EVENT = {HwpRotator.RGV100BL: NewRGVAngle, HwpRotator.ELL14: NewELL14Angle}
+
+    def _on_rotate_requested(self, event: RequestRotateRGV | RequestRotate) -> None:
+        # The ELL14 panel publishes RequestRotate for manual jogs too; those are corrections
+        # only when the ELL14 is the plate this loop drives.
+        if type(event) is not self._ROTATE_EVENT[self._handle.rotator]:
+            return
         deg = float(event.angle.Deg)
 
         def _emit() -> None:
@@ -574,7 +588,19 @@ class StabilizationControlViewModel(QObject):
     def _on_spectrometer_config(self, _: SpectrometerConfigChanged) -> None:
         self._dispatcher.post(self.block_reset.emit)
 
-    def _on_rgv_angle(self, event: NewRGVAngle) -> None:
+    def _on_rotator_changed(self, _event: StabilizationRotatorChanged) -> None:
+        def _emit() -> None:
+            # Both readouts described the other plate. Dashes until the new one reports.
+            self._waveplate_deg = None
+            self._last_correction_deg = None
+            self.block_reset.emit()
+            self.readout_changed.emit()
+
+        self._dispatcher.post(_emit)
+
+    def _on_waveplate_angle(self, event: NewRGVAngle | NewELL14Angle) -> None:
+        if type(event) is not self._ANGLE_EVENT[self._handle.rotator]:
+            return
         deg = float(event.angle.Deg)
 
         def _emit() -> None:

@@ -68,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
         AppModule(),
         SpectrometerModule(),
         ControlReadoutModule(),
-        CameraVMIModule(),
+        #CameraVMIModule(),
         OscilloscopeModule(),
         PhaseControlModule(),
         RecordingModule(),

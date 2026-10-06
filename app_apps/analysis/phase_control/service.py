@@ -9,6 +9,7 @@ from spm_002.buffer import SpectrumBuffer, SpectrumMemorySpec
 from app_apps.analysis.phase_control.subprocess.domain.mode import ControlMode
 from app_apps.analysis.phase_control.subprocess.domain.phase_stabilization_config import StabilizationConfig
 from app_apps.analysis.phase_control.subprocess.messages import ProcessSpectrum
+from app_apps.io.control_readout.rotator import HwpRotator
 from app_apps.io.spectrometer.events import SpectrumAvailable
 
 if TYPE_CHECKING:
@@ -55,6 +56,19 @@ class PhaseControlService(SubprocessService):
         hand while EITHER worker is running, and which one that is depends on the mode.
         """
         return self._active_handle().state
+
+    @property
+    def rotator(self) -> HwpRotator:
+        """The rotator the phase loop's corrections drive."""
+        return self._phase_stabilization_handle.rotator
+
+    def set_rotator(self, rotator: HwpRotator) -> None:
+        self._phase_stabilization_handle.set_rotator(rotator)
+
+    @property
+    def rotator_locked(self) -> bool:
+        """True while the phase loop is driving its rotator, so the choice must not change."""
+        return self._phase_stabilization_handle.state in (WorkerStatus.RUNNING, WorkerStatus.BUSY)
 
     def set_config(self) -> None:
         self._phase_stabilization_handle.set_config(self._config)

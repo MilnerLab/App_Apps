@@ -12,17 +12,20 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QStackedWidget,
+    QVBoxLayout,
     QWidget,
 )
 
 from base_core.quantities.constants import SPEED_OF_LIGHT
 from base_core.quantities.enums import Prefix
 from base_qt.ui.panel import Panel
+from base_qt.ui.segmented_control import SegmentedControl
 from app_apps.analysis.phase_control.subprocess.domain.mode import ControlMode
 from app_apps.analysis.phase_control.ui.envelope_control_view import EnvelopeControlView
 from app_apps.analysis.phase_control.ui.phase_config_view import PhaseConfigView
 from app_apps.analysis.phase_control.ui.phase_control_view_model import PhaseControlViewModel
 from app_apps.analysis.phase_control.ui.stabilization_control_view import StabilizationControlView
+from app_apps.io.control_readout.rotator import HwpRotator
 
 # The one frame after a correction is the only curve here that is not hairline: it has to
 # be picked out of the traces it is drawn among. Cosmetic, so it stays screen pixels and
@@ -102,7 +105,22 @@ class PhaseControlView(Panel):
         self._mode_combo = QComboBox()
         self._mode_combo.addItem("Phase Stabilization", ControlMode.PHASE_TRACKING)
         self._mode_combo.addItem("Envelope", ControlMode.ENVELOPE)
-        row.addWidget(self._mode_combo)
+
+        # Which rotator carries the HWP the phase loop turns, switchable at runtime.
+        self._rotator_switch = SegmentedControl([
+            ("RGV", HwpRotator.RGV100BL),
+            ("ELL14", HwpRotator.ELL14),
+        ])
+        self._rotator_switch.setToolTip("Rotator driven by phase stabilization")
+        self._rotator_switch.set_value(self.vm.rotator)
+        self._rotator_switch.setEnabled(not self.vm.rotator_locked)
+
+        mode_col = QVBoxLayout()
+        mode_col.setContentsMargins(0, 0, 0, 0)
+        mode_col.setSpacing(4)
+        mode_col.addWidget(self._mode_combo)
+        mode_col.addWidget(self._rotator_switch)
+        row.addLayout(mode_col)
 
         row.addSpacing(16)  # gap between mode selector and per-mode controls
 
@@ -120,6 +138,10 @@ class PhaseControlView(Panel):
         self.body_layout.addWidget(self._plot, stretch=1)
 
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        self._rotator_switch.value_changed.connect(self.vm.set_rotator)
+        self._connect(self.vm.rotator_changed, self._rotator_switch.set_value)
+        self._connect(self.vm.rotator_locked_changed,
+                      lambda locked: self._rotator_switch.setEnabled(not locked))
         self._save_csv_btn.clicked.connect(self._on_save_csv)
         self._connect(self.vm.spectrum_updated, self._on_spectrum_updated)
         self._connect(self.vm.stabilization_vm.plot_mode_changed, self._update_axis_label)

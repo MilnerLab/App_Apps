@@ -9,7 +9,9 @@ from base_core.ipc.worker_handle import WorkerStatus
 from base_qt.app.dispatcher import QtDispatcher
 from base_qt.ui.app_message import MessageLevel
 
+from app_apps.analysis.phase_control.subprocess.domain.mode import ControlMode
 from app_apps.io.control_readout.rgv.handler import RgvHandle
+from app_apps.io.control_readout.rotator import HwpRotator
 from app_apps.io.control_readout.rgv.events import (
     NewRGVAngle,
     RgvSpinStateChanged,
@@ -19,7 +21,10 @@ from app_apps.io.control_readout.ui.motion_view_model import MotionViewModel
 from base_qt.ui.panel_view_model import ui_thread
 
 
-MIN_SPIN_HZ = 0.001 #we don't know what it actually is.
+# No hardware floor: the XPS takes any non-zero velocity. This is only the smallest step the
+# rate box can show (SPIN_DECIMALS) -- 0.036 deg/s, about 2.8 h per turn.
+SPIN_DECIMALS = 4
+MIN_SPIN_HZ = 10.0 ** -SPIN_DECIMALS
 MAX_SPIN_HZ = 2.0 #a physical hardware limit and should be put in a config in the devices repo. It should not be set in the view or view model.
 DEFAULT_SPIN_HZ = 0.2
 DEG_PER_REV = 360.0
@@ -78,8 +83,14 @@ class RgvViewModel(MotionViewModel):
 
     @property
     def stabilization_running(self) -> bool:
-        """True if the phase or envelope worker is actively driving this plate."""
-        return self._phase_service.active_state in (WorkerStatus.RUNNING, WorkerStatus.BUSY)
+        """True if the phase or envelope worker is actively driving this plate.
+
+        Not when phase stabilization has been switched onto the ELL14: the RGV is then free.
+        """
+        svc = self._phase_service
+        if svc.mode == ControlMode.PHASE_TRACKING and svc.rotator != HwpRotator.RGV100BL:
+            return False
+        return svc.active_state in (WorkerStatus.RUNNING, WorkerStatus.BUSY)
 
     def stop_stabilization(self) -> None:
         """Stop whichever control worker is active. Call BEFORE the move, not after."""
@@ -109,13 +120,13 @@ class RgvViewModel(MotionViewModel):
             self.set_spin_rate(rev_per_s)
             return
         rate = self._clamp_rate(rev_per_s)
-        if not self._allow_move(f"spin the plate continuously at {rate:.2f} rev/s"):
+        if not self._allow_move(f"spin the plate continuously at {rate:.4g} rev/s"):
             return
         # The angle stops meaning anything the moment the plate starts turning.
         self._forget_position()
         self._handle.spin(rate * DEG_PER_REV)
-        self._msg(f"RGV100BL spinning at {rate:.2f} rev/s "
-                  f"({rate * DEG_PER_REV:.0f} deg/s, {4 * rate:.1f} Hz optical phase).",
+        self._msg(f"RGV100BL spinning at {rate:.4g} rev/s "
+                  f"({rate * DEG_PER_REV:.4g} deg/s, {4 * rate:.4g} Hz optical phase).",
                   MessageLevel.INFO)
 
     def stop_spin(self) -> None:

@@ -5,7 +5,9 @@ from typing import ClassVar
 import numpy as np
 from PySide6.QtCore import Signal
 
+from app_apps.analysis.phase_control.events import PhaseTrackingStateChanged, StabilizationRotatorChanged
 from app_apps.analysis.phase_control.subprocess.domain.mode import ControlMode
+from app_apps.io.control_readout.rotator import HwpRotator
 from app_apps.io.spectrometer.events import SpectrumAvailable, SpectrumAck
 from app_apps.io.spectrometer.spectrometer_worker_handler import SpectrometerWorkerHandle
 from base_core.framework.events import EventBus
@@ -21,6 +23,8 @@ class PhaseControlViewModel(PanelViewModel):
     CONSUMER_ID: ClassVar[str] = "phase_control_vm"
 
     spectrum_updated = Signal(object, object)  # (wavelengths: ndarray, intensities: ndarray)
+    rotator_changed = Signal(object)            # HwpRotator
+    rotator_locked_changed = Signal(bool)       # True while the loop is driving the plate
 
     def __init__(
         self,
@@ -39,6 +43,8 @@ class PhaseControlViewModel(PanelViewModel):
         self._last_spectrum: tuple[np.ndarray, np.ndarray] | None = None
         spec_handle.register_consumer(self.CONSUMER_ID)
         self._sub(SpectrumAvailable, self._on_spectrum)
+        self._sub(StabilizationRotatorChanged, self._on_rotator_changed)
+        self._sub(PhaseTrackingStateChanged, self._on_phase_state_changed)
 
     @property
     def svc(self) -> PhaseControlService:
@@ -54,6 +60,34 @@ class PhaseControlViewModel(PanelViewModel):
 
     def set_mode(self, mode: ControlMode) -> None:
         self._svc.set_mode(mode)
+
+    # -- rotator selection ------------------------------------------------------------
+    @property
+    def rotator(self) -> HwpRotator:
+        return self._svc.rotator
+
+    @property
+    def rotator_locked(self) -> bool:
+        return self._svc.rotator_locked
+
+    def set_rotator(self, rotator: HwpRotator) -> None:
+        if self._svc.rotator_locked:
+            # The control is disabled in this state; a click that slipped through is snapped
+            # back rather than switching the plate under a running loop.
+            self._msg("Stop or pause stabilization before switching the rotator.",
+                      MessageLevel.WARNING)
+            self.rotator_changed.emit(self._svc.rotator)
+            return
+        self._svc.set_rotator(rotator)
+        self._msg(f"Phase stabilization now drives the {rotator.value}.", MessageLevel.INFO)
+
+    @ui_thread
+    def _on_rotator_changed(self, event: StabilizationRotatorChanged) -> None:
+        self.rotator_changed.emit(event.rotator)
+
+    @ui_thread
+    def _on_phase_state_changed(self, _event: PhaseTrackingStateChanged) -> None:
+        self.rotator_locked_changed.emit(self._svc.rotator_locked)
 
     def save_spectrum_csv(self, path: str) -> None:
         """Write the most recently received raw spectrum to a CSV file."""

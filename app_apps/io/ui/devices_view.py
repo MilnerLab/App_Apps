@@ -45,6 +45,7 @@ from base_core.framework.di import Container
 from base_qt.ui.device_frame import DeviceFrame
 from base_qt.ui.form import DirtyFormWidget
 
+from app_apps.io.control_readout.ell14.ui.view import ELL14Controls
 from app_apps.io.control_readout.ell14.ui.view_model import ELL14RotatorViewModel
 from app_apps.io.control_readout.fms300pp.ui.view_model import Fms300ppViewModel
 from app_apps.io.control_readout.mfa_cc.ui.view_model import MfaccViewModel
@@ -77,7 +78,7 @@ _GROUPS: list[tuple[str, list[Callable[[Container, QWidget], QWidget]]]] = [
         lambda c, p: _motion("Mirror picomotors (8742)", c.get(PicomotorViewModel),
                              PicomotorControls, p),
         lambda c, p: _motion("ELL14 rotator", c.get(ELL14RotatorViewModel),
-                             MotionControls, p),
+                             ELL14Controls, p),
         # Last in its group, and with its own class: moving this plate by hand while the
         # phase loop is driving it is two controllers fighting over one optic, so every
         # move here is gated by a confirmation that stops the loop first.

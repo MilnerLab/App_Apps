@@ -39,6 +39,8 @@ from control_readout.newport_xps.rgv100bl.messages import (  # noqa: E402
 from control_readout.newport_xps.rgv100bl.rgv100bl_device import MAX_SPIN_DEG_S  # noqa: E402
 from control_readout.newport_xps.rgv100bl.rgv100bl_worker import Rgv100blWorker  # noqa: E402
 
+from app_apps.analysis.phase_control.subprocess.domain.mode import ControlMode  # noqa: E402
+from app_apps.io.control_readout.rotator import HwpRotator  # noqa: E402
 from app_apps.io.control_readout.rgv.events import (  # noqa: E402
     RequestRotateRGV,
     RgvSpinStateChanged,
@@ -67,6 +69,8 @@ class _FakePhaseService:
     def __init__(self, running: bool = True) -> None:
         self.running = running
         self.stops = 0
+        self.mode = ControlMode.PHASE_TRACKING
+        self.rotator = HwpRotator.RGV100BL
 
     @property
     def active_state(self) -> WorkerStatus:
@@ -148,14 +152,15 @@ def test_the_ceiling_is_the_stages_own() -> None:
     """2 rev/s is not a chosen number: it is the RGV100's 720 deg/s maximum."""
     check(MAX_SPIN_HZ * DEG_PER_REV == MAX_SPIN_DEG_S,
           f"{MAX_SPIN_HZ} rev/s == {MAX_SPIN_DEG_S} deg/s, the stage maximum")
-    check(MIN_SPIN_HZ * DEG_PER_REV == 180.0,
-          f"the {MIN_SPIN_HZ} rev/s floor is 180 deg/s, a quarter of the ceiling")
+    check(MIN_SPIN_HZ * DEG_PER_REV < 0.1,
+          f"the {MIN_SPIN_HZ} rev/s floor is a crawl ({MIN_SPIN_HZ * DEG_PER_REV:.3g} deg/s)")
 
 
 def test_rates_are_clamped_not_rejected() -> None:
-    check(RgvViewModel._clamp_rate(0.01) == MIN_SPIN_HZ, "a too-slow rate clamps to the floor")
+    check(RgvViewModel._clamp_rate(1e-6) == MIN_SPIN_HZ, "a too-slow rate clamps to the floor")
     check(RgvViewModel._clamp_rate(99.0) == MAX_SPIN_HZ, "a too-fast rate clamps to the ceiling")
     check(RgvViewModel._clamp_rate(1.25) == 1.25, "an in-range rate passes through")
+    check(RgvViewModel._clamp_rate(0.002) == 0.002, "a slow rate passes through")
 
 
 def test_the_commanded_velocity_is_the_rate_in_deg_per_s() -> None:
