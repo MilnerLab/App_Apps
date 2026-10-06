@@ -10,7 +10,7 @@ from app_apps.app.service_config import ServiceConfig
 from app_apps.app.shell import AppShell
 from app_apps.io.spectrometer.module import SpectrometerModule
 from app_apps.io.control_readout.module import ControlReadoutModule
-from app_apps.io.camera_vmi.module import build_camera_vmi_module
+from app_apps.io.camera_vmi.module import CameraVMIModule
 from app_apps.io.oscilloscope.module import OscilloscopeModule
 from app_apps.analysis.phase_control.module import PhaseControlModule
 from app_apps.analysis.xcorr.module import AnalysisXcorrModule
@@ -47,6 +47,7 @@ def build_container(ctx: AppContext) -> Container:
     c = Container()
     c.register_instance(AppContext, ctx)
     c.register_instance(ServiceConfig, ServiceConfig(
+        camera_vmi = False,
         spectrometer=True,
         rotator=False,
         phase_control=True,
@@ -67,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
         AppModule(),
         SpectrometerModule(),
         ControlReadoutModule(),
-        build_camera_vmi_module(),
+        CameraVMIModule(),
         OscilloscopeModule(),
         PhaseControlModule(),
         RecordingModule(),

@@ -16,7 +16,7 @@ from app_apps.io.camera_vmi.events import (
 NAME = "camera_vmi"
 
 
-def build_camera_vmi_module() -> CameraModule:
+def CameraVMIModule() -> CameraModule:
     """Build the CameraModule instance for the Blackfly S VMI camera."""
     return CameraModule(
         name=NAME,
