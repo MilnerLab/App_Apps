@@ -15,11 +15,12 @@ class CameraModule(BaseModule):
     """
     Generic, directly instantiable module for a camera device.
 
-    Not subclassed per vendor -- every vendor difference (hardware driver,
-    subprocess entry point, domain event classes, default config) is supplied
-    as a constructor argument. A vendor's app_apps/io/camera_<vendor> package
-    only needs an events.py and a small factory function that builds one of
-    these (see app_apps/io/camera_vmi/module.py).
+    Every device difference (hardware driver, subprocess entry point, domain
+    event classes, default config) is supplied as a constructor argument. A
+    vendor's app_apps/io/camera_<vendor> package needs an events.py and either
+    a small factory function that builds one of these or, if it registers its
+    own views, a subclass that only fixes the arguments and extends register()
+    (see app_apps/io/camera_vmi/module.py).
     """
 
     def __init__(
