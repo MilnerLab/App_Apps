@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
 import pyqtgraph as pg
 
-from ion_detection import threshold_and_extract_hits
+from app_apps.analysis.ion_detection import threshold_and_extract_hits
 
 
 

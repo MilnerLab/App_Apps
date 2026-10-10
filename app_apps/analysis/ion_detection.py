@@ -50,7 +50,7 @@ def threshold_and_extract_hits(
     composit : np.ndarray | None
         Optional uint8 accumulator image of shape (H,W). If None, a new one is created.
 
-    Returns
+    Returnsi
     -------
     frame_threshold : np.ndarray
         Thresholded binary image (uint8, 0/255).

@@ -60,3 +60,22 @@ class CameraVMIModule(CameraModule):
             handle,
         ))
         c.register_factory(CameraVmiView, lambda c: CameraVmiView(c.get(CameraVmiViewModel)))
+
+        from app_apps.io.camera_vmi.ion_settings import IonSettings
+        from app_apps.io.camera_vmi.ui.ion_view import IonView
+        from app_apps.io.camera_vmi.ui.ion_view_model import IonViewModel
+
+        # One settings instance for the module's lifetime, so the ion view keeps its
+        # settings across close/reopen even though its VM is rebuilt each time.
+        ion_settings = IonSettings(
+            center_x=self._config.width / 2,
+            center_y=self._config.height / 2,
+        )
+        c.register_instance(IonSettings, ion_settings)
+        c.register_factory(IonViewModel, lambda c: IonViewModel(
+            ctx.event_bus,
+            c.get(QtDispatcher),
+            handle,
+            ion_settings,
+        ))
+        c.register_factory(IonView, lambda c: IonView(c.get(IonViewModel)))

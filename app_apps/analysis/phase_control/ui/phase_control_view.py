@@ -31,7 +31,8 @@ from app_apps.io.control_readout.rotator import HwpRotator
 # be picked out of the traces it is drawn among. Cosmetic, so it stays screen pixels and
 # does not scale with the wildly mismatched nm/counts axes.
 POST_WIDTH = 3.0
-
+AXIS_LABEL_SIZE = 50
+AXIS_TITLE_SIZE = 50
 
 class PhaseControlView(Panel):
     def __init__(self, vm: PhaseControlViewModel, parent: QWidget | None = None) -> None:
@@ -39,10 +40,10 @@ class PhaseControlView(Panel):
 
     def setup(self) -> None:
         # --- Plot ---
-        self._plot = pg.PlotWidget()
+        self._plot = pg.PlotWidget(size=AXIS_LABEL_SIZE)
         self._plot.showGrid(x=True, y=True, alpha=0.3)
-        self._plot.setLabel("bottom", "Wavelength (nm)")
-        self._plot.setLabel("left", "Intensity")
+        self._plot.setLabel("bottom", "Wavelength (nm)",size=AXIS_TITLE_SIZE)
+        self._plot.setLabel("left", "Intensity",size=AXIS_TITLE_SIZE)
         self._plot.setMinimumHeight(220)
         # (200, 200, 200) is pyqtgraph's own default plot pen, kept explicit only so
         # _set_post_pens has an object to restore after the purple frame.

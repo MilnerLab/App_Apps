@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtGui import QPen
-from PySide6.QtWidgets import QWidget
+from PySide6.QtGui import QPen, QColor
+from PySide6.QtWidgets import QHBoxLayout, QPushButton, QWidget
 
 from base_qt.ui.panel import Panel
 from app_apps.io.camera_vmi.ui.camera_vmi_view_model import CameraVmiViewModel
+from app_apps.io.camera_vmi.ui.config_view import CameraConfigView
 
 
 class CameraVmiView(Panel):
@@ -20,8 +21,10 @@ class CameraVmiView(Panel):
         self._vb.setAspectLocked(True)
 
         #Testing out the pyqtgraph plots and labels
-        qaxis = pg.AxisItem('left',pen=QPen())
-        self._vb.addItem(qaxis)
+        qaxis = pg.AxisItem('left',pen=QPen(QColor(200, 200, 200)))
+        qlabel = pg.LabelItem('label',size='50pt')
+        self._glw.addItem(qaxis)
+        self._glw.addItem(qlabel)
         # Row-major per item rather than via pg.setConfigOptions: that option is global and
         # would flip every other image in the app.
         self._img_item = pg.ImageItem(axisOrder="row-major")
@@ -30,6 +33,15 @@ class CameraVmiView(Panel):
         self._vb.addItem(self._img_item)
 
         self.body_layout.addWidget(self._glw, stretch=1)
+
+        # Config view -- parented to this panel so it floats within it
+        config_view = CameraConfigView(self.vm, parent=self)
+        controls = QHBoxLayout()
+        controls.addStretch(1)
+        self._config_btn = QPushButton("Config")
+        self._config_btn.clicked.connect(config_view.open)
+        controls.addWidget(self._config_btn)
+        self.body_layout.addLayout(controls)
 
         self._connect(self.vm.frame_updated, self._on_frame_updated)
 

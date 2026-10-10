@@ -5,17 +5,21 @@ from typing import ClassVar
 from PySide6.QtCore import Signal
 
 from app_apps.io.camera.camera_worker_handler import CameraWorkerHandle
-from app_apps.io.camera_vmi.events import VmiFrameAck, VmiFrameAvailable
+from app_apps.io.camera_vmi.events import VmiCameraConfigChanged, VmiFrameAck, VmiFrameAvailable
 from base_core.framework.events import EventBus
+
 from base_qt.app.dispatcher import QtDispatcher
 from base_qt.ui.app_message import MessageLevel
 from base_qt.ui.panel_view_model import PanelViewModel, ui_thread
+
+from camera.base.config import CameraConfig
 
 
 class CameraVmiViewModel(PanelViewModel):
     CONSUMER_ID: ClassVar[str] = "camera_vmi_vm"
 
     frame_updated = Signal(object)  # frame: ndarray, (height, width)
+    config_updated = Signal()       # config applied (here or elsewhere); views reload
 
     def __init__(
         self,
@@ -27,6 +31,21 @@ class CameraVmiViewModel(PanelViewModel):
         self._camera_handle = camera_handle
         camera_handle.register_consumer(self.CONSUMER_ID)
         self._sub(VmiFrameAvailable, self.on_frame)
+        self._sub(VmiCameraConfigChanged, self._on_config_changed)
+
+    @property
+    def config(self) -> CameraConfig:
+        """The handle's config object itself: forms edit it in place, then apply_config()."""
+        return self._camera_handle.config
+
+    def apply_config(self) -> None:
+        # Published rather than calling handle.set_config(): the handle subscribes to this
+        # and pushes the config, and every other view of it reloads off the same event.
+        self._bus.publish(VmiCameraConfigChanged())
+
+    @ui_thread
+    def _on_config_changed(self, _: VmiCameraConfigChanged) -> None:
+        self.config_updated.emit()
 
     def on_close(self) -> None:
         self._camera_handle.unregister_consumer(self.CONSUMER_ID)

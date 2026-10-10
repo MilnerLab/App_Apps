@@ -3,7 +3,6 @@ from __future__ import annotations
 from base_core.framework.events.event_bus import EventBus
 from base_core.ipc.subprocess_service import SubprocessService
 
-
 class CameraService(SubprocessService):
     """
     Main-process service for a camera subprocess.
@@ -22,7 +21,8 @@ class CameraService(SubprocessService):
     ) -> None:
         super().__init__(bus, python_exe)
         self._entry_module_path = entry_module
-
+        
+        
     @property
     def _entry_module(self) -> str:
         return self._entry_module_path
