@@ -8,6 +8,7 @@ from PySide6.QtCore import QRectF
 from PySide6.QtGui import QColor, QPen
 from PySide6.QtWidgets import QGraphicsEllipseItem, QHBoxLayout, QLabel, QPushButton, QWidget
 
+from base_core.lab_specifics.base_models import Measurement
 from base_core.math.models import Range
 from base_qt.ui.panel import Panel
 from base_qt.ui.segmented_control import SegmentedControl
@@ -63,6 +64,8 @@ class IonView(Panel):
         controls.addWidget(self._clear_btn)
         self._stats = QLabel("–")
         controls.addWidget(self._stats, stretch=1)
+        self._c2t = QLabel("⟨cos²θ⟩ = –")
+        controls.addWidget(self._c2t)
         self._config_btn = QPushButton("Config")
         controls.addWidget(self._config_btn)
         self.body_layout.addLayout(controls)
@@ -73,6 +76,7 @@ class IonView(Panel):
         self._connect(self.vm.points_updated, self._on_points)
         self._connect(self.vm.image_updated, self._on_image)
         self._connect(self.vm.stats_updated, self._on_stats)
+        self._connect(self.vm.c2t_updated, self._on_c2t)
         self._connect(self.vm.config_updated, self._on_config_updated)
 
         self._on_config_updated()
@@ -90,11 +94,14 @@ class IonView(Panel):
         self._img_item.setRect(QRectF(extent.min, extent.min, span, span))
 
     def _on_stats(self, result: IonFrameResult) -> None:
-        text = f"{result.n_detected} detected, {len(result.points)} in zone"
-        if result.c2t is not None:
-            err = "" if math.isnan(result.c2t.error) else f" ± {result.c2t.error:.3f}"
-            text += f"   ⟨cos²θ⟩ = {result.c2t.value:.3f}{err}"
-        self._stats.setText(text)
+        n, target = self.vm.batch_progress
+        self._stats.setText(
+            f"{result.n_detected} detected, {len(result.points)} in zone   batch {n}/{target}"
+        )
+
+    def _on_c2t(self, c2t: Measurement, n_ions: int) -> None:
+        err = "" if math.isnan(c2t.error) else f" ± {c2t.error:.3f}"
+        self._c2t.setText(f"⟨cos²θ⟩ = {c2t.value:.3f}{err}  ({n_ions} ions)")
 
     def _on_config_updated(self) -> None:
         zone = self.vm.settings.analysis_zone

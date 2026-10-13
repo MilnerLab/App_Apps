@@ -21,7 +21,6 @@ class IonFrameResult:
     item_id: int
     n_detected: int        # hits found in the frame, before the analysis-zone cut
     points: MarkedPoints   # transformed (centered, scaled, rotated) and zone-filtered
-    c2t: Measurement | None  # <cos^2 theta> of points; None when the zone is empty
 
 
 def detect_ions(
@@ -45,8 +44,51 @@ def detect_ions(
         stage_position=analysis.delay_center,
         points=raw,
     ).get_points_after_config(analysis)
-    c2t = IonData.avg_c2t(points) if len(points) else None
-    return IonFrameResult(item_id=item_id, n_detected=n, points=points, c2t=c2t)
+    return IonFrameResult(item_id=item_id, n_detected=n, points=points)
+
+
+class BatchIons:
+    """Collects consecutive frames' in-zone ions until target_ions, then yields <cos^2 theta>.
+
+    One avg_c2t over the concatenated batch rather than an average of per-frame values:
+    the same cost, but every ion weighs the same and the SEM comes out right. Frames
+    are kept whole, so a batch can end slightly above the target.
+    """
+
+    def __init__(self, target_ions: int) -> None:
+        self.target_ions = max(1, target_ions)
+        self._frames: list[MarkedPoints] = []
+        self._n = 0
+
+    @property
+    def n_ions(self) -> int:
+        return self._n
+
+    @property
+    def frames(self) -> tuple[MarkedPoints, ...]:
+        """The frames of the batch in progress."""
+        return tuple(self._frames)
+
+    def add(self, points: MarkedPoints) -> tuple[Measurement, MarkedPoints] | None:
+        """Append one frame's points; on reaching the target return (c2t, batch) and reset."""
+        if not len(points):
+            return None
+        # A list, concatenated once: appending to one array would copy it every frame.
+        self._frames.append(points)
+        self._n += len(points)
+        if self._n < self.target_ions:
+            return None
+        batch = MarkedPoints(
+            np.concatenate([p.x for p in self._frames]),
+            np.concatenate([p.y for p in self._frames]),
+            np.concatenate([p.marker for p in self._frames]),
+        )
+        self.reset()
+        return IonData.avg_c2t(batch), batch
+
+    def reset(self) -> None:
+        self._frames = []
+        self._n = 0
 
 
 class IonDetector:

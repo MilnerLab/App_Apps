@@ -33,7 +33,7 @@ class IonSettings:
     # requires the field.
     delay_center: Length = field(default_factory=lambda: Length(0, Prefix.MILLI))
 
-    rolling_frames: int = 50
+    c2t_target_ions: int = 1000  # in-zone ions per <cos^2 theta> batch
 
     def snapshot(self) -> tuple[ContourConfig, IonDataAnalysisConfig]:
         """Independent copies for the detector thread, so later form edits can't race it."""

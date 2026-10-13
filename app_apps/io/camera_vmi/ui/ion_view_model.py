@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import deque
 from enum import Enum
 from typing import ClassVar
 
@@ -15,13 +14,13 @@ from base_qt.ui.panel_view_model import PanelViewModel, ui_thread
 
 from app_apps.io.camera.camera_worker_handler import CameraWorkerHandle
 from app_apps.io.camera_vmi.events import VmiFrameAck, VmiFrameAvailable
-from app_apps.io.camera_vmi.ion_detector import IonDetector, IonFrameResult
+from app_apps.io.camera_vmi.ion_detector import BatchIons, IonDetector, IonFrameResult
 from app_apps.io.camera_vmi.ion_settings import IonSettings
 
 
 class IonDisplayMode(Enum):
     CURRENT = "current"          # scatter of the latest frame's ions
-    ROLLING = "rolling"          # scatter of the last rolling_frames frames
+    ROLLING = "rolling"          # scatter of the <cos^2 theta> batch being collected
     ACCUMULATED = "accumulated"  # 2D histogram of every ion since the last clear
 
 
@@ -39,6 +38,7 @@ class IonViewModel(PanelViewModel):
     points_updated = Signal(object, object)  # x, y: ndarrays to scatter
     image_updated = Signal(object, object)   # histogram (x-major), extent: Range[float]
     stats_updated = Signal(object)           # IonFrameResult of the latest frame
+    c2t_updated = Signal(object, int)        # Measurement, n_ions of a completed batch
     config_updated = Signal()                # settings applied; views reload
 
     def __init__(
@@ -53,9 +53,12 @@ class IonViewModel(PanelViewModel):
         self._settings = settings
         self._mode = IonDisplayMode.CURRENT
         self._last: Points | None = None
-        self._rolling: deque[Points] = deque(maxlen=settings.rolling_frames)
         self._hist: np.ndarray | None = None
         self._hist_extent = settings.analysis_zone.max
+        self._batch = BatchIons(settings.c2t_target_ions)
+        # What ROLLING shows: the batch in progress, or a just-finished batch until the
+        # next frame starts a new one.
+        self._rolling: tuple[Points, ...] = ()
 
         self._detector = IonDetector(settings.snapshot(), self._on_result)
         camera_handle.register_consumer(self.CONSUMER_ID)
@@ -70,23 +73,30 @@ class IonViewModel(PanelViewModel):
     def mode(self) -> IonDisplayMode:
         return self._mode
 
+    @property
+    def batch_progress(self) -> tuple[int, int]:
+        """(ions collected, target) of the <cos^2 theta> batch in progress."""
+        return self._batch.n_ions, self._batch.target_ions
+
     def set_mode(self, mode: IonDisplayMode) -> None:
         self._mode = mode
         self._emit_display()
 
     def clear(self) -> None:
         self._last = None
-        self._rolling.clear()
+        self._rolling = ()
         self._hist = None
+        self._batch.reset()
         self._emit_display()
 
     def apply_config(self) -> None:
         self._detector.set_params(self._settings.snapshot())
         # Old history is in the previous coordinate frame -- drop it rather than mix frames.
-        self._rolling = deque(maxlen=self._settings.rolling_frames)
+        self._rolling = ()
         self._hist = None
         self._hist_extent = self._settings.analysis_zone.max
         self._last = None
+        self._batch = BatchIons(self._settings.c2t_target_ions)
         self.config_updated.emit()
         self._emit_display()
 
@@ -117,8 +127,14 @@ class IonViewModel(PanelViewModel):
     def _on_result(self, result: IonFrameResult) -> None:
         pts = result.points
         self._last = pts
-        self._rolling.append(pts)
         self._accumulate(pts)
+        done = self._batch.add(pts)
+        if done is None:
+            self._rolling = self._batch.frames
+        else:
+            c2t, batch = done
+            self._rolling = (batch,)
+            self.c2t_updated.emit(c2t, len(batch))
         self.stats_updated.emit(result)
         self._emit_display()
 

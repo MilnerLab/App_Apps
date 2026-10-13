@@ -43,7 +43,7 @@ class IonConfigForm(DirtyFormWidget):
             "Analysis zone (px)",
             FloatSpec("", 0.0, 10_000.0, decimals=1, step=1.0),
         ),
-        "rolling_frames":      IntSpec("Rolling window (frames)", 1, 100_000),
+        "c2t_target_ions":     IntSpec("⟨cos²θ⟩ batch (ions)", 1, 10_000_000),
     }
     _groups = [
         ("Detection", [
@@ -53,8 +53,8 @@ class IonConfigForm(DirtyFormWidget):
         ("Transform", [
             "center_x", "center_y", "angle", "transform_parameter", "analysis_zone",
         ]),
-        ("Display", [
-            "rolling_frames",
+        ("Analysis", [
+            "c2t_target_ions",
         ]),
     ]
 

@@ -148,8 +148,6 @@ def threshold_and_extract_hits(
         composit[cy, cx] = np.uint8(int(composit[cy, cx]) + 1)
 
         # C++: roundness = (perimeter^2)/area - 4*pi
-        # (Your code uses ~3141.59265359 which looks like 1000*pi; assume you intended pi.)
-        # We'll use pi here.
         if area > 0:
             roundness = (perimeter * perimeter) / area - 4.0 * np.pi
         else:
