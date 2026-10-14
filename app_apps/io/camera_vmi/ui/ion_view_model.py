@@ -4,6 +4,7 @@ from enum import Enum
 from typing import ClassVar
 
 import numpy as np
+import csv
 from PySide6.QtCore import Signal
 
 from base_core.framework.events import EventBus
@@ -15,8 +16,9 @@ from base_qt.ui.panel_view_model import PanelViewModel, ui_thread
 from app_apps.io.camera.camera_worker_handler import CameraWorkerHandle
 from app_apps.io.camera_vmi.events import VmiFrameAck, VmiFrameAvailable
 from app_apps.io.camera_vmi.ion_detector import BatchIons, IonDetector, IonFrameResult
-from app_apps.io.camera_vmi.ion_settings import IonSettings
+from app_apps.io.camera_vmi.coordinates_vmi import CoordinatesVMI
 
+detection_output = "C:\\Git\\MilnerLab\\App_Apps\\test\\Camera\\detected_positions.csv"
 
 class IonDisplayMode(Enum):
     CURRENT = "current"          # scatter of the latest frame's ions
@@ -46,7 +48,7 @@ class IonViewModel(PanelViewModel):
         bus: EventBus,
         dispatcher: QtDispatcher,
         camera_handle: CameraWorkerHandle,
-        settings: IonSettings,
+        settings: CoordinatesVMI,
     ) -> None:
         super().__init__(bus, dispatcher)
         self._camera_handle = camera_handle
@@ -65,7 +67,7 @@ class IonViewModel(PanelViewModel):
         self._sub(VmiFrameAvailable, self._on_frame)
 
     @property
-    def settings(self) -> IonSettings:
+    def settings(self) -> CoordinatesVMI:
         """The settings object itself: forms edit it in place, then apply_config()."""
         return self._settings
 
@@ -126,6 +128,13 @@ class IonViewModel(PanelViewModel):
     @ui_thread
     def _on_result(self, result: IonFrameResult) -> None:
         pts = result.points
+        id = result.item_id
+        with open(detection_output,'a',newline='') as csvfile:
+            print(float(pts.x[0]))
+            w = csv.writer(csvfile,delimiter=',')
+            for (x,y) in zip(pts.x,pts.y):
+                w.writerow((float(x),float(y),id))
+        
         self._last = pts
         self._accumulate(pts)
         done = self._batch.add(pts)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from multiprocessing.shared_memory import SharedMemory
-from typing import Generic, TypeVar
+from typing import Callable, Generic, TypeVar
 
 from base_core.framework.events.event_bus import EventBus
 from base_core.framework.shm.writer_worker_handle import WriterWorkerHandle
@@ -61,6 +61,7 @@ class CameraWorkerHandle(WriterWorkerHandle[CameraBuffer, TAvailable, TAck], Gen
         )
         self._config = config
         self._config_changed_cls = config_changed_cls
+        self._rebuild_buffer: Callable[[], None] | None = None
 
     @property
     def config(self) -> CameraConfig:
@@ -83,17 +84,31 @@ class CameraWorkerHandle(WriterWorkerHandle[CameraBuffer, TAvailable, TAck], Gen
     def subscribe(self) -> None:
         self._subscribe(self._config_changed_cls, self._on_config_changed)
 
+    def set_buffer_rebuilder(self, rebuild: Callable[[], None]) -> None:
+        """Install what start() calls when the config no longer fits the buffer.
+
+        The rebuild belongs to whoever owns the service (CameraModule): the buffer is
+        created on bind, so a new shape means stopping and restarting the subprocess.
+        """
+        self._rebuild_buffer = rebuild
+
+    def _set_spec(self, spec: CameraMemorySpec) -> None:
+        """Swap the buffer shape. Only while unbound; the next _bind() creates it."""
+        assert self._writer_buffer is None, "spec changed while the buffer exists"
+        self._spec = spec
+
     def start(self):
         """Apply the config, and start only once it has actually been applied.
 
-        StartWorker is handled on the subprocess POLL thread, while
-        SetCameraConfig is dispatched onto the worker thread -- so despite
-        going down the pipe in order, _start() could run first, against
-        whatever config the worker was still holding (the previous one, or on
-        a fresh process, None). Chaining start off the reply makes the order
-        real rather than likely -- the same race spectrometer's handle guards
-        against.
+        If width/height/pixel_format were changed since the buffer was made, the
+        subprocess is restarted with a matching buffer first, which takes a few seconds.
         """
+        if not self._spec.matches(self._config):
+            if self._rebuild_buffer is None:
+                log.error("Camera %r: not starting -- the config's frame shape no longer "
+                          "matches the buffer and nothing can rebuild it", self._worker_id)
+                return
+            self._rebuild_buffer()
         self._request(
             SetCameraConfig(config=self._config),
             lambda _reply: super(CameraWorkerHandle, self).start(),

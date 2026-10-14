@@ -49,11 +49,7 @@ class CameraModule(BaseModule):
         self._handle: CameraWorkerHandle | None = None
 
     def register(self, c: Container, ctx: AppContext) -> None:
-        spec = CameraMemorySpec(
-            self._buffer_name,
-            width=self._config.width,
-            height=self._config.height,
-        )
+        spec = CameraMemorySpec.from_config(self._buffer_name, self._config)
 
         self._service = CameraService(
             bus=ctx.event_bus,
@@ -73,6 +69,7 @@ class CameraModule(BaseModule):
         )
         self._service.add_buffer(CameraBuffer, spec)
         self._service.add_handle(self._handle)
+        self._handle.set_buffer_rebuilder(self._rebuild_buffer)
 
         # NOTE: registering by shared type only works while a single camera
         # module is active -- with two camera instances (e.g. camera_vmi and
@@ -88,6 +85,19 @@ class CameraModule(BaseModule):
         self._service.start()
         if ctx.status == AppStatus.CONNECTED:
             self._handle.start()
+
+    def _rebuild_buffer(self) -> None:
+        """Restart the subprocess with a buffer sized for the current config.
+
+        Called by the handle's start() when width/height/pixel_format no longer fit.
+        The worker is stopped at this point (those fields are only editable then), so
+        nothing is lost; registered consumers carry over because the handle keeps them.
+        """
+        spec = CameraMemorySpec.from_config(self._buffer_name, self._config)
+        self._service.stop()
+        self._handle._set_spec(spec)
+        self._service.replace_buffer(CameraBuffer, spec)
+        self._service.start()
 
     def on_shutdown(self, c: Container, ctx: AppContext) -> None:
         self._handle.pause()

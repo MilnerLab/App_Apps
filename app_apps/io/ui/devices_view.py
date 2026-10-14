@@ -62,8 +62,9 @@ from app_apps.io.spectrometer.ui.spectrometer_view_model import SpectrometerView
 from app_apps.recording.ui.view_model import SpectrumRecordingViewModel
 
 #: (tab label, [block builders]) in tab order. Each builder takes the container and the
-#: page widget and returns the block. Adding a device is one entry here and nothing else.
-_GROUPS: list[tuple[str, list[Callable[[Container, QWidget], QWidget]]]] = [
+#: page widget and returns the block, or None to leave it out. Adding a device is one entry
+#: here and nothing else.
+_GROUPS: list[tuple[str, list[Callable[[Container, QWidget], QWidget | None]]]] = [
     ("Acquisition", [
         # No footer: SpectrometerControls places its own Apply, above its Record box.
         lambda c, p: _block("Spectrometer", c.get(SpectrometerViewModel),
@@ -159,13 +160,15 @@ class DevicesView(QWidget):
         outer.addWidget(self._stack, stretch=1)
 
     def _build_page(self, container: Container,
-                    builders: list[Callable[[Container, QWidget], QWidget]]) -> QScrollArea:
+                    builders: list[Callable[[Container, QWidget], QWidget | None]]) -> QScrollArea:
         body = QWidget()
         stack = QVBoxLayout(body)
         stack.setContentsMargins(8, 8, 8, 8)
         stack.setSpacing(10)
         for build in builders:
-            stack.addWidget(build(container, body))
+            block = build(container, body)
+            if block is not None:
+                stack.addWidget(block)
         # Keeps the blocks at their natural height and pinned to the top when the group
         # is shorter than the dock, instead of stretching them to fill it.
         stack.addStretch(1)

@@ -13,7 +13,7 @@ from app_apps.analysis.ion_detection import ContourConfig
 
 
 @dataclass
-class IonSettings:
+class CoordinatesVMI:
     """Mutable, form-editable settings behind the ion view.
 
     IonDataAnalysisConfig is frozen (and slotted), so a DirtyFormWidget -- which writes

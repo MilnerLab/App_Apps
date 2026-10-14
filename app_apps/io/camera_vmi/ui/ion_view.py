@@ -96,7 +96,7 @@ class IonView(Panel):
     def _on_stats(self, result: IonFrameResult) -> None:
         n, target = self.vm.batch_progress
         self._stats.setText(
-            f"{result.n_detected} detected, {len(result.points)} in zone   batch {n}/{target}"
+            f"{result.n_detected} total ion detected, {len(result.points)} in ring, batch {n}/{target}"
         )
 
     def _on_c2t(self, c2t: Measurement, n_ions: int) -> None:

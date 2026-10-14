@@ -3,11 +3,11 @@ from __future__ import annotations
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtGui import QPen, QColor
-from PySide6.QtWidgets import QHBoxLayout, QPushButton, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QWidget
 
 from base_qt.ui.panel import Panel
 from app_apps.io.camera_vmi.ui.camera_vmi_view_model import CameraVmiViewModel
-from app_apps.io.camera_vmi.ui.config_view import CameraConfigView
+from app_apps.io.camera_vmi.ui.config_view import CameraConfigForm
 
 
 class CameraVmiView(Panel):
@@ -34,13 +34,13 @@ class CameraVmiView(Panel):
 
         self.body_layout.addWidget(self._glw, stretch=1)
 
-        # Config view -- parented to this panel so it floats within it
-        config_view = CameraConfigView(self.vm, parent=self)
+        # Exposure and gain inline under the image, since they are what gets adjusted
+        # while watching it. Start/stop and the rest live in the Devices-menu popout and on
+        # the Devices page; all of them edit the handle's one config object.
+        self._config_form = CameraConfigForm(self.vm, parent=self)
         controls = QHBoxLayout()
-        controls.addStretch(1)
-        self._config_btn = QPushButton("Config")
-        self._config_btn.clicked.connect(config_view.open)
-        controls.addWidget(self._config_btn)
+        controls.addWidget(self._config_form, stretch=1)
+        controls.addWidget(self._config_form.apply_button)
         self.body_layout.addLayout(controls)
 
         self._connect(self.vm.frame_updated, self._on_frame_updated)

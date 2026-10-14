@@ -47,7 +47,7 @@ def build_container(ctx: AppContext) -> Container:
     c = Container()
     c.register_instance(AppContext, ctx)
     c.register_instance(ServiceConfig, ServiceConfig(
-        camera_vmi = False,
+        camera_vmi = True,
         spectrometer=True,
         rotator=False,
         phase_control=True,
@@ -68,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
         AppModule(),
         SpectrometerModule(),
         ControlReadoutModule(),
-        #CameraVMIModule(),
+        CameraVMIModule(),
         OscilloscopeModule(),
         PhaseControlModule(),
         RecordingModule(),

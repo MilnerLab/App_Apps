@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app_apps.io.camera_vmi.coordinates_vmi import CoordinatesVMI
 from base_core.framework.app.context import AppContext
 from base_core.framework.di import Container
 from base_core.quantities.enums import Prefix
@@ -31,11 +32,11 @@ class CameraVMIModule(CameraModule):
             entry_module="camera.vmi.camera_process",
             buffer_name=f"{NAME}_frame",
             config=CameraConfig(
-                width=1224,
-                height=1024,
+                width=720,
+                height=540,
                 pixel_format="Mono8",
-                exposure_time=Time(2000, Prefix.MICRO),
-                gain=25.0,
+                exposure_time=Time(10, Prefix.MILLI),
+                gain=40,
             ),
             frame_available_cls=VmiFrameAvailable,
             frame_ack_cls=VmiFrameAck,
@@ -61,21 +62,35 @@ class CameraVMIModule(CameraModule):
         ))
         c.register_factory(CameraVmiView, lambda c: CameraVmiView(c.get(CameraVmiViewModel)))
 
-        from app_apps.io.camera_vmi.ion_settings import IonSettings
+        from app_apps.io.camera_vmi.ui.camera_vmi_controls_view_model import CameraVmiControlsViewModel
+        from app_apps.io.camera_vmi.ui.config_view import CameraVmiDeviceView
+
+        # Singleton, like OscilloscopeViewModel: the Devices page holds it for the life of
+        # the app, and it is not a frame consumer, so it never needs tearing down.
+        c.register_singleton(CameraVmiControlsViewModel, lambda c: CameraVmiControlsViewModel(
+            ctx.event_bus,
+            c.get(QtDispatcher),
+            handle,
+        ))
+        c.register_singleton(CameraVmiDeviceView, lambda c: CameraVmiDeviceView(
+            c.get(CameraVmiControlsViewModel), parent=None
+        ))
+
+        from app_apps.io.camera_vmi.coordinates_vmi import CoordinatesVMI
         from app_apps.io.camera_vmi.ui.ion_view import IonView
         from app_apps.io.camera_vmi.ui.ion_view_model import IonViewModel
 
         # One settings instance for the module's lifetime, so the ion view keeps its
         # settings across close/reopen even though its VM is rebuilt each time.
-        ion_settings = IonSettings(
+        coords = CoordinatesVMI(
             center_x=self._config.width / 2,
             center_y=self._config.height / 2,
         )
-        c.register_instance(IonSettings, ion_settings)
+        c.register_instance(CoordinatesVMI, coords)
         c.register_factory(IonViewModel, lambda c: IonViewModel(
             ctx.event_bus,
             c.get(QtDispatcher),
             handle,
-            ion_settings,
+            coords,
         ))
         c.register_factory(IonView, lambda c: IonView(c.get(IonViewModel)))

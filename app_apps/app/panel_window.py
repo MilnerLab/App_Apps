@@ -24,6 +24,7 @@ class AppPanelWindow(PanelWindow):
         from app_apps.analysis.phase_control.ui.phase_control_view import PhaseControlView
         from app_apps.analysis.xcorr.ui.xcorr_display_view import XcorrDisplayView
         from app_apps.io.ui.devices_view import DevicesView
+        from app_apps.io.camera_vmi.ui.camera_vmi_view import CameraVmiView
 
         c = container
         # Both panels go into the *same* dock area and are then tabbed on top of each
@@ -50,6 +51,15 @@ class AppPanelWindow(PanelWindow):
         )
         self.tabifyDockWidget(phase, xcorr)
         self.tabifyDockWidget(xcorr, devices)
+        # Live camera image with its exposure/gain. Only when the camera module is loaded,
+        # since the dock's factory would otherwise fail the first time it is shown.
+        if c.is_registered(CameraVmiView):
+            camera = self.register_panel(
+                "VMI Camera",
+                lambda: c.get(CameraVmiView),
+                Qt.DockWidgetArea.LeftDockWidgetArea,
+            )
+            self.tabifyDockWidget(devices, camera)
         # Tabs on top so it is obvious there is more than one panel stacked here (the
         # default bottom tab bar is easy to miss).
         self.setTabPosition(Qt.DockWidgetArea.LeftDockWidgetArea, QTabWidget.TabPosition.North)

@@ -26,7 +26,7 @@ from base_qt.ui.apply import install_ui  # noqa: E402
 
 from app_apps.analysis.ion_detection import ContourConfig  # noqa: E402
 from app_apps.io.camera_vmi.events import VmiFrameAvailable  # noqa: E402
-from app_apps.io.camera_vmi.ion_settings import IonSettings  # noqa: E402
+from app_apps.io.camera_vmi.coordinates_vmi import IonSettings  # noqa: E402
 from app_apps.io.camera_vmi.ui.ion_view import IonView  # noqa: E402
 from app_apps.io.camera_vmi.ui.ion_view_model import IonViewModel  # noqa: E402
 from base_core.math.models import Range  # noqa: E402
@@ -52,7 +52,7 @@ def main() -> int:
         contour=ContourConfig(threshold_value=100, contour_max_area=20),
         center_x=WIDTH / 2,
         center_y=HEIGHT / 2,
-        analysis_zone=Range(100.0, 500.0),
+        analysis_zone=Range(0.0, 500.0),
     )
     vm = IonViewModel(bus, QtDispatcher(), handle, settings)  # type: ignore[arg-type]
     view = IonView(vm)
@@ -64,7 +64,7 @@ def main() -> int:
     def publish_frame() -> None:
         nonlocal item_id
         item_id += 1
-        handle.buffer.latest = _synthetic_frame()
+        handle.buffer.latest = _synthetic_frame(item_id)
         bus.publish(VmiFrameAvailable(slot=item_id % 2, item_id=item_id, timestamp_ns=time.time_ns()))
 
     timer = QTimer()

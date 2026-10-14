@@ -14,13 +14,13 @@ class Hit:
 
 @dataclass
 class ContourConfig:
-    adaptive: bool = False
+    adaptive: bool = True
     threshold_value: int = 1            # used if adaptive == False
-    adaptive_blocksize: int = 3            # must be odd >= 3
-    adaptive_shift: float = 3.0             # C in OpenCV (C is subtracted). C++ uses -shift.
+    adaptive_blocksize: int = 12            # must be odd >= 3
+    adaptive_shift: float = 3.0             # C in OpenCV (C is subtracted). C++ uses -shift. Set   it to a few times the background noise.
     contour_min_size: int = 1              # minimum number of points in contour
     contour_min_area: int = 0              # inclusive lower area cut
-    contour_max_area: int = 3      # inclusive upper area cut
+    contour_max_area: int = 30      # inclusive upper area cut
 
 
 def threshold_and_extract_hits(
