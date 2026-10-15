@@ -18,7 +18,7 @@ from app_apps.io.camera_vmi.events import VmiFrameAck, VmiFrameAvailable
 from app_apps.io.camera_vmi.ion_detector import BatchIons, IonDetector, IonFrameResult
 from app_apps.io.camera_vmi.coordinates_vmi import CoordinatesVMI
 
-detection_output = "C:\\Git\\MilnerLab\\App_Apps\\test\\Camera\\detected_positions.csv"
+#detection_output = "C:\\Git\\MilnerLab\\App_Apps\\test\\Camera\\detected_positions.csv"
 
 class IonDisplayMode(Enum):
     CURRENT = "current"          # scatter of the latest frame's ions
@@ -129,11 +129,11 @@ class IonViewModel(PanelViewModel):
     def _on_result(self, result: IonFrameResult) -> None:
         pts = result.points
         id = result.item_id
-        with open(detection_output,'a',newline='') as csvfile:
-            print(float(pts.x[0]))
-            w = csv.writer(csvfile,delimiter=',')
-            for (x,y) in zip(pts.x,pts.y):
-                w.writerow((float(x),float(y),id))
+        # with open(detection_output,'a',newline='') as csvfile:
+        #     print(float(pts.x[0]))
+        #     w = csv.writer(csvfile,delimiter=',')
+        #     for (x,y) in zip(pts.x,pts.y):
+        #         w.writerow((float(x),float(y),id))
         
         self._last = pts
         self._accumulate(pts)
